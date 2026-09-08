@@ -1396,6 +1396,252 @@ void WarnUnknownLists(
 	return result;
 }
 
+// One duration key, read the way [peek] auto_off and [recent]
+// stay_visible_after_close already are - the same spellings, the same parser,
+// and a warning that keeps the default rather than guessing at a number.
+[[nodiscard]] int ReadSeconds(
+		const toml::table &table,
+		std::string_view key,
+		const QString &context,
+		int fallback,
+		std::vector<QString> &warnings) {
+	const auto text = ReadString(table, key, context, warnings);
+	if (!text) {
+		return fallback;
+	}
+	const auto seconds = ParseDuration(*text);
+	if (!seconds) {
+		warnings.push_back(
+			u"%1: '%2' should look like \"10s\", \"5m\" or \"24h\", keeping "
+			"%3 seconds."_q.arg(context, Text(key)).arg(fallback));
+		return fallback;
+	}
+	return *seconds;
+}
+
+// [last_seen]: whether a coarse last seen explains itself, and whether the
+// trade is offered. Shaped like ReadPeek - two flags and three durations, all
+// defaulted, so a file that says nothing gets the documented behaviour.
+[[nodiscard]] LastSeen ReadLastSeen(
+		const toml::table &root,
+		std::vector<QString> &warnings) {
+	auto result = LastSeen();
+	const auto node = root.get("last_seen");
+	if (!node) {
+		return result;
+	} else if (!node->as_table()) {
+		warnings.push_back(
+			u"'last_seen' should be a table (%1)."_q.arg(At(*node)));
+		return result;
+	}
+	const auto &table = *node->as_table();
+	const auto context = u"last_seen"_q;
+	result.reasons = ReadBool(table, "reasons_p", context, warnings)
+		.value_or(true);
+	result.trade = ReadBool(table, "trade_p", context, warnings)
+		.value_or(true);
+	result.tradeHoldSeconds = ReadSeconds(
+		table,
+		"trade_hold",
+		context,
+		result.tradeHoldSeconds,
+		warnings);
+	result.tradeRememberSeconds = ReadSeconds(
+		table,
+		"trade_remember",
+		context,
+		result.tradeRememberSeconds,
+		warnings);
+	result.tradeCooldownSeconds = ReadSeconds(
+		table,
+		"trade_cooldown",
+		context,
+		result.tradeCooldownSeconds,
+		warnings);
+	return result;
+}
+
+// One budget's `target' string. It is one string rather than four keys
+// because a budget counts exactly one thing, and four mutually exclusive keys
+// would let a file ask it to count two.
+[[nodiscard]] bool ReadBudgetTarget(
+		ScreenTimeBudget &budget,
+		const QString &where,
+		std::vector<QString> &warnings) {
+	const auto text = budget.target.trimmed();
+	if (!text.compare(u"all"_q, Qt::CaseInsensitive)) {
+		budget.kind = BudgetTarget::All;
+		return true;
+	}
+	const auto colon = text.indexOf(':');
+	if (colon <= 0) {
+		warnings.push_back(
+			u"%1: 'target' should be \"all\", \"chat:<id>\", \"kind:<kind>\" "
+			"or \"preset:<name>\", skipping it."_q.arg(where));
+		return false;
+	}
+	const auto prefix = text.left(colon).trimmed().toLower();
+	const auto rest = text.mid(colon + 1).trimmed();
+	if (prefix == u"chat"_q) {
+		auto ok = false;
+		const auto id = rest.toLongLong(&ok);
+		if (!ok || !id) {
+			warnings.push_back(u"%1: 'target' names chat '%2', which is not a "
+				"chat id, skipping it."_q.arg(where, rest));
+			return false;
+		}
+		budget.kind = BudgetTarget::Chat;
+		budget.chat = id;
+		return true;
+	} else if (prefix == u"kind"_q) {
+		const auto parsed = ParseScreenTimeKind(rest);
+		if (!parsed) {
+			warnings.push_back(u"%1: 'target' names kind '%2', which is not "
+				"\"private\", \"groups\", \"channels\", \"bots\" or "
+				"\"elsewhere\", skipping it."_q.arg(where, rest));
+			return false;
+		}
+		budget.kind = BudgetTarget::Kind;
+		budget.chatKind = *parsed;
+		return true;
+	} else if (prefix == u"preset"_q) {
+		if (rest.isEmpty()) {
+			warnings.push_back(u"%1: 'target' names no preset, skipping it."_q
+				.arg(where));
+			return false;
+		}
+		budget.kind = BudgetTarget::Preset;
+		budget.preset = rest;
+		return true;
+	}
+	warnings.push_back(
+		u"%1: 'target' should be \"all\", \"chat:<id>\", \"kind:<kind>\" or "
+		"\"preset:<name>\", skipping it."_q.arg(where));
+	return false;
+}
+
+[[nodiscard]] std::vector<ScreenTimeBudget> ReadBudgets(
+		const toml::table &table,
+		std::vector<QString> &warnings) {
+	auto result = std::vector<ScreenTimeBudget>();
+	const auto node = table.get("budgets");
+	if (!node) {
+		return result;
+	}
+	const auto array = node->as_array();
+	if (!array) {
+		warnings.push_back(u"screen_time: 'budgets' should be a list of "
+			"[[screen_time.budgets]] blocks (%1)."_q.arg(At(*node)));
+		return result;
+	}
+	auto index = 0;
+	for (auto &&element : *array) {
+		const auto where = u"screen_time budget %1"_q.arg(++index);
+		const auto fields = element.as_table();
+		if (!fields) {
+			warnings.push_back(u"%1: should be a table (%2)."_q
+				.arg(where, At(element)));
+			continue;
+		}
+		auto budget = ScreenTimeBudget();
+		const auto target = ReadString(*fields, "target", where, warnings);
+		const auto perDay = ReadString(*fields, "per_day", where, warnings);
+		if (!target || !perDay) {
+			warnings.push_back(
+				u"%1: needs 'target' and 'per_day', skipping it."_q.arg(where));
+			continue;
+		}
+		budget.target = *target;
+		if (!ReadBudgetTarget(budget, where, warnings)) {
+			continue;
+		}
+		const auto seconds = ParseDuration(*perDay);
+		if (!seconds) {
+			warnings.push_back(u"%1: 'per_day' should look like \"45m\" or "
+				"\"2h\", skipping it."_q.arg(where));
+			continue;
+		}
+		budget.perDaySeconds = *seconds;
+		if (const auto mode = ReadString(*fields, "mode", where, warnings)) {
+			if (const auto parsed = ParseBudgetMode(*mode)) {
+				budget.mode = *parsed;
+			} else {
+				warnings.push_back(u"%1: 'mode' should be \"soft\" or "
+					"\"hard\", keeping \"soft\"."_q.arg(where));
+			}
+		}
+		budget.snoozeSeconds = ReadSeconds(
+			*fields,
+			"snooze",
+			where,
+			budget.snoozeSeconds,
+			warnings);
+		if (const auto count = fields->get("snoozes_per_day")) {
+			const auto value = count->value<int>();
+			if (!value || *value < 0) {
+				warnings.push_back(u"%1: 'snoozes_per_day' should be a whole "
+					"number, keeping %2."_q.arg(where)
+						.arg(budget.snoozesPerDay));
+			} else {
+				budget.snoozesPerDay = *value;
+			}
+		}
+		result.push_back(std::move(budget));
+	}
+	return result;
+}
+
+// [screen_time]: the thresholds the log is read back through, and the budgets.
+// Every threshold is applied at read time rather than while recording, which
+// is what makes changing one re-derive the history it already has.
+[[nodiscard]] ScreenTime ReadScreenTime(
+		const toml::table &root,
+		std::vector<QString> &warnings) {
+	auto result = ScreenTime();
+	const auto node = root.get("screen_time");
+	if (!node) {
+		return result;
+	} else if (!node->as_table()) {
+		warnings.push_back(
+			u"'screen_time' should be a table (%1)."_q.arg(At(*node)));
+		return result;
+	}
+	const auto &table = *node->as_table();
+	const auto context = u"screen_time"_q;
+	result.enabled = ReadBool(table, "enabled_p", context, warnings)
+		.value_or(false);
+	result.actionSpanSeconds = ReadSeconds(
+		table,
+		"action_span",
+		context,
+		result.actionSpanSeconds,
+		warnings);
+	result.activeGapSeconds = ReadSeconds(
+		table,
+		"active_gap",
+		context,
+		result.activeGapSeconds,
+		warnings);
+	result.idleAfterSeconds = ReadSeconds(
+		table,
+		"idle_after",
+		context,
+		result.idleAfterSeconds,
+		warnings);
+	if (const auto days = table.get("retention_days")) {
+		const auto value = days->value<int>();
+		if (!value || *value < 0) {
+			warnings.push_back(u"screen_time: 'retention_days' should be a "
+				"whole number of days (%1), keeping %2."_q.arg(At(*days))
+					.arg(result.retentionDays));
+		} else {
+			result.retentionDays = *value;
+		}
+	}
+	result.budgets = ReadBudgets(table, warnings);
+	return result;
+}
+
 // The one key that is about the file rather than about anything in it. A
 // number this build does not recognise is not an error: the keys it does know
 // are still where they were, so it reads what it understands and says out loud
@@ -1547,6 +1793,77 @@ QString HideScopeName(HideScope value) {
 	case HideScope::KeepInFolder: return u"keep_in_folder"_q;
 	}
 	return QString();
+}
+
+std::optional<ScreenTimeKind> ParseScreenTimeKind(const QString &value) {
+	const auto trimmed = value.trimmed().toLower();
+	if (trimmed == u"private"_q) {
+		return ScreenTimeKind::Private;
+	} else if (trimmed == u"groups"_q || trimmed == u"group"_q) {
+		return ScreenTimeKind::Group;
+	} else if (trimmed == u"channels"_q || trimmed == u"channel"_q) {
+		return ScreenTimeKind::Channel;
+	} else if (trimmed == u"bots"_q || trimmed == u"bot"_q) {
+		return ScreenTimeKind::Bot;
+	} else if (trimmed == u"elsewhere"_q) {
+		return ScreenTimeKind::Elsewhere;
+	}
+	return std::nullopt;
+}
+
+QString ScreenTimeKindName(ScreenTimeKind value) {
+	switch (value) {
+	case ScreenTimeKind::Private: return u"private"_q;
+	case ScreenTimeKind::Group: return u"groups"_q;
+	case ScreenTimeKind::Channel: return u"channels"_q;
+	case ScreenTimeKind::Bot: return u"bots"_q;
+	case ScreenTimeKind::Elsewhere: return u"elsewhere"_q;
+	}
+	return QString();
+}
+
+ScreenTimeKind ScreenTimeKindFor(ChatKind kind) {
+	switch (kind) {
+	case ChatKind::Private: return ScreenTimeKind::Private;
+	case ChatKind::Group: return ScreenTimeKind::Group;
+	case ChatKind::Channel: return ScreenTimeKind::Channel;
+	case ChatKind::Bot: return ScreenTimeKind::Bot;
+	}
+	return ScreenTimeKind::Elsewhere;
+}
+
+std::optional<BudgetMode> ParseBudgetMode(const QString &value) {
+	const auto trimmed = value.trimmed().toLower();
+	if (trimmed == u"soft"_q) {
+		return BudgetMode::Soft;
+	} else if (trimmed == u"hard"_q) {
+		return BudgetMode::Hard;
+	}
+	return std::nullopt;
+}
+
+QString BudgetModeName(BudgetMode value) {
+	switch (value) {
+	case BudgetMode::Soft: return u"soft"_q;
+	case BudgetMode::Hard: return u"hard"_q;
+	}
+	return QString();
+}
+
+LastSeenReason ReasonFor(bool exactKnown, bool coarse, bool byMe) {
+	// Exact first, and unconditionally: a status carrying a real moment has
+	// nothing to explain, and a `by_me' flag riding along on one would be the
+	// server describing a coarsening that did not happen.
+	if (exactKnown) {
+		return LastSeenReason::None;
+	} else if (!coarse) {
+		// userStatusEmpty - "a long time ago" - or a status with nothing
+		// usable in it. Inactivity and a block look identical here and the
+		// server does not say which, so the fork says nothing rather than
+		// guessing at the one answer it would be unforgivable to get wrong.
+		return LastSeenReason::None;
+	}
+	return byMe ? LastSeenReason::ByMe : LastSeenReason::HiddenByThem;
 }
 
 std::optional<StoryPolicy> ParseStoryPolicy(const QString &value) {
@@ -1896,6 +2213,8 @@ ParseResult ParseSettings(const QString &text, const QString &path) {
 	result.settings.overrides = ReadOverrides(root, result.warnings);
 	result.settings.suggestions = ReadSuggestions(root, result.warnings);
 	result.settings.sync = ReadSync(root, result.warnings);
+	result.settings.lastSeen = ReadLastSeen(root, result.warnings);
+	result.settings.screenTime = ReadScreenTime(root, result.warnings);
 	result.settings.devices = ReadDevices(root, result.warnings);
 
 	// Hotkeys last, because this is the one check that needs the presets and

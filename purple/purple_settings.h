@@ -555,6 +555,175 @@ struct Sync {
 	bool sendAfterSave = false;
 };
 
+// The `[last_seen]' table: what the fork says about a last seen it cannot
+// read, and whether it will offer to trade for one.
+//
+// Not part of a preset, for the same reason [peek], [overrides], [recent] and
+// [suggestions] are not: it is a decision about how a status line reads, not
+// about what any one preset lets through.
+struct LastSeen {
+	// Whether the reason a last seen is coarse is appended to the status text
+	// in the chat header and the profile. On by default: "last seen recently"
+	// with no reason is the fork withholding something it knows.
+	bool reasons = true;
+
+	// Whether the "show mine to see theirs" sheet is offered at all. The
+	// reason line above is tappable only while this is on, so turning it off
+	// leaves the explanation and takes away the offer.
+	bool trade = true;
+
+	// How long to wait for their exact `was_online' after asking, in seconds,
+	// before putting our privacy rules back. Short by design: the whole
+	// exposure is this window, and a trade that has not answered in ten
+	// seconds is not going to.
+	int tradeHoldSeconds = 10;
+
+	// How long a read stays worth showing, in seconds. Past it the remembered
+	// moment is dropped rather than shown as older and older news - "last seen
+	// 14:32, as of 3 min ago" is useful and "as of 2 days ago" is not.
+	int tradeRememberSeconds = 24 * 3600;
+
+	// The least time between two trades with the same person, in seconds. One
+	// trade is a moment of exposure you chose; a trade every time you open
+	// their chat is a standing subscription you did not.
+	int tradeCooldownSeconds = 5 * 60;
+};
+
+// What a last seen the server coarsened is coarse BECAUSE of. Three answers
+// and no fourth: the fork never guesses at a block, because the server has no
+// field that says so and "blocked" is not a thing to be wrong about.
+enum class LastSeenReason : uchar {
+	// Nothing to say. An exact `was_online' (there is no reason to explain),
+	// or `userStatusEmpty' - "a long time ago" - which is inactivity or a
+	// block and the server does not say which.
+	None,
+
+	// Coarse, and the server says it is because of OUR privacy rules: we do
+	// not show them ours, so they do not show us theirs. The one case with
+	// something the user can act on, and what the trade is offered for.
+	ByMe,
+
+	// Coarse, and not by us. Their setting, and nothing to offer about it.
+	HiddenByThem,
+};
+
+// The mapping, given what the status carried:
+//
+// - `exactKnown' is a status with a real `was_online' in it;
+// - `coarse' is one of userStatusRecently / LastWeek / LastMonth;
+// - `byMe' is the `by_me' flag the server sets on a coarse status when the
+//   coarsening is the consequence of our own privacy rules.
+//
+// A status that is neither exact nor coarse is userStatusEmpty or offline
+// with nothing usable, and gets None.
+[[nodiscard]] LastSeenReason ReasonFor(
+	bool exactKnown,
+	bool coarse,
+	bool byMe);
+
+// What a stretch of screen time was spent in: one of the chat kinds, or the
+// time that was not in a chat at all - the list, search, settings - which is
+// "elsewhere" so that the splits add up to foreground time rather than to
+// something smaller with no name.
+//
+// A separate vocabulary from ChatKind because ChatKind is what a list's
+// `kinds' accepts, and there is no such thing as a list of elsewheres. The
+// four real spellings are the same as ChatKind's, so `kind:groups' in a budget
+// and `kinds = ["groups"]' in a list mean the same word.
+enum class ScreenTimeKind : uchar {
+	Private,
+	Group,
+	Channel,
+	Bot,
+	Elsewhere,
+};
+
+// "private", "groups", "channels", "bots", "elsewhere" - and the singular
+// spellings too, since a person writing `kind:channel' in a budget has said
+// exactly what they meant.
+[[nodiscard]] std::optional<ScreenTimeKind> ParseScreenTimeKind(
+	const QString &value);
+[[nodiscard]] QString ScreenTimeKindName(ScreenTimeKind value);
+[[nodiscard]] ScreenTimeKind ScreenTimeKindFor(ChatKind kind);
+
+// What a budget does when the day's allowance is gone.
+enum class BudgetMode : uchar {
+	// A bulletin at the limit and nothing else. The default: a budget you
+	// wrote down is first of all a thing you wanted to know about.
+	Soft,
+
+	// The chat goes behind a cover naming the budget, with one snooze offered.
+	// Never touches messages or notifications - it is a screen, not a mute.
+	Hard,
+};
+
+// "soft", "hard".
+[[nodiscard]] std::optional<BudgetMode> ParseBudgetMode(const QString &value);
+[[nodiscard]] QString BudgetModeName(BudgetMode value);
+
+// What a budget is counting. Spelled in the file as one string - "all",
+// "chat:<id>", "kind:<kind>", "preset:<name>" - because a budget names one
+// thing and a table of four mutually exclusive keys would let it name two.
+enum class BudgetTarget : uchar {
+	All,
+	Chat,
+	Kind,
+	Preset,
+};
+
+// One `[[screen_time.budgets]]' entry.
+struct ScreenTimeBudget {
+	// The target as written, kept so a screen and a warning can say back what
+	// the file said rather than what it was understood as.
+	QString target;
+
+	BudgetTarget kind = BudgetTarget::All;
+
+	// Filled according to `kind'. Only one of the three ever means anything,
+	// which is what the target string decided.
+	PeerIdValue chat = 0;
+	ScreenTimeKind chatKind = ScreenTimeKind::Elsewhere;
+	QString preset;
+
+	// The day's allowance, in seconds. Zero is a budget that is reached the
+	// moment the day starts, which is a coherent thing to ask for.
+	int perDaySeconds = 0;
+
+	BudgetMode mode = BudgetMode::Soft;
+
+	// How long one snooze lasts, in seconds, and how many are offered in a
+	// day. Zero for either disables snoozing, so a hard cap can be made
+	// absolute by writing `snoozes_per_day = 0'.
+	int snoozeSeconds = 5 * 60;
+	int snoozesPerDay = 2;
+};
+
+// The `[screen_time]' table. Off until switched on: it is a log of what you
+// looked at and for how long, and nothing should start keeping one of those
+// because a version number moved.
+struct ScreenTime {
+	bool enabled = false;
+
+	// How long one action counts as active for, in seconds. Short, because a
+	// burst of typing is one action and not one per keystroke.
+	int actionSpanSeconds = 3;
+
+	// How close two actions have to be for the whole gap between them to count
+	// as active, in seconds. This is what makes a conversation read as active
+	// time rather than as a row of three-second spikes.
+	int activeGapSeconds = 30;
+
+	// How long without any input pauses the session, in seconds. Applied to
+	// the raw log at read time, so changing it re-derives history - which is
+	// the whole reason the log stores events and not totals.
+	int idleAfterSeconds = 60;
+
+	// How many days of the log to keep. Zero keeps everything.
+	int retentionDays = 90;
+
+	std::vector<ScreenTimeBudget> budgets;
+};
+
 struct Premium {
 	bool enabled = true;
 };
@@ -588,6 +757,8 @@ struct Settings {
 	Overrides overrides;
 	Suggestions suggestions;
 	Sync sync;
+	LastSeen lastSeen;
+	ScreenTime screenTime;
 
 	// [devices], in file order.
 	std::vector<DeviceLabel> devices;

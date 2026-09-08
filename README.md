@@ -2,8 +2,8 @@
 
 The Work Mode core shared by the Purple Telegram apps: the `settings.toml`
 parser, the splice writer that edits that file in place, the `state.toml`
-serializer, and the resolution engine that turns a preset into a decision about
-one chat.
+serializer, the resolution engine that turns a preset into a decision about one
+chat, and the screen-time log with everything derived from it.
 
 It is a repository of its own because two apps need exactly this code and
 nothing around it. Every policy in the Work Mode spec is a rule about data, and
@@ -24,6 +24,12 @@ rules about data are far easier to prove outside a running app than inside one.
 - `purple/purple_engine.{h,cpp}` - resolves a preset into a flat table of "for
   this list, show and notify are these", and answers what that means for one
   chat. Resolution runs once per config or preset change, never per repaint.
+- `purple/purple_screentime.{h,cpp}` - `screentime.log` and everything derived
+  from it: the line format and its tolerant parser, session derivation, active
+  time, the buckets, the heat map, the period comparison, the budget ledger and
+  retention. The log is raw events and nothing else, so every threshold in
+  `[screen_time]` is applied at read time and changing one re-derives the
+  history you already have.
 - `purple/purple_types.h` - the two type aliases and the `_q` string literal the
   core borrowed from tdesktop's `base/basic_types.h` before extraction. It
   defers to that header when compiled inside tdesktop and defines them itself
@@ -62,9 +68,9 @@ in the tdesktop fork.
 
 ## Tests
 
-`tests/test_config.cpp` compiles the four translation units into a small harness
-and drives them against several hundred fixture documents - far too slow to
-iterate on through a full app build, which is the point.
+`tests/test_config.cpp` compiles the core's translation units into a small
+harness and drives them against several hundred fixture documents - far too
+slow to iterate on through a full app build, which is the point.
 
 ```sh
 QT_PREFIX=/path/to/qt tests/run.sh

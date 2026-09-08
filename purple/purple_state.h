@@ -12,6 +12,9 @@ option) any later version.
 
 #include <QtCore/QByteArray>
 
+#include <optional>
+#include <vector>
+
 // state.toml, the machine-owned half of the configuration. Everything here is
 // rewritten whenever it changes and carries no comments, which is exactly why
 // it is a separate file: state churns constantly, and it must never touch the
@@ -125,6 +128,29 @@ struct Override {
 	friend bool operator==(const Override &, const Override &) = default;
 };
 
+// One completed last-seen trade: we showed this person our last seen for a few
+// seconds, read theirs, and put our privacy rules back.
+//
+// Remembered so the status line can say "last seen 14:32, as of 3 min ago"
+// instead of falling straight back to "last seen recently" the moment the
+// trade ends - and so a second trade with the same person is not offered
+// again a minute later.
+struct LastSeenTrade {
+	PeerIdValue peer = 0;
+
+	// When we read it, in unix seconds. This is the "as of" - the age of the
+	// news, which is what decides whether it is still worth showing.
+	int64 readAtUnix = 0;
+
+	// The moment we read, in unix seconds: their real `was_online'. Zero for a
+	// trade that ran its hold out without an exact status ever arriving, which
+	// is still worth remembering - it is what the cooldown counts.
+	int64 wasOnlineUnix = 0;
+
+	friend bool operator==(const LastSeenTrade &, const LastSeenTrade &)
+		= default;
+};
+
 struct State {
 	QString activePreset;
 	PresetSource activeSource = PresetSource::Manual;
@@ -184,6 +210,12 @@ struct State {
 	// imports it, and the file bounces between two machines that agree.
 	QString lastSentFingerprint;
 	QString lastImportedFingerprint;
+
+	// The last seens read by trading, newest write per person. At most one
+	// record per peer - a second trade with the same person replaces the first
+	// rather than piling up - so this is bounded by the number of people you
+	// have ever traded with rather than by how often.
+	std::vector<LastSeenTrade> lastSeenTrades;
 
 	ResolvedCache resolvedCache;
 };
@@ -246,6 +278,45 @@ struct State {
 	PeerIdValue peer,
 	const QString &preset,
 	int64 nowUnix);
+
+// Writes down a trade, replacing whatever was remembered for that person. One
+// record per peer, because the only questions asked of this are "what did I
+// read last" and "how long ago" - a history of every trade would answer
+// neither and grow without end.
+void RememberTrade(
+	State &state,
+	PeerIdValue peer,
+	int64 readAtUnix,
+	int64 wasOnlineUnix);
+
+// What was read for this person, if it is still worth showing: nothing once
+// the read is older than `rememberSeconds'. Staleness is decided here rather
+// than when the record is written, so changing `trade_remember' changes what
+// the status lines say without touching the file.
+//
+// A `rememberSeconds' of zero remembers nothing, matching every other duration
+// key in the file where zero is off.
+[[nodiscard]] std::optional<LastSeenTrade> RememberedTrade(
+	const State &state,
+	PeerIdValue peer,
+	int64 nowUnix,
+	int rememberSeconds);
+
+// Whether a trade with this person may be offered now. False for the
+// `cooldownSeconds' after the last one: a trade is a moment of exposure chosen
+// on purpose, and one offered again every time their chat opens would turn it
+// into a standing subscription nobody agreed to.
+[[nodiscard]] bool TradeAllowed(
+	const State &state,
+	PeerIdValue peer,
+	int64 nowUnix,
+	int cooldownSeconds);
+
+// Drops the trades that have gone stale. The serialiser cannot do this on its
+// own - it has neither a clock nor the settings that say how long a read stays
+// worth showing - so a caller with both runs it before writing. True if
+// anything went, on the same terms as PruneOverrides.
+bool PruneLastSeenTrades(State &state, int64 nowUnix, int rememberSeconds);
 
 // Drops whatever has run out. True if anything went, so the caller knows
 // whether a rebuild is owed.

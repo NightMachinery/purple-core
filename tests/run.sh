@@ -33,6 +33,7 @@ clang++ -std=c++20 -g -O0 -o "$Output" \
     "$RepoPath/purple/purple_splice.cpp" \
     "$RepoPath/purple/purple_state.cpp" \
     "$RepoPath/purple/purple_engine.cpp" \
+    "$RepoPath/purple/purple_screentime.cpp" \
     -I"$RepoPath" \
     -I"$RepoPath/tomlplusplus" \
     -I"$QtPrefix/frameworks/QtCore.framework/Headers" \

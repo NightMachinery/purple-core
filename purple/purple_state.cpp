@@ -10,6 +10,8 @@ option) any later version.
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QStringList>
 
+#include <algorithm>
+
 #define TOML_EXCEPTIONS 0
 #include <toml.hpp>
 
@@ -188,6 +190,81 @@ void ReadOptionalBool(
 	return result;
 }
 
+// How many trades are written out at most. RememberTrade already keeps one
+// record per person, so this only ever bites for somebody who has traded with
+// hundreds of people - and a state.toml is rewritten whole on every change,
+// so an unbounded array here would be paid for on every write forever.
+//
+// The newest reads are the ones kept: they are the only ones a status line can
+// still use.
+constexpr auto kMaxLastSeenTrades = 200;
+
+[[nodiscard]] QString SerializeLastSeenTrades(
+		std::vector<LastSeenTrade> trades) {
+	// Pruning on the way out rather than on the way in, because this is the
+	// one place that sees the whole list at once and the one place where its
+	// size costs anything.
+	auto kept = std::vector<LastSeenTrade>();
+	kept.reserve(trades.size());
+	for (auto &trade : trades) {
+		if (trade.peer && trade.readAtUnix) {
+			kept.push_back(std::move(trade));
+		}
+	}
+	if (kept.size() > kMaxLastSeenTrades) {
+		std::stable_sort(kept.begin(), kept.end(), [](
+				const LastSeenTrade &a,
+				const LastSeenTrade &b) {
+			return a.readAtUnix > b.readAtUnix;
+		});
+		kept.resize(kMaxLastSeenTrades);
+	}
+	auto result = QString();
+	for (const auto &trade : kept) {
+		// Its own table rather than an inline one in an array, because this is
+		// the shape the file already uses for anything a person might read
+		// back while wondering what the app thinks it knows.
+		result += u"\n[[last_seen_trades]]\n"_q;
+		result += u"peer = %1\n"_q.arg(QString::number(trade.peer));
+		result += u"read_at = %1\n"_q.arg(QString::number(trade.readAtUnix));
+		result += u"was_online = %1\n"_q
+			.arg(QString::number(trade.wasOnlineUnix));
+	}
+	return result;
+}
+
+[[nodiscard]] std::vector<LastSeenTrade> ReadLastSeenTrades(
+		const toml::table &root) {
+	auto result = std::vector<LastSeenTrade>();
+	const auto node = root.get("last_seen_trades");
+	const auto array = node ? node->as_array() : nullptr;
+	if (!array) {
+		return result;
+	}
+	for (auto &&element : *array) {
+		const auto fields = element.as_table();
+		if (!fields) {
+			continue;
+		}
+		auto trade = LastSeenTrade();
+		if (const auto peer = fields->get("peer")) {
+			trade.peer = peer->value<int64>().value_or(0);
+		}
+		if (const auto readAt = fields->get("read_at")) {
+			trade.readAtUnix = readAt->value<int64>().value_or(0);
+		}
+		if (const auto online = fields->get("was_online")) {
+			trade.wasOnlineUnix = online->value<int64>().value_or(0);
+		}
+		if (!trade.peer || !trade.readAtUnix) {
+			// Skipped rather than fought over, like every other reader here.
+			continue;
+		}
+		result.push_back(trade);
+	}
+	return result;
+}
+
 [[nodiscard]] ResolvedCache ReadResolvedCache(const toml::table &root) {
 	auto result = ResolvedCache();
 	const auto node = root.get("resolved_cache");
@@ -354,6 +431,7 @@ State ParseState(const QString &text, const QString &path) {
 		root,
 		"last_imported_fingerprint");
 	result.overrides = ReadOverrides(root);
+	result.lastSeenTrades = ReadLastSeenTrades(root);
 	if (const auto deadline = root.get("peek_deadline_unix")) {
 		result.peekDeadlineUnix = deadline->value_or(int64(0));
 	}
@@ -463,6 +541,94 @@ bool PruneOverrides(State &state, int64 nowUnix) {
 	return true;
 }
 
+void RememberTrade(
+		State &state,
+		PeerIdValue peer,
+		int64 readAtUnix,
+		int64 wasOnlineUnix) {
+	if (!peer || !readAtUnix) {
+		return;
+	}
+	for (auto &trade : state.lastSeenTrades) {
+		if (trade.peer == peer) {
+			trade.readAtUnix = readAtUnix;
+			trade.wasOnlineUnix = wasOnlineUnix;
+			return;
+		}
+	}
+	state.lastSeenTrades.push_back({ peer, readAtUnix, wasOnlineUnix });
+}
+
+std::optional<LastSeenTrade> RememberedTrade(
+		const State &state,
+		PeerIdValue peer,
+		int64 nowUnix,
+		int rememberSeconds) {
+	if (!peer || rememberSeconds <= 0) {
+		return std::nullopt;
+	}
+	for (const auto &trade : state.lastSeenTrades) {
+		if (trade.peer != peer) {
+			continue;
+		}
+		// A read from the future is a clock that moved backwards, not news:
+		// showing it would put an "as of -3 min ago" on the screen.
+		return (trade.readAtUnix <= nowUnix
+			&& nowUnix - trade.readAtUnix < rememberSeconds)
+			? std::optional<LastSeenTrade>(trade)
+			: std::nullopt;
+	}
+	return std::nullopt;
+}
+
+bool TradeAllowed(
+		const State &state,
+		PeerIdValue peer,
+		int64 nowUnix,
+		int cooldownSeconds) {
+	if (!peer) {
+		return false;
+	} else if (cooldownSeconds <= 0) {
+		return true;
+	}
+	for (const auto &trade : state.lastSeenTrades) {
+		if (trade.peer == peer) {
+			return (trade.readAtUnix > nowUnix)
+				|| (nowUnix - trade.readAtUnix >= cooldownSeconds);
+		}
+	}
+	return true;
+}
+
+bool PruneLastSeenTrades(State &state, int64 nowUnix, int rememberSeconds) {
+	// Decided before anything moves, for the same reason PruneOverrides does
+	// it: the common call is the one that finds nothing to do.
+	const auto stale = [&](const LastSeenTrade &trade) {
+		return (rememberSeconds <= 0)
+			|| (trade.readAtUnix <= nowUnix
+				&& nowUnix - trade.readAtUnix >= rememberSeconds);
+	};
+	auto expired = false;
+	for (const auto &trade : state.lastSeenTrades) {
+		if (stale(trade)) {
+			expired = true;
+			break;
+		}
+	}
+	if (!expired) {
+		return false;
+	}
+	auto kept = std::vector<LastSeenTrade>();
+	kept.reserve(state.lastSeenTrades.size());
+	for (const auto &trade : state.lastSeenTrades) {
+		if (!stale(trade)) {
+			kept.push_back(trade);
+		}
+	}
+	state.lastSeenTrades = std::move(kept);
+	return true;
+}
+
 int64 NextOverrideDeadline(const State &state, const QString &preset) {
 	auto result = int64(0);
 	if (preset.isEmpty()) {
@@ -515,6 +681,7 @@ QString SerializeState(const State &state) {
 	result += u"last_imported_fingerprint = %1\n"_q
 		.arg(Quoted(state.lastImportedFingerprint));
 	result += SerializeOverrides(state.overrides);
+	result += SerializeLastSeenTrades(state.lastSeenTrades);
 
 	const auto &cache = state.resolvedCache;
 	if (!cache.valid()) {

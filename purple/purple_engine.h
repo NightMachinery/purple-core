@@ -275,8 +275,9 @@ struct DeviceIdentity {
 
 // The schedule this device actually runs, once the rulesets have been sorted
 // out. Everything downstream sees a single flat list of rules and one outside
-// preset, which is what lets the first-match-wins engine stay exactly as it was
-// before rulesets existed.
+// preset, which is what lets the rule-picking below stay exactly as it was
+// before rulesets existed - the merge order it falls back on for a tie is the
+// only thing here that rulesets changed.
 //
 // The pointers are into the Schedule this was built from and are only good for
 // as long as it is.

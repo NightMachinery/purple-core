@@ -13,12 +13,14 @@ option) any later version.
 // Run with purple/test_config.sh.
 
 #include "purple/purple_engine.h"
+#include "purple/purple_screentime.h"
 #include "purple/purple_settings.h"
 #include "purple/purple_splice.h"
 #include "purple/purple_state.h"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QStringList>
+#include <QtCore/QTimeZone>
 
 #include <cstdio>
 #include <type_traits>
@@ -4902,6 +4904,887 @@ void TestResolvedCache() {
 	CHECK(!Purple::FromCache(Purple::ResolvedCache()).has_value());
 }
 
+void TestLastSeenKeys() {
+	Begin("last seen keys");
+
+	// A file that says nothing gets the documented defaults: the reason line
+	// on, the trade offered, and the three durations the plan settled on.
+	const auto silent = Parse(u"[presets.work]\nlist_order = []\n"_q);
+	CHECK(silent.ok());
+	CHECK(silent.settings.lastSeen.reasons);
+	CHECK(silent.settings.lastSeen.trade);
+	CHECK_EQ(silent.settings.lastSeen.tradeHoldSeconds, 10);
+	CHECK_EQ(silent.settings.lastSeen.tradeRememberSeconds, 24 * 3600);
+	CHECK_EQ(silent.settings.lastSeen.tradeCooldownSeconds, 5 * 60);
+
+	const auto parsed = Parse(uR"(
+[last_seen]
+reasons_p = false
+trade_p = false
+trade_hold = "30s"
+trade_remember = "2h"
+trade_cooldown = "90s"
+)"_q);
+	CHECK(parsed.ok());
+	CHECK(parsed.warnings.empty());
+	CHECK(!parsed.settings.lastSeen.reasons);
+	CHECK(!parsed.settings.lastSeen.trade);
+	CHECK_EQ(parsed.settings.lastSeen.tradeHoldSeconds, 30);
+	CHECK_EQ(parsed.settings.lastSeen.tradeRememberSeconds, 2 * 3600);
+	CHECK_EQ(parsed.settings.lastSeen.tradeCooldownSeconds, 90);
+
+	// The same duration spellings as [peek] auto_off and [recent], which is
+	// the point of reusing ParseDuration rather than inventing seconds keys.
+	const auto hold = [](const QString &text) {
+		return Parse(u"[last_seen]\ntrade_hold = \"%1\"\n"_q.arg(text))
+			.settings.lastSeen.tradeHoldSeconds;
+	};
+	CHECK_EQ(hold(u"45"_q), 45);
+	CHECK_EQ(hold(u"2m"_q), 120);
+	CHECK_EQ(hold(u"1h"_q), 3600);
+	CHECK_EQ(hold(u"off"_q), 0);
+
+	// Unparseable keeps the default and says so, rather than guessing.
+	const auto broken = Parse(u"[last_seen]\ntrade_remember = \"soon\"\n"_q);
+	CHECK(broken.ok());
+	CHECK_EQ(broken.settings.lastSeen.tradeRememberSeconds, 24 * 3600);
+	CHECK_EQ(int(broken.warnings.size()), 1);
+
+	const auto wrongType = Parse(u"last_seen = 3\n"_q);
+	CHECK(wrongType.ok());
+	CHECK(WarnsAbout(wrongType, u"'last_seen' should be a table"_q));
+	CHECK(wrongType.settings.lastSeen.reasons);
+}
+
+void TestLastSeenReasons() {
+	Begin("last seen reasons");
+
+	using Reason = Purple::LastSeenReason;
+
+	// An exact was_online explains itself, so there is nothing to append -
+	// and it stays nothing even if a by_me flag rode along, which would be the
+	// server describing a coarsening that did not happen.
+	CHECK(Purple::ReasonFor(true, false, false) == Reason::None);
+	CHECK(Purple::ReasonFor(true, true, true) == Reason::None);
+
+	// Coarse because of our own rules is the one case with something to offer.
+	CHECK(Purple::ReasonFor(false, true, true) == Reason::ByMe);
+
+	// Coarse and not by us is their setting, and nothing to say about it.
+	CHECK(Purple::ReasonFor(false, true, false) == Reason::HiddenByThem);
+
+	// userStatusEmpty - "a long time ago". Inactivity and a block look
+	// identical here and the server does not say which, so the fork never
+	// infers a block from it whatever else it was handed.
+	CHECK(Purple::ReasonFor(false, false, false) == Reason::None);
+	CHECK(Purple::ReasonFor(false, false, true) == Reason::None);
+}
+
+void TestLastSeenTrades() {
+	Begin("last seen trades");
+
+	auto state = Purple::State();
+	const auto now = int64(1788000000);
+	CHECK(!Purple::RememberedTrade(state, 7, now, 24 * 3600).has_value());
+	CHECK(Purple::TradeAllowed(state, 7, now, 300));
+
+	Purple::RememberTrade(state, 7, now - 60, now - 300);
+	CHECK_EQ(state.lastSeenTrades.size(), size_t(1));
+
+	const auto remembered = Purple::RememberedTrade(state, 7, now, 24 * 3600);
+	CHECK(remembered.has_value());
+	CHECK_EQ(remembered->peer, int64(7));
+	CHECK_EQ(remembered->readAtUnix, now - 60);
+	CHECK_EQ(remembered->wasOnlineUnix, now - 300);
+
+	// Older than trade_remember is dropped rather than shown as older and
+	// older news, and staleness is decided at read time - so shortening the
+	// key stops showing it without touching the file.
+	CHECK(!Purple::RememberedTrade(state, 7, now, 30).has_value());
+	CHECK(!Purple::RememberedTrade(state, 7, now, 0).has_value());
+	CHECK(!Purple::RememberedTrade(state, 8, now, 24 * 3600).has_value());
+
+	// One record per person: a second trade replaces the first, so the list is
+	// bounded by who you have traded with and not by how often.
+	Purple::RememberTrade(state, 7, now, now - 10);
+	CHECK_EQ(state.lastSeenTrades.size(), size_t(1));
+	CHECK_EQ(state.lastSeenTrades[0].wasOnlineUnix, now - 10);
+
+	// One trade per person per cooldown.
+	CHECK(!Purple::TradeAllowed(state, 7, now, 300));
+	CHECK(!Purple::TradeAllowed(state, 7, now + 299, 300));
+	CHECK(Purple::TradeAllowed(state, 7, now + 300, 300));
+	CHECK(Purple::TradeAllowed(state, 8, now, 300));
+	CHECK(Purple::TradeAllowed(state, 7, now, 0));
+
+	// A record with no peer or no read time is not a trade at all.
+	Purple::RememberTrade(state, 0, now, now);
+	Purple::RememberTrade(state, 9, 0, now);
+	CHECK_EQ(state.lastSeenTrades.size(), size_t(1));
+
+	// Round trip through state.toml, alongside an override so the array of
+	// tables and the inline array can be proved to coexist.
+	state.activePreset = u"work"_q;
+	state.overrides.push_back({
+		.peer = 42,
+		.kind = Purple::OverrideKind::Show,
+		.untilUnix = now + 3600,
+		.startedUnix = now,
+		.preset = u"work"_q,
+	});
+	Purple::RememberTrade(state, 11, now - 5, 0);
+	const auto text = Purple::SerializeState(state);
+	CHECK(text.contains(u"[[last_seen_trades]]"_q));
+	const auto reloaded = Purple::ParseState(text, u"state.toml"_q);
+	CHECK_EQ(reloaded.overrides.size(), size_t(1));
+	CHECK(reloaded.lastSeenTrades == state.lastSeenTrades);
+
+	// A trade whose hold ran out without an exact status is still worth
+	// writing down: it is what the cooldown counts.
+	CHECK_EQ(reloaded.lastSeenTrades[1].peer, int64(11));
+	CHECK_EQ(reloaded.lastSeenTrades[1].wasOnlineUnix, int64(0));
+
+	// Pruning is the caller's to run, because the serialiser has neither a
+	// clock nor the settings that say how long a read stays worth showing.
+	CHECK(!Purple::PruneLastSeenTrades(state, now, 3600));
+	auto stale = state;
+	CHECK(Purple::PruneLastSeenTrades(stale, now + 7200, 3600));
+	CHECK(stale.lastSeenTrades.empty());
+}
+
+[[nodiscard]] Purple::Event Ev(
+		int64 ms,
+		Purple::EventKind kind,
+		Purple::PeerIdValue dialog = 0,
+		const QString &preset = QString()) {
+	auto result = Purple::Event();
+	result.unixMs = ms;
+	result.kind = kind;
+	result.dialogId = dialog;
+	result.preset = preset;
+	return result;
+}
+
+void TestScreenTimeSettings() {
+	Begin("screen time settings");
+
+	// Off, and with the plan's thresholds, until the file says otherwise:
+	// nothing should start keeping a log of what you looked at because a
+	// version number moved.
+	const auto silent = Parse(u"[presets.work]\nlist_order = []\n"_q);
+	CHECK(silent.ok());
+	CHECK(!silent.settings.screenTime.enabled);
+	CHECK_EQ(silent.settings.screenTime.actionSpanSeconds, 3);
+	CHECK_EQ(silent.settings.screenTime.activeGapSeconds, 30);
+	CHECK_EQ(silent.settings.screenTime.idleAfterSeconds, 60);
+	CHECK_EQ(silent.settings.screenTime.retentionDays, 90);
+	CHECK(silent.settings.screenTime.budgets.empty());
+
+	const auto parsed = Parse(uR"(
+[presets.work]
+list_order = []
+
+[screen_time]
+enabled_p = true
+action_span = "5s"
+active_gap = "20s"
+idle_after = "2m"
+retention_days = 30
+
+[[screen_time.budgets]]
+target = "chat:7"
+per_day = "30m"
+mode = "hard"
+snooze = "10m"
+snoozes_per_day = 1
+
+[[screen_time.budgets]]
+target = "kind:groups"
+per_day = "2h"
+
+[[screen_time.budgets]]
+target = "preset:work"
+per_day = "1h"
+mode = "soft"
+
+[[screen_time.budgets]]
+target = "all"
+per_day = "4h"
+)"_q);
+	CHECK(parsed.ok());
+	CHECK(!WarnsAbout(parsed, u"screen_time"_q));
+	const auto &screen = parsed.settings.screenTime;
+	CHECK(screen.enabled);
+	CHECK_EQ(screen.actionSpanSeconds, 5);
+	CHECK_EQ(screen.activeGapSeconds, 20);
+	CHECK_EQ(screen.idleAfterSeconds, 120);
+	CHECK_EQ(screen.retentionDays, 30);
+	CHECK_EQ(screen.budgets.size(), size_t(4));
+
+	CHECK(screen.budgets[0].kind == Purple::BudgetTarget::Chat);
+	CHECK_EQ(screen.budgets[0].chat, int64(7));
+	CHECK_EQ(screen.budgets[0].perDaySeconds, 30 * 60);
+	CHECK(screen.budgets[0].mode == Purple::BudgetMode::Hard);
+	CHECK_EQ(screen.budgets[0].snoozeSeconds, 600);
+	CHECK_EQ(screen.budgets[0].snoozesPerDay, 1);
+
+	// Everything not said takes the default: soft, five minutes, twice.
+	CHECK(screen.budgets[1].kind == Purple::BudgetTarget::Kind);
+	CHECK(screen.budgets[1].chatKind == Purple::ScreenTimeKind::Group);
+	CHECK(screen.budgets[1].mode == Purple::BudgetMode::Soft);
+	CHECK_EQ(screen.budgets[1].snoozeSeconds, 5 * 60);
+	CHECK_EQ(screen.budgets[1].snoozesPerDay, 2);
+
+	CHECK(screen.budgets[2].kind == Purple::BudgetTarget::Preset);
+	CHECK_EQ(screen.budgets[2].preset, u"work"_q);
+	CHECK(screen.budgets[3].kind == Purple::BudgetTarget::All);
+	CHECK_EQ(screen.budgets[3].perDaySeconds, 4 * 3600);
+
+	// A budget nobody can act on is skipped with a warning, and the ones
+	// around it are unaffected - the same rule every list in the file follows.
+	const auto broken = Parse(uR"(
+[[screen_time.budgets]]
+target = "chat:not-a-number"
+per_day = "30m"
+
+[[screen_time.budgets]]
+target = "sideways"
+per_day = "30m"
+
+[[screen_time.budgets]]
+target = "kind:postcards"
+per_day = "30m"
+
+[[screen_time.budgets]]
+target = "all"
+per_day = "soon"
+
+[[screen_time.budgets]]
+per_day = "30m"
+
+[[screen_time.budgets]]
+target = "all"
+per_day = "10m"
+)"_q);
+	CHECK(broken.ok());
+	CHECK_EQ(broken.settings.screenTime.budgets.size(), size_t(1));
+	CHECK_EQ(broken.settings.screenTime.budgets[0].perDaySeconds, 600);
+	CHECK_EQ(int(broken.warnings.size()), 5);
+
+	const auto days = Parse(u"[screen_time]\nretention_days = -1\n"_q);
+	CHECK_EQ(days.settings.screenTime.retentionDays, 90);
+	CHECK_EQ(int(days.warnings.size()), 1);
+
+	// The four real kind spellings are the ones a list already uses, so
+	// `kind:groups' in a budget and `kinds = ["groups"]' in a list agree.
+	CHECK(Purple::ParseScreenTimeKind(u"groups"_q)
+		== Purple::ScreenTimeKind::Group);
+	CHECK(Purple::ParseScreenTimeKind(u" GROUP "_q)
+		== Purple::ScreenTimeKind::Group);
+	CHECK(Purple::ParseScreenTimeKind(u"elsewhere"_q)
+		== Purple::ScreenTimeKind::Elsewhere);
+	CHECK(!Purple::ParseScreenTimeKind(u"postcards"_q).has_value());
+	CHECK(Purple::ScreenTimeKindFor(Purple::ChatKind::Bot)
+		== Purple::ScreenTimeKind::Bot);
+	for (const auto value : {
+			Purple::ScreenTimeKind::Private,
+			Purple::ScreenTimeKind::Group,
+			Purple::ScreenTimeKind::Channel,
+			Purple::ScreenTimeKind::Bot,
+			Purple::ScreenTimeKind::Elsewhere }) {
+		CHECK(Purple::ParseScreenTimeKind(Purple::ScreenTimeKindName(value))
+			== value);
+	}
+	for (const auto value : {
+			Purple::BudgetMode::Soft,
+			Purple::BudgetMode::Hard }) {
+		CHECK(Purple::ParseBudgetMode(Purple::BudgetModeName(value)) == value);
+	}
+}
+
+void TestScreenTimeLog() {
+	Begin("screen time log");
+
+	auto event = Purple::Event();
+	event.unixMs = 1788000000000;
+	event.kind = Purple::EventKind::Open;
+	event.dialogId = -100500;
+	event.chatKind = Purple::ScreenTimeKind::Channel;
+	event.preset = u"deep work"_q;
+	event.action = QString();
+	event.hidden = true;
+
+	const auto line = Purple::FormatEvent(event);
+	CHECK_EQ(line.count(QChar('\t')), 6);
+	const auto back = Purple::ParseEventLine(line);
+	CHECK(back.has_value());
+	CHECK(*back == event);
+
+	// A tab in a name the user typed is flattened rather than escaped: a line
+	// that cannot be split takes the rest of the history with it.
+	auto tabbed = event;
+	tabbed.preset = u"deep\twork"_q;
+	const auto flattened = Purple::ParseEventLine(
+		Purple::FormatEvent(tabbed));
+	CHECK(flattened.has_value());
+	CHECK_EQ(flattened->preset, u"deep work"_q);
+
+	// Every kind round-trips by name, so a log written by one build reads in
+	// another.
+	for (const auto kind : {
+			Purple::EventKind::Open,
+			Purple::EventKind::Close,
+			Purple::EventKind::Action,
+			Purple::EventKind::Idle,
+			Purple::EventKind::Resume,
+			Purple::EventKind::Preset,
+			Purple::EventKind::Foreground,
+			Purple::EventKind::Background }) {
+		CHECK(Purple::ParseEventKind(Purple::EventKindName(kind)) == kind);
+	}
+
+	// A line that cannot be read is skipped, not fought over: the log is
+	// append-only and a truncated last line after a crash is expected.
+	CHECK(!Purple::ParseEventLine(QString()).has_value());
+	CHECK(!Purple::ParseEventLine(u"nonsense"_q).has_value());
+	CHECK(!Purple::ParseEventLine(
+		u"abc\topen\t0\tprivate\t\t\t0"_q).has_value());
+	CHECK(!Purple::ParseEventLine(
+		u"1788000000000\tsideways\t0\tprivate\t\t\t0"_q).has_value());
+
+	// Six fields is the shape this had before `hidden' existed, and it still
+	// reads - history is the whole point of keeping raw events.
+	const auto older = Purple::ParseEventLine(
+		u"1788000000000\topen\t5\tprivate\twork\t"_q);
+	CHECK(older.has_value());
+	CHECK(!older->hidden);
+	CHECK_EQ(older->dialogId, int64(5));
+
+	const auto log = u"%1\nnot an event at all\n\n%2\n"_q
+		.arg(Purple::FormatEvent(event))
+		.arg(Purple::FormatEvent(tabbed));
+	CHECK_EQ(Purple::ParseEventLog(log).size(), size_t(2));
+}
+
+void TestScreenTimeSessions() {
+	Begin("screen time sessions");
+
+	const auto settings = Purple::ScreenTime();
+	const auto t0 = int64(1788000000000);
+	const auto s = [](int seconds) { return int64(seconds) * 1000; };
+	using Kind = Purple::EventKind;
+
+	// A lone action counts only its own span. The rest of the session is
+	// reading, which is time but not active time.
+	auto events = std::vector<Purple::Event>{
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		Ev(t0 + s(10), Kind::Action, 5, u"work"_q),
+		Ev(t0 + s(60), Kind::Close, 5, u"work"_q),
+	};
+	auto sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions.size(), size_t(1));
+	CHECK_EQ(sessions[0].totalMs(), s(60));
+	CHECK_EQ(sessions[0].activeMs, s(3));
+	CHECK_EQ(sessions[0].dialogId, int64(5));
+	CHECK_EQ(sessions[0].preset, u"work"_q);
+
+	// Two actions inside active_gap: the whole gap counts, plus the last
+	// action's own span. This is what makes a conversation read as one stretch
+	// of active time rather than as a row of three-second spikes.
+	events = {
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		Ev(t0 + s(10), Kind::Action, 5, u"work"_q),
+		Ev(t0 + s(30), Kind::Action, 5, u"work"_q),
+		Ev(t0 + s(60), Kind::Close, 5, u"work"_q),
+	};
+	sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions.size(), size_t(1));
+	CHECK_EQ(sessions[0].activeMs, s(23));
+
+	// Outside the gap they are two lone actions again.
+	events[2].unixMs = t0 + s(50);
+	sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions[0].activeMs, s(6));
+
+	// Active time never outruns the session it is inside: send and close
+	// immediately and you were active for the moment you were there.
+	events = {
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		Ev(t0 + s(10), Kind::Action, 5, u"work"_q),
+		Ev(t0 + s(11), Kind::Close, 5, u"work"_q),
+	};
+	sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions[0].activeMs, s(1));
+
+	// Idle pauses the session, and the pause is stamped back to where the
+	// input actually stopped - idle_after before the recorder noticed - so a
+	// changed threshold re-derives the same log differently.
+	events = {
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		Ev(t0 + s(120), Kind::Idle, 5, u"work"_q),
+		Ev(t0 + s(200), Kind::Resume, 5, u"work"_q),
+		Ev(t0 + s(260), Kind::Close, 5, u"work"_q),
+	};
+	sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions.size(), size_t(1));
+	CHECK_EQ(sessions[0].idleMs, s(140));
+	CHECK_EQ(sessions[0].totalMs(), s(120));
+
+	auto slower = settings;
+	slower.idleAfterSeconds = 30;
+	sessions = Purple::DeriveSessions(events, slower);
+	CHECK_EQ(sessions[0].idleMs, s(110));
+	CHECK_EQ(sessions[0].totalMs(), s(150));
+
+	// An idle nobody resumed from runs to the end of the session.
+	events.erase(events.begin() + 2);
+	sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions[0].idleMs, s(200));
+	CHECK_EQ(sessions[0].totalMs(), s(60));
+
+	// A preset event cuts the session in two, so every second of it has
+	// exactly one preset - and the chat carries across the cut.
+	events = {
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		Ev(t0 + s(10), Kind::Action, 5, u"work"_q),
+		Ev(t0 + s(60), Kind::Preset, 0, u"home"_q),
+		Ev(t0 + s(120), Kind::Close, 5, u"home"_q),
+	};
+	sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions.size(), size_t(2));
+	CHECK_EQ(sessions[0].preset, u"work"_q);
+	CHECK_EQ(sessions[0].totalMs(), s(60));
+	CHECK_EQ(sessions[0].activeMs, s(3));
+	CHECK_EQ(sessions[1].preset, u"home"_q);
+	CHECK_EQ(sessions[1].dialogId, int64(5));
+	CHECK_EQ(sessions[1].totalMs(), s(60));
+	CHECK_EQ(sessions[1].activeMs, int64(0));
+
+	// Going to the background ends the session - a chat you cannot see is not
+	// screen time - and coming back does not start one on its own.
+	events = {
+		Ev(t0, Kind::Foreground),
+		Ev(t0 + s(1), Kind::Open, 5, u"work"_q),
+		Ev(t0 + s(31), Kind::Background),
+		Ev(t0 + s(61), Kind::Foreground),
+		Ev(t0 + s(61), Kind::Open, 5, u"work"_q),
+		Ev(t0 + s(91), Kind::Close, 5, u"work"_q),
+	};
+	sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions.size(), size_t(2));
+	CHECK_EQ(sessions[0].totalMs(), s(30));
+	CHECK_EQ(sessions[1].totalMs(), s(30));
+
+	// An Open with nothing closed before it is the ordinary case on a phone,
+	// and a session still open at the end of the log ends where the log does.
+	events = {
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		Ev(t0 + s(20), Kind::Open, 6, u"work"_q),
+		Ev(t0 + s(50), Kind::Action, 6, u"work"_q),
+	};
+	sessions = Purple::DeriveSessions(events, settings);
+	CHECK_EQ(sessions.size(), size_t(2));
+	CHECK_EQ(sessions[0].dialogId, int64(5));
+	CHECK_EQ(sessions[0].totalMs(), s(20));
+	CHECK_EQ(sessions[1].dialogId, int64(6));
+	CHECK_EQ(sessions[1].totalMs(), s(30));
+
+	CHECK(Purple::DeriveSessions({}, settings).empty());
+}
+
+void TestScreenTimeTotals() {
+	Begin("screen time totals");
+
+	// UTC rather than the machine's zone: a day boundary is a local-time
+	// question, and a test that asked the machine would answer differently in
+	// two places.
+	const auto zone = QTimeZone::utc();
+	const auto at = [&](int year, int month, int day, int hour, int minute) {
+		return QDateTime(QDate(year, month, day), QTime(hour, minute), zone)
+			.toMSecsSinceEpoch();
+	};
+	const auto minutes = [](int count) { return int64(count) * 60 * 1000; };
+
+	auto first = Purple::Session();
+	first.startMs = at(2026, 8, 31, 10, 0);
+	first.endMs = at(2026, 8, 31, 10, 30);
+	first.dialogId = 1;
+	first.chatKind = Purple::ScreenTimeKind::Private;
+	first.preset = u"work"_q;
+	first.activeMs = minutes(10);
+
+	auto second = Purple::Session();
+	second.startMs = at(2026, 9, 1, 10, 30);
+	second.endMs = at(2026, 9, 1, 11, 30);
+	second.dialogId = 2;
+	second.chatKind = Purple::ScreenTimeKind::Group;
+	second.preset = u"home"_q;
+	second.activeMs = minutes(20);
+	second.hidden = true;
+
+	const auto sessions = std::vector<Purple::Session>{ first, second };
+	const auto from = at(2026, 8, 31, 0, 0);
+	const auto to = at(2026, 9, 2, 0, 0);
+
+	const auto totals = Purple::RangeTotals(sessions, from, to);
+	CHECK_EQ(totals.totalMs, minutes(90));
+	CHECK_EQ(totals.activeMs, minutes(30));
+
+	// Time in a chat the preset was hiding is part of the total, not on top
+	// of it - it is the "while peeking" number.
+	CHECK_EQ(totals.hiddenMs, minutes(60));
+	CHECK_EQ(totals.chats.size(), size_t(2));
+	CHECK_EQ(totals.chats[0].dialogId, int64(2));
+	CHECK_EQ(totals.chats[0].totalMs, minutes(60));
+	CHECK_EQ(totals.chats[1].dialogId, int64(1));
+	CHECK_EQ(totals.kinds.size(), size_t(2));
+	CHECK(totals.kinds[0].chatKind == Purple::ScreenTimeKind::Group);
+	CHECK_EQ(totals.presets.size(), size_t(2));
+	CHECK_EQ(totals.presets[0].preset, u"home"_q);
+	CHECK_EQ(totals.presets[1].preset, u"work"_q);
+
+	// Days: the month boundary falls between the two, so they never land in
+	// one bucket however close together they are.
+	auto buckets = Purple::Buckets(
+		sessions,
+		from,
+		to,
+		Purple::BucketUnit::Day,
+		zone);
+	CHECK_EQ(buckets.size(), size_t(2));
+	CHECK_EQ(buckets[0].label, u"2026-08-31"_q);
+	CHECK_EQ(buckets[0].totalMs, minutes(30));
+	CHECK_EQ(buckets[1].label, u"2026-09-01"_q);
+	CHECK_EQ(buckets[1].totalMs, minutes(60));
+	CHECK_EQ(buckets[1].activeMs, minutes(20));
+
+	buckets = Purple::Buckets(
+		sessions,
+		from,
+		to,
+		Purple::BucketUnit::Month,
+		zone);
+	CHECK_EQ(buckets.size(), size_t(2));
+	CHECK_EQ(buckets[0].label, u"2026-08"_q);
+	CHECK_EQ(buckets[0].totalMs, minutes(30));
+	CHECK_EQ(buckets[1].label, u"2026-09"_q);
+	CHECK_EQ(buckets[1].totalMs, minutes(60));
+
+	// A week runs Monday to Monday whatever the range does, so the last day of
+	// August and the first of September - a Monday and the Tuesday after it -
+	// are the same week even though they are not the same month.
+	buckets = Purple::Buckets(
+		sessions,
+		from,
+		to,
+		Purple::BucketUnit::Week,
+		zone);
+	CHECK_EQ(buckets.size(), size_t(1));
+	CHECK_EQ(buckets[0].label, u"2026-W36"_q);
+	CHECK_EQ(buckets[0].totalMs, minutes(90));
+
+	// Hour of day folds every day in the range onto one clock, and splits a
+	// session across the hour boundary it crosses rather than filing all of it
+	// under the hour it began in.
+	buckets = Purple::Buckets(
+		sessions,
+		from,
+		to,
+		Purple::BucketUnit::HourOfDay,
+		zone);
+	CHECK_EQ(buckets.size(), size_t(24));
+	CHECK_EQ(buckets[10].label, u"10"_q);
+	CHECK_EQ(buckets[10].totalMs, minutes(60));
+	CHECK_EQ(buckets[11].totalMs, minutes(30));
+	CHECK_EQ(buckets[9].totalMs, int64(0));
+
+	// The heat map is the same split, kept apart by weekday: 2026-08-31 is a
+	// Monday and the day after it a Tuesday.
+	const auto heat = Purple::HeatMapFor(sessions, from, to, zone);
+	CHECK_EQ(heat.total(1, 10), minutes(30));
+	CHECK_EQ(heat.total(2, 10), minutes(30));
+	CHECK_EQ(heat.total(2, 11), minutes(30));
+	CHECK_EQ(heat.total(3, 10), int64(0));
+	CHECK_EQ(heat.active(2, 10), minutes(10));
+	CHECK_EQ(heat.total(0, 10), int64(0));
+	CHECK_EQ(heat.total(8, 10), int64(0));
+
+	// Against the range of the same length immediately before it, which is
+	// what "up 100% on yesterday" means.
+	const auto compare = Purple::Compare(
+		sessions,
+		at(2026, 9, 1, 0, 0),
+		at(2026, 9, 2, 0, 0));
+	CHECK_EQ(compare.current.totalMs, minutes(60));
+	CHECK_EQ(compare.previous.totalMs, minutes(30));
+	CHECK_EQ(compare.deltaMs, minutes(30));
+	CHECK(compare.changePercent.has_value());
+	CHECK_EQ(*compare.changePercent, 100);
+
+	// Nothing to compare against is not zero percent: there is no percentage
+	// change from nothing, and any number shown there would be invented.
+	const auto alone = Purple::Compare(
+		sessions,
+		at(2026, 8, 31, 0, 0),
+		at(2026, 9, 1, 0, 0));
+	CHECK(!alone.changePercent.has_value());
+	CHECK_EQ(alone.deltaMs, minutes(30));
+}
+
+void TestScreenTimeBudgets() {
+	Begin("screen time budgets");
+
+	const auto zone = QTimeZone::utc();
+	const auto at = [&](int year, int month, int day, int hour, int minute) {
+		return QDateTime(QDate(year, month, day), QTime(hour, minute), zone)
+			.toMSecsSinceEpoch();
+	};
+	const auto parsed = Parse(uR"(
+[presets.work]
+list_order = []
+
+[screen_time]
+enabled_p = true
+
+[[screen_time.budgets]]
+target = "chat:7"
+per_day = "30m"
+mode = "hard"
+snooze = "5m"
+snoozes_per_day = 2
+
+[[screen_time.budgets]]
+target = "kind:groups"
+per_day = "2h"
+
+[[screen_time.budgets]]
+target = "preset:work"
+per_day = "1h"
+
+[[screen_time.budgets]]
+target = "chat:7"
+per_day = "10m"
+mode = "hard"
+snoozes_per_day = 0
+)"_q);
+	CHECK(parsed.ok());
+	CHECK(!WarnsAbout(parsed, u"screen_time"_q));
+	const auto &screen = parsed.settings.screenTime;
+
+	auto open = Ev(
+		at(2026, 9, 1, 10, 0),
+		Purple::EventKind::Open,
+		7,
+		u"work"_q);
+	open.chatKind = Purple::ScreenTimeKind::Private;
+	const auto events = std::vector<Purple::Event>{
+		open,
+		Ev(at(2026, 9, 1, 10, 40), Purple::EventKind::Close, 7, u"work"_q),
+	};
+
+	const auto ledger = Purple::BudgetLedger(
+		events,
+		screen,
+		QDate(2026, 9, 1),
+		zone);
+	CHECK_EQ(ledger.size(), size_t(4));
+	CHECK_EQ(ledger[0].index, 0);
+	CHECK_EQ(ledger[0].spentMs, int64(40) * 60 * 1000);
+	CHECK_EQ(ledger[0].perDayMs, int64(30) * 60 * 1000);
+	CHECK(ledger[0].reached);
+
+	// A budget for something else has spent nothing and is not reached.
+	CHECK_EQ(ledger[1].spentMs, int64(0));
+	CHECK(!ledger[1].reached);
+
+	// The preset budget counts the same forty minutes, because the session ran
+	// under it - one session can be inside several budgets at once.
+	CHECK_EQ(ledger[2].spentMs, int64(40) * 60 * 1000);
+	CHECK(!ledger[2].reached);
+
+	// Another day sees nothing of it.
+	const auto other = Purple::BudgetLedger(
+		events,
+		screen,
+		QDate(2026, 9, 2),
+		zone);
+	CHECK_EQ(other[0].spentMs, int64(0));
+	CHECK(!other[0].reached);
+
+	// The cover is a hard budget's, and only while snoozes are left.
+	CHECK(Purple::CoverAllowed(0, screen.budgets[0]));
+	CHECK(Purple::CoverAllowed(1, screen.budgets[0]));
+	CHECK(!Purple::CoverAllowed(2, screen.budgets[0]));
+
+	// A soft budget never puts one up, and a hard one that offers no snooze is
+	// absolute.
+	CHECK(!Purple::CoverAllowed(0, screen.budgets[1]));
+	CHECK(!Purple::CoverAllowed(0, screen.budgets[3]));
+
+	// Retention drops what is past it and keeps the order of what is left. A
+	// retention of zero keeps everything, like every other zero here.
+	const auto now = at(2026, 9, 1, 12, 0);
+	const auto day = int64(24) * 60 * 60 * 1000;
+	const auto log = std::vector<Purple::Event>{
+		Ev(now - 100 * day, Purple::EventKind::Open, 1),
+		Ev(now - 89 * day, Purple::EventKind::Open, 2),
+		Ev(now - day, Purple::EventKind::Open, 3),
+	};
+	const auto kept = Purple::Prune(log, now, 90);
+	CHECK_EQ(kept.size(), size_t(2));
+	CHECK_EQ(kept[0].dialogId, int64(2));
+	CHECK_EQ(kept[1].dialogId, int64(3));
+	CHECK_EQ(Purple::Prune(log, now, 0).size(), size_t(3));
+}
+
+void TestNestedWindows() {
+	Begin("nested schedule windows");
+
+	// 2026-08-17 is a Monday, so dayOfWeek() runs 1..7 across that week.
+	const auto at = [](int weekday, int hour, int minute) {
+		return QDateTime(
+			QDate(2026, 8, 16 + weekday),
+			QTime(hour, minute));
+	};
+	const auto rule = [](
+			std::vector<int> days,
+			int from,
+			int till,
+			const QString &preset) {
+		auto result = Purple::ScheduleRule();
+		result.days = std::move(days);
+		result.from = from;
+		result.till = till;
+		result.preset = preset;
+		return result;
+	};
+	const auto target = [](
+			const Purple::Schedule &schedule,
+			const QDateTime &when) {
+		const auto result = Purple::ScheduleTarget(schedule, when);
+		return result ? *result : u"<nothing>"_q;
+	};
+
+	// Lunch inside work. The narrower window wins whichever order the two are
+	// written in, which is the whole point: nobody remembers which line of
+	// their own file came first.
+	auto schedule = Purple::Schedule();
+	schedule.rules.push_back(rule({ 1 }, 8 * 60, 17 * 60, u"work"_q));
+	schedule.rules.push_back(rule({ 1 }, 12 * 60, 14 * 60, u"lunch"_q));
+	CHECK_EQ(target(schedule, at(1, 9, 0)), u"work"_q);
+	CHECK_EQ(target(schedule, at(1, 13, 0)), u"lunch"_q);
+	CHECK_EQ(target(schedule, at(1, 14, 0)), u"work"_q);
+	CHECK_EQ(target(schedule, at(1, 17, 0)), u"normal"_q);
+
+	auto reversed = Purple::Schedule();
+	reversed.rules.push_back(rule({ 1 }, 12 * 60, 14 * 60, u"lunch"_q));
+	reversed.rules.push_back(rule({ 1 }, 8 * 60, 17 * 60, u"work"_q));
+	CHECK_EQ(target(reversed, at(1, 9, 0)), u"work"_q);
+	CHECK_EQ(target(reversed, at(1, 13, 0)), u"lunch"_q);
+	CHECK_EQ(target(reversed, at(1, 14, 0)), u"work"_q);
+
+	// The far end of the nested window is a window STARTING, not one ending,
+	// because the target moves to something that is not the outside preset.
+	// So work resumes at two o'clock even after a preset chosen by hand during
+	// lunch - which is the sequence the whole rule exists for.
+	CHECK(Purple::ScheduleApplies(
+		schedule,
+		u"lunch"_q,
+		Purple::PresetSource::Schedule));
+	CHECK(Purple::ScheduleApplies(
+		schedule,
+		u"work"_q,
+		Purple::PresetSource::Manual));
+
+	// ... and five o'clock is still a window ending, so it leaves a manual
+	// choice alone.
+	CHECK(!Purple::ScheduleApplies(
+		schedule,
+		u"normal"_q,
+		Purple::PresetSource::Manual));
+
+	// Two rules with the same window really are the same statement twice, so
+	// file order is the tie-break and nothing else changed.
+	auto equal = Purple::Schedule();
+	equal.rules.push_back(rule({ 1 }, 9 * 60, 17 * 60, u"first"_q));
+	equal.rules.push_back(rule({ 1 }, 9 * 60, 17 * 60, u"second"_q));
+	CHECK_EQ(target(equal, at(1, 10, 0)), u"first"_q);
+	equal.rules[0].enabled = false;
+	CHECK_EQ(target(equal, at(1, 10, 0)), u"second"_q);
+
+	// A window crossing midnight is measured through it. Naively it would be a
+	// negative length and the narrowest thing in any file, so the evening
+	// window nested inside the night one would never win.
+	auto night = Purple::Schedule();
+	night.rules.push_back(rule({ 1 }, 22 * 60, 6 * 60, u"sleep"_q));
+	night.rules.push_back(rule({ 1 }, 21 * 60, 23 * 60 + 30, u"evening"_q));
+	CHECK_EQ(target(night, at(1, 23, 0)), u"evening"_q);
+	CHECK_EQ(target(night, at(1, 23, 30)), u"sleep"_q);
+	CHECK_EQ(target(night, at(2, 5, 0)), u"sleep"_q);
+
+	// The same the other side of midnight: a five-hour morning window beats
+	// the eight-hour night one it sits inside.
+	night.rules.push_back(rule({ 2 }, 2 * 60, 7 * 60, u"early"_q));
+	CHECK_EQ(target(night, at(2, 5, 0)), u"early"_q);
+	CHECK_EQ(target(night, at(1, 23, 0)), u"evening"_q);
+
+	// And across rulesets: a narrow rule in an `always' ruleset beats a wider
+	// one in the tier that was chosen for this device, even though the chosen
+	// tier's rules are merged first.
+	const auto parsed = Parse(uR"(
+[presets.work]
+list_order = []
+
+[presets.lunch]
+list_order = []
+
+[[schedule.rulesets]]
+name   = "phone"
+device = "mobile"
+
+[[schedule.rulesets.rules]]
+days   = ["mon"]
+from   = "08:00"
+to     = "17:00"
+preset = "work"
+
+[[schedule.rulesets]]
+name = "everywhere"
+mode = "always"
+
+[[schedule.rulesets.rules]]
+days   = ["mon"]
+from   = "12:00"
+to     = "14:00"
+preset = "lunch"
+)"_q);
+	CHECK(parsed.ok());
+	CHECK(!WarnsAbout(parsed, u"schedule"_q));
+	const auto phone = Device(u"pixel-11ff"_q, u"android"_q, u"mobile"_q);
+	const auto active = Purple::ActiveSchedule(parsed.settings.schedule, phone);
+	CHECK_EQ(active.rules.size(), size_t(2));
+	CHECK_EQ(active.rules[0]->preset, u"work"_q);
+
+	const auto onPhone = [&](const QDateTime &when) {
+		const auto result = Purple::ScheduleTarget(
+			parsed.settings.schedule,
+			when,
+			phone);
+		return result ? *result : u"<nothing>"_q;
+	};
+	CHECK_EQ(onPhone(at(1, 9, 0)), u"work"_q);
+	CHECK_EQ(onPhone(at(1, 13, 0)), u"lunch"_q);
+	CHECK_EQ(onPhone(at(1, 14, 0)), u"work"_q);
+
+	const auto now = Purple::ScheduleRuleNow(
+		parsed.settings.schedule,
+		at(1, 13, 0),
+		phone);
+	CHECK(now != nullptr);
+	CHECK_EQ(now->preset, u"lunch"_q);
+	CHECK_EQ(now->from, 12 * 60);
+}
+
 } // namespace
 
 int main() {
@@ -4966,6 +5849,15 @@ int main() {
 	TestDevices();
 	TestSchedulePauseUntil();
 	TestResolvedCache();
+	TestLastSeenKeys();
+	TestLastSeenReasons();
+	TestLastSeenTrades();
+	TestScreenTimeSettings();
+	TestScreenTimeLog();
+	TestScreenTimeSessions();
+	TestScreenTimeTotals();
+	TestScreenTimeBudgets();
+	TestNestedWindows();
 
 	std::printf("%d checks, %d failures\n", Checks, Failures);
 	return Failures ? 1 : 0;
