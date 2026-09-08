@@ -448,6 +448,362 @@ struct Position {
 	return result;
 }
 
+// The [schedule] table. Inline is refused by name and by line: editing lines
+// inside `schedule = { ... }' would mean re-serialising the table, which is the
+// one thing this file exists not to do.
+[[nodiscard]] const toml::table *FindScheduleTable(
+		const toml::table &root,
+		QString &error) {
+	const auto node = root.get("schedule");
+	if (!node) {
+		error = u"settings.toml has no [schedule] table."_q;
+		return nullptr;
+	}
+	const auto table = node->as_table();
+	if (!table) {
+		error = u"'schedule' is not a table (line %1)."_q
+			.arg(int(node->source().begin.line));
+		return nullptr;
+	} else if (table->is_inline()) {
+		error = u"[schedule] is written inline (line %1); rewrite it as a table "
+			"before editing the schedule from the app."_q
+			.arg(int(table->source().begin.line));
+		return nullptr;
+	}
+	return table;
+}
+
+[[nodiscard]] const toml::array *FindScheduleRules(
+		const toml::table &root,
+		QString &error) {
+	const auto table = FindScheduleTable(root, error);
+	if (!table) {
+		return nullptr;
+	}
+	const auto rules = table->get("rules");
+	if (!rules) {
+		error = u"settings.toml has no [[schedule.rules]] blocks."_q;
+		return nullptr;
+	}
+	const auto array = rules->as_array();
+	if (!array) {
+		error = u"'schedule.rules' is not an array (line %1)."_q
+			.arg(int(rules->source().begin.line));
+		return nullptr;
+	}
+	return array;
+}
+
+// One rule by its raw position. The array is walked as it is rather than
+// filtered: an element the parser threw away is still an element, and a rule
+// keeping its address while the one above it is broken is the whole point of
+// addressing rules this way.
+[[nodiscard]] const toml::table *ScheduleRuleAt(
+		const toml::array &rules,
+		int index,
+		QString &error) {
+	if (index < 0 || index >= int(rules.size())) {
+		error = u"there is no schedule rule %1 any more."_q.arg(index + 1);
+		return nullptr;
+	}
+	const auto element = rules.get(index);
+	const auto fields = element ? element->as_table() : nullptr;
+	if (!fields) {
+		error = u"schedule rule %1 is not a table (line %2)."_q
+			.arg(index + 1)
+			.arg(element ? int(element->source().begin.line) : 0);
+		return nullptr;
+	} else if (fields->is_inline()) {
+		error = u"schedule rule %1 is written inline (line %2); rewrite it as a "
+			"[[schedule.rules]] table before editing it from the app."_q
+			.arg(index + 1)
+			.arg(int(fields->source().begin.line));
+		return nullptr;
+	}
+	return fields;
+}
+
+// Everything the app owns in one rule, as one string, so an edit can be checked
+// against what it meant to write. Read straight off the file rather than
+// through the parser: a rule the parser drops still has to compare equal to
+// itself, or removing rule three could not prove it left rules one and two
+// alone.
+[[nodiscard]] QString RuleSignature(const toml::node &element) {
+	const auto fields = element.as_table();
+	if (!fields) {
+		return u"?"_q;
+	}
+	const auto value = [&](std::string_view key) -> QString {
+		const auto node = fields->get(key);
+		if (!node) {
+			return u"-"_q;
+		} else if (const auto text = node->value<std::string_view>()) {
+			return Text(*text);
+		} else if (const auto flag = node->value<bool>()) {
+			return *flag ? u"true"_q : u"false"_q;
+		} else if (const auto array = node->as_array()) {
+			auto parts = QStringList();
+			for (auto &&item : *array) {
+				const auto text = item.value<std::string_view>();
+				parts.push_back(text ? Text(*text) : u"?"_q);
+			}
+			return parts.join(u","_q);
+		}
+		return u"?"_q;
+	};
+	return QStringList{
+		value("enabled_p"),
+		value("days"),
+		value("from"),
+		value("to"),
+		value("preset"),
+	}.join(u"|"_q);
+}
+
+[[nodiscard]] QStringList RuleSignatures(const toml::array &rules) {
+	auto result = QStringList();
+	for (auto &&element : rules) {
+		result.push_back(RuleSignature(element));
+	}
+	return result;
+}
+
+// The same signature for a rule we are about to write, spelt the way we write
+// it - which is why the check below can be an equality rather than a parse.
+[[nodiscard]] QString WrittenSignature(const ScheduleRule &rule) {
+	auto days = QStringList();
+	for (const auto day : rule.days) {
+		days.push_back(WeekdayName(day));
+	}
+	return QStringList{
+		rule.enabled ? u"true"_q : u"false"_q,
+		days.join(u","_q),
+		TimeOfDayText(rule.from),
+		TimeOfDayText(rule.till),
+		rule.preset,
+	}.join(u"|"_q);
+}
+
+// Whether the rule in the file is still the one the screen read. Times are
+// compared as minutes, so re-typing "9:00" as "09:00" by hand is not treated as
+// somebody else's edit.
+[[nodiscard]] bool RuleMatches(
+		const toml::table &fields,
+		const ScheduleRuleExpected &expected) {
+	const auto text = [&](std::string_view key) -> QString {
+		const auto node = fields.get(key);
+		if (!node) {
+			return QString();
+		}
+		const auto value = node->value<std::string_view>();
+		return value ? Text(*value) : QString();
+	};
+	return ParseTimeOfDay(text("from")).value_or(-1) == expected.from
+		&& ParseTimeOfDay(text("to")).value_or(-1) == expected.till
+		&& text("preset") == expected.preset;
+}
+
+// Where the value starting at `from' ends: the line it ends on, and the index
+// one past its last character there. Worked out by hand rather than read off
+// toml++'s source region, for the same reason FindClosing() is - nothing here
+// depends on whether that region's end is inclusive.
+struct ValueEnd {
+	int line = 0; // 1-based.
+	int index = 0; // 0-based, one past the end.
+};
+
+[[nodiscard]] std::optional<ValueEnd> FindValueEnd(
+		const QStringList &lines,
+		Position from) {
+	if (from.line < 1 || from.line > lines.size()) {
+		return std::nullopt;
+	}
+	const auto &line = lines[from.line - 1];
+	const auto start = from.column - 1;
+	if (start < 0 || start >= line.size()) {
+		return std::nullopt;
+	}
+	const auto first = line[start];
+	if (first == '[') {
+		const auto close = FindClosing(lines, from);
+		return close
+			? std::make_optional(ValueEnd{ close->line, close->column })
+			: std::nullopt;
+	} else if (first == '"' || first == '\'') {
+		if (line.mid(start, 3) == QString(3, first)) {
+			// A multi-line string. Nothing the app writes is one, and finding
+			// where it ends means a second copy of the parser's own scanner, so
+			// this leaves it to the person who typed it.
+			return std::nullopt;
+		}
+		const auto escapes = (first == '"');
+		for (auto i = start + 1; i < line.size(); ++i) {
+			if (escapes && line[i] == '\\') {
+				++i;
+			} else if (line[i] == first) {
+				return ValueEnd{ from.line, int(i) + 1 };
+			}
+		}
+		return std::nullopt;
+	}
+	auto i = start;
+	while (i < line.size()
+		&& !line[i].isSpace() // A carriage return among them, on a CRLF file.
+		&& line[i] != '#'
+		&& line[i] != ','
+		&& line[i] != ']'
+		&& line[i] != '}') {
+		++i;
+	}
+	return (i > start)
+		? std::make_optional(ValueEnd{ from.line, int(i) })
+		: std::nullopt;
+}
+
+// Replaces the value that starts at `at', keeping whatever the line holds
+// before it and after it - the key, the spacing, a trailing comment. A value
+// spread over several lines comes back as one, because the span is all we are
+// allowed to touch and all of it is ours.
+[[nodiscard]] bool ReplaceValue(
+		QStringList &lines,
+		Position at,
+		const QString &value) {
+	const auto end = FindValueEnd(lines, at);
+	if (!end) {
+		return false;
+	}
+	const auto head = lines[at.line - 1].left(at.column - 1);
+	const auto tail = lines[end->line - 1].mid(end->index);
+	auto rebuilt = lines.mid(0, at.line - 1);
+	rebuilt.push_back(head + value + tail);
+	rebuilt += lines.mid(end->line);
+	lines = std::move(rebuilt);
+	return true;
+}
+
+// The last line a block occupies: the line its own last value ends on. Asking
+// the values rather than scanning for the next header, because a `days' array
+// written one weekday per line has lines of its own that a scanner would have
+// to know to skip.
+[[nodiscard]] int BlockLastLine(
+		const toml::table &fields,
+		const QStringList &lines) {
+	auto last = int(fields.source().begin.line);
+	for (auto &&[key, value] : fields) {
+		const auto at = Position{
+			int(value.source().begin.line),
+			int(value.source().begin.column),
+		};
+		const auto end = FindValueEnd(lines, at);
+		last = std::max(last, end ? end->line : at.line);
+	}
+	return last;
+}
+
+// Where a line added to a block goes, and where a block being taken out stops:
+// the next table header, backed over the blank lines and the comment block
+// above it, which belong to whatever follows rather than to what is here.
+// Returns a line index to insert before, or the line count for end of file.
+[[nodiscard]] int AfterBlock(const QStringList &lines, int lastLine) {
+	auto i = lastLine;
+	while (i < lines.size() && !lines[i].trimmed().startsWith('[')) {
+		++i;
+	}
+	while (i > lastLine
+		&& (lines[i - 1].trimmed().isEmpty()
+			|| lines[i - 1].trimmed().startsWith('#'))) {
+		--i;
+	}
+	return i;
+}
+
+[[nodiscard]] QString DaysValue(const std::vector<int> &days) {
+	auto parts = QStringList();
+	for (const auto day : days) {
+		parts.push_back(QuotedValue(WeekdayName(day)));
+	}
+	return u"["_q + parts.join(u", "_q) + u"]"_q;
+}
+
+// The value every key the app owns takes, in the order a hand-written rule puts
+// them in. One place, so a rule the app creates and a rule the app edits end up
+// saying the same thing the same way.
+[[nodiscard]] std::vector<std::pair<QString, QString>> RuleValues(
+		const ScheduleRule &rule) {
+	return {
+		{ u"enabled_p"_q, rule.enabled ? u"true"_q : u"false"_q },
+		{ u"days"_q, DaysValue(rule.days) },
+		{ u"from"_q, QuotedValue(TimeOfDayText(rule.from)) },
+		{ u"to"_q, QuotedValue(TimeOfDayText(rule.till)) },
+		{ u"preset"_q, QuotedValue(rule.preset) },
+	};
+}
+
+// What the parser would throw away on the next read. A rule written from a
+// screen that got one of these wrong would look saved and then not be there.
+// The days are not checked for being empty: that is a warning for a rule typed
+// by hand too, and it means "every day" rather than "nothing".
+[[nodiscard]] QString RuleProblem(const ScheduleRule &rule) {
+	if (rule.preset.trimmed().isEmpty()) {
+		return u"a schedule rule needs a preset."_q;
+	} else if (TimeOfDayText(rule.from).isEmpty()
+		|| TimeOfDayText(rule.till).isEmpty()) {
+		return u"a schedule rule needs a 'from' and a 'to' time of day."_q;
+	} else if (rule.from == rule.till) {
+		return u"a schedule rule starting and ending at the same time covers "
+			"nothing."_q;
+	}
+	for (const auto day : rule.days) {
+		if (WeekdayName(day).isEmpty()) {
+			return u"'%1' is not a weekday."_q.arg(day);
+		}
+	}
+	return QString();
+}
+
+// Re-reads what we wrote and refuses unless every rule is what it should be:
+// the one we touched saying exactly what we asked for, and every other rule
+// still where it was, saying what it said. Signatures rather than text, so the
+// check does not depend on the spacing we happened to write.
+[[nodiscard]] QString VerifySchedule(
+		const QString &text,
+		const QString &path,
+		const QStringList &expected) {
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return u"the edit would not parse back (%1:%2: %3)"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description()));
+	}
+	auto ignored = QString();
+	const auto rules = FindScheduleRules(parsed.table(), ignored);
+	const auto after = rules ? RuleSignatures(*rules) : QStringList();
+	if (after != expected) {
+		return u"the edit left the schedule holding the wrong rules"_q;
+	}
+	return QString();
+}
+
+// Whether this line is the header that declares [table], as opposed to the line
+// toml++ points at for a table it never saw a header for.
+[[nodiscard]] bool DeclaresTable(const QString &line, const QString &table) {
+	const auto trimmed = line.trimmed();
+	if (!trimmed.startsWith('[') || trimmed.startsWith(u"[["_q)) {
+		return false;
+	}
+	const auto close = trimmed.indexOf(']');
+	if (close < 0) {
+		return false;
+	}
+	const auto inner = trimmed.mid(1, close - 1).trimmed();
+	return (inner == table) || (inner == TableKey(table));
+}
+
 // The lines half of writing a `pinned' array. Shared, because a preset's main
 // view and an extra view differ only in which table was located, what it is
 // called when something goes wrong, and whether there is a key to sit the fresh
@@ -928,11 +1284,35 @@ SpliceResult SetTableBool(
 	} else {
 		const auto assignment = u"%1 = %2"_q
 			.arg(key, value ? u"true"_q : u"false"_q);
-		const auto header = (existing && !existing->is_inline())
-			? int(existing->source().begin.line)
-			: 0;
+		if (existing && existing->is_inline()) {
+			return Refuse(text, u"[%1] is written inline; rewrite it as a table "
+				"before setting '%2' from the app."_q.arg(table, key));
+		}
+		const auto header = existing ? int(existing->source().begin.line) : 0;
 		if (header >= 1 && header <= lines.size()) {
-			lines.insert(header, assignment);
+			if (DeclaresTable(lines[header - 1], table)) {
+				lines.insert(header, assignment);
+			} else if (lines[header - 1].trimmed().startsWith('[')) {
+				// toml++ hands back a position for a table it never saw a
+				// header for - one it invented because something deeper was
+				// written. [schedule] is the live case: a file holding nothing
+				// but [[schedule.rules]] blocks points here at the first of
+				// them, and putting the key under that line would file it
+				// inside the rule instead of the table. So write the header the
+				// file is missing, above the block that implied it.
+				lines.insert(header - 1, u"[%1]"_q.arg(TableKey(table)));
+				lines.insert(header, assignment);
+				lines.insert(header + 1, QString());
+			} else {
+				// A dotted key wrote the table - `schedule.enabled_p = true'
+				// at the top level. A header inserted above that line would
+				// swallow the dotted key into it and mean something else.
+				return Refuse(text, u"[%1] is written as dotted keys (line %2); "
+					"give it a [%1] header before setting '%3' from the app."_q
+					.arg(table)
+					.arg(header)
+					.arg(key));
+			}
 			result = lines.join('\n');
 		} else {
 			result = text;
@@ -961,6 +1341,297 @@ SpliceResult SetTableBool(
 	splice.text = result;
 	splice.changed = true;
 	return splice;
+}
+
+SpliceResult SetScheduleRule(
+		const QString &text,
+		const QString &path,
+		int index,
+		const ScheduleRuleExpected &expected,
+		const ScheduleRule &rule) {
+	if (const auto problem = RuleProblem(rule); !problem.isEmpty()) {
+		return Refuse(text, problem);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+	auto error = QString();
+	const auto rules = FindScheduleRules(parsed.table(), error);
+	if (!rules) {
+		return Refuse(text, error);
+	}
+	const auto fields = ScheduleRuleAt(*rules, index, error);
+	if (!fields) {
+		return Refuse(text, error);
+	} else if (!RuleMatches(*fields, expected)) {
+		return Refuse(text, u"schedule rule %1 is not the rule you were "
+			"editing any more; the file changed underneath."_q.arg(index + 1));
+	}
+	const auto before = RuleSignatures(*rules);
+	auto after = before;
+	after[index] = WrittenSignature(rule);
+	if (after == before) {
+		return Unchanged(text);
+	}
+
+	auto lines = text.split('\n');
+	const auto crlf = std::any_of(lines.begin(), lines.end(), [](
+			const QString &line) {
+		return line.endsWith('\r');
+	});
+	const auto ending = crlf ? u"\r"_q : QString();
+	const auto header = int(fields->source().begin.line);
+	if (header < 1 || header > lines.size()) {
+		return Refuse(text, u"could not locate schedule rule %1."_q
+			.arg(index + 1));
+	}
+
+	// A key the block already has is rewritten where it stands; one it never
+	// had joins the end of the block. The rewrites are applied from the bottom
+	// of the file upwards, so a `days' array collapsing from four lines to one
+	// cannot move a line another rewrite is still pointing at.
+	auto indent = Indentation(lines[header - 1]);
+	auto topmost = 0;
+	for (auto &&[key, value] : *fields) {
+		const auto line = int(value.source().begin.line);
+		if (line > header && line <= lines.size()
+			&& (!topmost || line < topmost)) {
+			topmost = line;
+		}
+	}
+	if (topmost) {
+		indent = Indentation(lines[topmost - 1]);
+	}
+	auto rewrites = std::vector<std::pair<Position, QString>>();
+	auto additions = QStringList();
+	for (const auto &[key, value] : RuleValues(rule)) {
+		const auto keyUtf8 = key.toUtf8();
+		const auto node = fields->get(
+			std::string_view(keyUtf8.constData(), keyUtf8.size()));
+		if (node) {
+			rewrites.push_back({
+				Position{
+					int(node->source().begin.line),
+					int(node->source().begin.column),
+				},
+				value,
+			});
+		} else {
+			additions.push_back(indent + key + u" = "_q + value + ending);
+		}
+	}
+	if (!additions.isEmpty()) {
+		const auto at = AfterBlock(lines, BlockLastLine(*fields, lines));
+		for (auto i = additions.size(); i != 0;) {
+			lines.insert(at, additions[--i]);
+		}
+	}
+	std::sort(rewrites.begin(), rewrites.end(), [](
+			const std::pair<Position, QString> &a,
+			const std::pair<Position, QString> &b) {
+		return (a.first.line != b.first.line)
+			? (a.first.line > b.first.line)
+			: (a.first.column > b.first.column);
+	});
+	for (const auto &[at, value] : rewrites) {
+		if (!ReplaceValue(lines, at, value)) {
+			return Refuse(text, u"could not rewrite schedule rule %1 (line "
+				"%2)."_q.arg(index + 1).arg(at.line));
+		}
+	}
+
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifySchedule(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	}
+	result.changed = true;
+	return result;
+}
+
+SpliceResult AppendScheduleRule(
+		const QString &text,
+		const QString &path,
+		const ScheduleRule &rule) {
+	if (const auto problem = RuleProblem(rule); !problem.isEmpty()) {
+		return Refuse(text, problem);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+
+	auto lines = text.split('\n');
+	const auto crlf = std::any_of(lines.begin(), lines.end(), [](
+			const QString &line) {
+		return line.endsWith('\r');
+	});
+	const auto ending = crlf ? u"\r"_q : QString();
+
+	auto before = QStringList();
+	auto at = lines.size();
+	auto section = false;
+	if (parsed.table().get("schedule")) {
+		auto error = QString();
+		const auto table = FindScheduleTable(parsed.table(), error);
+		if (!table) {
+			return Refuse(text, error);
+		}
+		const auto node = table->get("rules");
+		const auto rules = node ? node->as_array() : nullptr;
+		if (node && !rules) {
+			return Refuse(text, u"'schedule.rules' is not an array (line %1)."_q
+				.arg(int(node->source().begin.line)));
+		}
+		before = rules ? RuleSignatures(*rules) : QStringList();
+		if (rules && !rules->empty()) {
+			const auto last = ScheduleRuleAt(
+				*rules,
+				int(rules->size()) - 1,
+				error);
+			if (!last) {
+				return Refuse(text, error);
+			}
+			at = AfterBlock(lines, BlockLastLine(*last, lines));
+		} else {
+			// A [schedule] with no rules yet: the first one goes under the
+			// section's own keys, which is where somebody reading it looks.
+			// An implicit [schedule] - dotted keys, no header - has no such
+			// place, so that one falls through to the end of the file.
+			const auto line = int(table->source().begin.line);
+			if (line >= 1 && line <= lines.size()
+				&& DeclaresTable(lines[line - 1], u"schedule"_q)) {
+				at = AfterBlock(lines, BlockLastLine(*table, lines));
+			}
+		}
+	} else {
+		// No schedule at all. The section header goes in with the rule, so the
+		// file gains one readable block rather than a rules array under nothing.
+		section = true;
+	}
+
+	auto block = QStringList();
+	block.push_back(ending);
+	if (section) {
+		block.push_back(u"[schedule]"_q + ending);
+	}
+	block.push_back(u"[[schedule.rules]]"_q + ending);
+	for (const auto &[key, value] : RuleValues(rule)) {
+		block.push_back(key.leftJustified(9) + u" = "_q + value + ending);
+	}
+	if (at >= lines.size()) {
+		// At the end of the file, where there may be no trailing newline.
+		if (!lines.isEmpty() && lines.back().trimmed().isEmpty()) {
+			lines.removeLast();
+		}
+		if (lines.isEmpty()) {
+			// Nothing above to be separated from.
+			block.removeFirst();
+		}
+		lines += block;
+		lines.push_back(QString());
+	} else {
+		if (!lines[at].trimmed().isEmpty()) {
+			// A blank line below too, unless the file already has one there.
+			block.push_back(QString());
+		}
+		for (auto i = block.size(); i != 0;) {
+			lines.insert(at, block[--i]);
+		}
+	}
+
+	auto after = before;
+	after.push_back(WrittenSignature(rule));
+
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifySchedule(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	}
+	result.changed = true;
+	return result;
+}
+
+SpliceResult RemoveScheduleRule(
+		const QString &text,
+		const QString &path,
+		int index,
+		const ScheduleRuleExpected &expected) {
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+	auto error = QString();
+	const auto rules = FindScheduleRules(parsed.table(), error);
+	if (!rules) {
+		return Refuse(text, error);
+	}
+	const auto fields = ScheduleRuleAt(*rules, index, error);
+	if (!fields) {
+		return Refuse(text, error);
+	} else if (!RuleMatches(*fields, expected)) {
+		return Refuse(text, u"schedule rule %1 is not the rule you were "
+			"editing any more; the file changed underneath."_q.arg(index + 1));
+	}
+	auto after = RuleSignatures(*rules);
+	after.removeAt(index);
+
+	auto lines = text.split('\n');
+	const auto header = int(fields->source().begin.line);
+	if (header < 1 || header > lines.size()) {
+		return Refuse(text, u"could not locate schedule rule %1."_q
+			.arg(index + 1));
+	}
+	const auto stop = AfterBlock(lines, BlockLastLine(*fields, lines));
+	if (stop < header) {
+		return Refuse(text, u"could not tell where schedule rule %1 ends."_q
+			.arg(index + 1));
+	}
+	lines.erase(lines.begin() + (header - 1), lines.begin() + stop);
+
+	// The blank line above the block that is going stays, and so does the one
+	// below it that belongs to whatever follows - which would leave two of them
+	// where there was one. Close the seam.
+	const auto seam = header - 1;
+	if (seam >= 1
+		&& seam < lines.size()
+		&& lines[seam - 1].trimmed().isEmpty()
+		&& lines[seam].trimmed().isEmpty()) {
+		lines.removeAt(seam);
+	}
+
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifySchedule(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	}
+	result.changed = true;
+	return result;
 }
 
 std::vector<PeerIdValue> ListMembers(

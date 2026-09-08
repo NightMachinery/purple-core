@@ -104,6 +104,53 @@ struct SpliceResult {
 	const QString &key,
 	bool value);
 
+// What a screen believes it is about to edit: the window and the preset it read
+// off the rule. Every schedule op takes one and refuses when the rule at that
+// index no longer says the same thing, so a dialog left open while the file
+// changed underneath cannot rewrite or delete a rule other than the one on it.
+//
+// Times are minutes since midnight rather than the text the file holds, so
+// "9:00" and "09:00" are the same rule.
+struct ScheduleRuleExpected {
+	int from = -1;
+	int till = -1;
+	QString preset;
+};
+
+// Rewrites one [[schedule.rules]] block in place, key by key: each of
+// 'enabled_p', 'days', 'from', 'to' and 'preset' has its value replaced where
+// it stands, or is added at the end of the block when the rule never had it.
+// Everything else - a key the app knows nothing about, a comment, the spacing -
+// is left exactly where the user put it.
+//
+// `index' is ScheduleRule::sourceIndex: the position in the RAW array, counting
+// the rules the parser threw away, which is what stops a broken rule in the
+// middle of the file from moving the ones after it.
+[[nodiscard]] SpliceResult SetScheduleRule(
+	const QString &text,
+	const QString &path,
+	int index,
+	const ScheduleRuleExpected &expected,
+	const ScheduleRule &rule);
+
+// Writes a new rule after the last [[schedule.rules]] block, or under
+// [schedule] when there are no rules yet, or as a fresh [schedule] section at
+// the end of the file when there is no schedule at all.
+[[nodiscard]] SpliceResult AppendScheduleRule(
+	const QString &text,
+	const QString &path,
+	const ScheduleRule &rule);
+
+// Takes a rule out: its header down to the line before the next one. The blank
+// line and any comment block above that next header stay where they are - they
+// belong to what follows, not to what is going - and so does anything written
+// above the rule's own header, which may well be a note about the section.
+[[nodiscard]] SpliceResult RemoveScheduleRule(
+	const QString &text,
+	const QString &path,
+	int index,
+	const ScheduleRuleExpected &expected);
+
 // Exposed for the tests: the ids a list holds, in file order.
 [[nodiscard]] std::vector<PeerIdValue> ListMembers(
 	const QString &text,

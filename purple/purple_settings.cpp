@@ -910,6 +910,13 @@ void WarnUnknownLists(
 			continue;
 		}
 		auto rule = ScheduleRule();
+
+		// The counter above is not reset by a `continue', so it still counts
+		// the rules that were skipped - which is the whole point: an index
+		// that shifted when a rule broke would make every edit made from a
+		// screen land on the wrong rule.
+		rule.sourceIndex = index - 1;
+		rule.sourceLine = int(fields->source().begin.line);
 		rule.enabled = ReadBool(*fields, "enabled_p", context, warnings)
 			.value_or(true);
 		const auto from = ReadString(*fields, "from", context, warnings);
@@ -1502,10 +1509,26 @@ std::optional<int> ParseTimeOfDay(const QString &value) {
 	return hours * 60 + minutes;
 }
 
-std::optional<int> ParseWeekday(const QString &value) {
-	static const auto names = std::vector<QString>{
+QString TimeOfDayText(int minutes) {
+	if (minutes < 0 || minutes >= 24 * 60) {
+		return QString();
+	}
+	return u"%1:%2"_q
+		.arg(minutes / 60, 2, 10, QChar('0'))
+		.arg(minutes % 60, 2, 10, QChar('0'));
+}
+
+// The one spelling of the weekdays, shared by the two directions so they can
+// never drift apart.
+[[nodiscard]] static const std::vector<QString> &WeekdayNames() {
+	static const auto result = std::vector<QString>{
 		u"mon"_q, u"tue"_q, u"wed"_q, u"thu"_q, u"fri"_q, u"sat"_q, u"sun"_q,
 	};
+	return result;
+}
+
+std::optional<int> ParseWeekday(const QString &value) {
+	const auto &names = WeekdayNames();
 	const auto trimmed = value.trimmed().toLower();
 	for (auto i = 0; i != int(names.size()); ++i) {
 		if (trimmed == names[i] || trimmed.startsWith(names[i])) {
@@ -1513,6 +1536,13 @@ std::optional<int> ParseWeekday(const QString &value) {
 		}
 	}
 	return std::nullopt;
+}
+
+QString WeekdayName(int day) {
+	const auto &names = WeekdayNames();
+	return (day < 1 || day > int(names.size()))
+		? QString()
+		: names[day - 1];
 }
 
 const List *Settings::list(const QString &name) const {

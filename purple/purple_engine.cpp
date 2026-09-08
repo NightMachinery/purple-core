@@ -355,6 +355,16 @@ std::optional<QString> ScheduleTarget(
 	if (!schedule.enabled || schedule.rules.empty()) {
 		return std::nullopt;
 	}
+	const auto rule = ScheduleRuleNow(schedule, now);
+	return rule ? rule->preset : NormalPreset();
+}
+
+const ScheduleRule *ScheduleRuleNow(
+		const Schedule &schedule,
+		const QDateTime &now) {
+	if (!schedule.enabled) {
+		return nullptr;
+	}
 	const auto covers = [](const ScheduleRule &rule, int day) {
 		return std::find(rule.days.begin(), rule.days.end(), day)
 			!= rule.days.end();
@@ -377,7 +387,7 @@ std::optional<QString> ScheduleTarget(
 			if (covers(rule, today)
 				&& minutes >= rule.from
 				&& minutes < rule.till) {
-				return rule.preset;
+				return &rule;
 			}
 		} else if ((covers(rule, today) && minutes >= rule.from)
 			|| (covers(rule, yesterday) && minutes < rule.till)) {
@@ -385,10 +395,10 @@ std::optional<QString> ScheduleTarget(
 			// "mon, 22:00 to 06:00" runs into Tuesday morning instead of
 			// stopping at midnight or needing Tuesday listed as well - which
 			// would also have claimed Tuesday 00:00 to 06:00 twice over.
-			return rule.preset;
+			return &rule;
 		}
 	}
-	return NormalPreset();
+	return nullptr;
 }
 
 } // namespace Purple

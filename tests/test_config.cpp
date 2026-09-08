@@ -1758,6 +1758,480 @@ untouched = 1
 	CHECK_EQ(broken.text, u"[premium\nenabled = true"_q);
 }
 
+// A schedule with everything the splicer has to survive: comments above a
+// block and beside a value, a `days' array over four lines, and a rule the
+// parser throws away sitting in the middle of the ones it keeps.
+[[nodiscard]] QString ScheduleExample() {
+	return uR"(# my settings
+
+[presets.work]
+list_order = []
+
+[presets.play]
+list_order = []
+
+[schedule]
+# when work happens
+enabled_p = true
+
+# the weekday window
+[[schedule.rules]]
+days   = [
+  "mon",
+  "tue",
+]
+from   = "09:00"
+to     = "17:00"
+preset = "work"   # the important one
+
+[[schedule.rules]]
+from   = "10:00"
+preset = "play"
+
+[[schedule.rules]]
+enabled_p = false
+days      = ["sat"]
+from      = "20:00"
+to        = "23:00"
+preset    = "play"
+
+[peek]
+hotkey = "Ctrl+Alt+K"
+)"_q;
+}
+
+[[nodiscard]] Purple::ScheduleRule Rule(
+		bool enabled,
+		std::vector<int> days,
+		int from,
+		int till,
+		const QString &preset) {
+	auto result = Purple::ScheduleRule();
+	result.enabled = enabled;
+	result.days = std::move(days);
+	result.from = from;
+	result.till = till;
+	result.preset = preset;
+	return result;
+}
+
+void TestScheduleRuleIdentity() {
+	Begin("schedule rule identity");
+
+	const auto text = ScheduleExample();
+	const auto parsed = Parse(text);
+	CHECK(parsed.ok());
+	const auto &rules = parsed.settings.schedule.rules;
+
+	// The middle rule has no 'to', so the parser drops it - and the rule after
+	// it keeps the index it has in the file rather than moving up one. That is
+	// the whole reason the index is recorded: an edit made from a screen has to
+	// land on the rule the user was looking at.
+	CHECK_EQ(rules.size(), size_t(2));
+	CHECK_EQ(rules[0].sourceIndex, 0);
+	CHECK_EQ(rules[1].sourceIndex, 2);
+	CHECK_EQ(rules[1].from, 20 * 60);
+
+	const auto lines = text.split('\n');
+	CHECK_EQ(lines[rules[0].sourceLine - 1].trimmed(), u"[[schedule.rules]]"_q);
+	CHECK_EQ(lines[rules[1].sourceLine - 1].trimmed(), u"[[schedule.rules]]"_q);
+	CHECK(rules[1].sourceLine > rules[0].sourceLine);
+
+	// A rule that came from nowhere says so.
+	CHECK_EQ(Purple::ScheduleRule().sourceIndex, -1);
+	CHECK_EQ(Purple::ScheduleRule().sourceLine, 0);
+}
+
+void TestSpliceScheduleSet() {
+	Begin("splice schedule set");
+
+	const auto text = ScheduleExample();
+	const auto edited = Purple::SetScheduleRule(
+		text,
+		Path(),
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(true, { 1, 5 }, 8 * 60 + 30, 16 * 60, u"play"_q));
+	CHECK(edited.ok());
+	CHECK(edited.changed);
+
+	// Every value is rewritten where it stands, so the spacing and the comment
+	// beside one survive; the multi-line array comes back as the one line it
+	// now needs.
+	CHECK(edited.text.contains(u"days   = [\"mon\", \"fri\"]"_q));
+	CHECK(edited.text.contains(u"from   = \"08:30\""_q));
+	CHECK(edited.text.contains(u"to     = \"16:00\""_q));
+	CHECK(edited.text.contains(u"preset = \"play\"   # the important one"_q));
+	CHECK(edited.text.contains(u"# my settings"_q));
+	CHECK(edited.text.contains(u"# when work happens"_q));
+	CHECK(edited.text.contains(u"# the weekday window"_q));
+	CHECK(edited.text.contains(u"[peek]"_q));
+
+	// 'enabled_p' was not in that block at all, so it joins the end of it.
+	CHECK(edited.text.contains(u"preset = \"play\"   # the important one\n"
+		"enabled_p = true"_q));
+
+	const auto back = Parse(edited.text);
+	CHECK(back.ok());
+	CHECK_EQ(back.settings.schedule.rules.size(), size_t(2));
+	CHECK_EQ(back.settings.schedule.rules[0].from, 8 * 60 + 30);
+	CHECK_EQ(back.settings.schedule.rules[0].till, 16 * 60);
+	CHECK_EQ(back.settings.schedule.rules[0].preset, u"play"_q);
+	CHECK_EQ(int(back.settings.schedule.rules[0].days.size()), 2);
+	CHECK_EQ(back.settings.schedule.rules[0].days[1], 5);
+	CHECK_EQ(back.settings.schedule.rules[1].from, 20 * 60);
+	CHECK_EQ(back.settings.schedule.rules[1].sourceIndex, 2);
+
+	// Writing what is already there writes nothing.
+	const auto same = Purple::SetScheduleRule(
+		text,
+		Path(),
+		2,
+		{ 20 * 60, 23 * 60, u"play"_q },
+		Rule(false, { 6 }, 20 * 60, 23 * 60, u"play"_q));
+	CHECK(same.ok());
+	CHECK(!same.changed);
+	CHECK_EQ(same.text, text);
+
+	// The rule the screen read is not the rule in the file any more, so the
+	// edit is refused rather than landing on whatever is there now.
+	const auto stale = Purple::SetScheduleRule(
+		text,
+		Path(),
+		0,
+		{ 8 * 60, 17 * 60, u"work"_q },
+		Rule(true, { 1 }, 9 * 60, 10 * 60, u"work"_q));
+	CHECK(!stale.ok());
+	CHECK(!stale.changed);
+	CHECK_EQ(stale.text, text);
+	CHECK(stale.error.contains(u"changed underneath"_q));
+
+	const auto gone = Purple::SetScheduleRule(
+		text,
+		Path(),
+		7,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(true, { 1 }, 9 * 60, 10 * 60, u"work"_q));
+	CHECK(!gone.ok());
+	CHECK_EQ(gone.text, text);
+
+	// The broken rule in the middle is addressable like any other, and fixing
+	// it leaves the rules on either side of it alone.
+	const auto repaired = Purple::SetScheduleRule(
+		text,
+		Path(),
+		1,
+		{ 10 * 60, -1, u"play"_q },
+		Rule(true, { 3 }, 10 * 60, 11 * 60, u"play"_q));
+	CHECK(repaired.ok());
+	CHECK(repaired.changed);
+	CHECK(repaired.text.contains(u"to = \"11:00\""_q));
+	const auto whole = Parse(repaired.text);
+	CHECK(whole.ok());
+	CHECK_EQ(whole.settings.schedule.rules.size(), size_t(3));
+	CHECK_EQ(whole.settings.schedule.rules[0].from, 9 * 60);
+	CHECK_EQ(whole.settings.schedule.rules[1].sourceIndex, 1);
+	CHECK_EQ(whole.settings.schedule.rules[1].till, 11 * 60);
+	CHECK_EQ(whole.settings.schedule.rules[2].sourceIndex, 2);
+	CHECK_EQ(whole.settings.schedule.rules[2].from, 20 * 60);
+
+	// A rule written inline is a table the app would have to re-serialise, so
+	// it says so, with the line to go and look at.
+	const auto inlined = u"[presets.work]\nlist_order = []\n\n[schedule]\n"
+		"rules = [{ from = \"09:00\", to = \"10:00\", preset = \"work\" }]\n"_q;
+	const auto refused = Purple::SetScheduleRule(
+		inlined,
+		Path(),
+		0,
+		{ 9 * 60, 10 * 60, u"work"_q },
+		Rule(true, { 1 }, 9 * 60, 11 * 60, u"work"_q));
+	CHECK(!refused.ok());
+	CHECK(refused.error.contains(u"inline"_q));
+	CHECK(refused.error.contains(u"line 5"_q));
+	CHECK_EQ(refused.text, inlined);
+
+	// And a rule the parser would throw away is refused before it is written,
+	// rather than being saved into a file that then drops it.
+	const auto empty = Purple::SetScheduleRule(
+		text,
+		Path(),
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(true, { 1 }, 9 * 60, 9 * 60, u"work"_q));
+	CHECK(!empty.ok());
+	CHECK(empty.error.contains(u"same time"_q));
+	CHECK_EQ(empty.text, text);
+
+	// A rewritten value keeps the carriage return that ends its line, which is
+	// not part of the value however much it looks like one.
+	const auto windows = u"[presets.work]\r\nlist_order = []\r\n\r\n"
+		"[schedule]\r\n[[schedule.rules]]\r\ndays = [\"mon\"]\r\n"
+		"from = \"09:00\"\r\nto = \"17:00\"\r\npreset = \"work\"\r\n"_q;
+	const auto rewritten = Purple::SetScheduleRule(
+		windows,
+		Path(),
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(true, { 2 }, 10 * 60, 18 * 60, u"work"_q));
+	CHECK(rewritten.ok());
+	CHECK(rewritten.text.contains(u"from = \"10:00\"\r\n"_q));
+	CHECK(rewritten.text.contains(u"days = [\"tue\"]\r\n"_q));
+	CHECK(rewritten.text.contains(u"enabled_p = true\r\n"_q));
+	CHECK(!rewritten.text.contains(u"\n\n"_q));
+	CHECK_EQ(Parse(rewritten.text).settings.schedule.rules.size(), size_t(1));
+	CHECK_EQ(Parse(rewritten.text).settings.schedule.rules[0].till, 18 * 60);
+
+	// A file mid-edit is left exactly as it is.
+	const auto broken = Purple::SetScheduleRule(
+		u"[schedule\nenabled_p = true"_q,
+		Path(),
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(true, { 1 }, 9 * 60, 10 * 60, u"work"_q));
+	CHECK(!broken.ok());
+	CHECK_EQ(broken.text, u"[schedule\nenabled_p = true"_q);
+}
+
+void TestSpliceScheduleAppend() {
+	Begin("splice schedule append");
+
+	const auto text = ScheduleExample();
+	const auto added = Purple::AppendScheduleRule(
+		text,
+		Path(),
+		Rule(true, { 7 }, 18 * 60, 20 * 60, u"work"_q));
+	CHECK(added.ok());
+	CHECK(added.changed);
+	CHECK(added.text.contains(u"[[schedule.rules]]\nenabled_p = true\n"
+		"days      = [\"sun\"]\nfrom      = \"18:00\"\nto        = \"20:00\"\n"
+		"preset    = \"work\"\n"_q));
+
+	// It goes after the last rule and before whatever section came next, which
+	// is where a reader of the schedule will find it.
+	CHECK(added.text.indexOf(u"18:00"_q) > added.text.indexOf(u"20:00\"\n"
+		"preset    = \"play\""_q));
+	CHECK(added.text.indexOf(u"[peek]"_q) > added.text.indexOf(u"18:00"_q));
+	CHECK(added.text.contains(u"# the weekday window"_q));
+	CHECK(added.text.contains(u"# the important one"_q));
+
+	const auto back = Parse(added.text);
+	CHECK(back.ok());
+	CHECK_EQ(back.settings.schedule.rules.size(), size_t(3));
+	CHECK_EQ(back.settings.schedule.rules[2].sourceIndex, 3);
+	CHECK_EQ(back.settings.schedule.rules[2].from, 18 * 60);
+	CHECK_EQ(back.settings.schedule.rules[2].preset, u"work"_q);
+
+	// A [schedule] with no rules yet takes the first one under its own keys.
+	const auto bare = u"[presets.work]\nlist_order = []\n\n[schedule]\n"
+		"# off for now\nenabled_p = false\n\n[peek]\nhotkey = \"Ctrl+K\"\n"_q;
+	const auto first = Purple::AppendScheduleRule(
+		bare,
+		Path(),
+		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(first.ok());
+	CHECK(first.text.contains(u"# off for now\nenabled_p = false\n\n"
+		"[[schedule.rules]]"_q));
+	CHECK(first.text.contains(u"\n\n[peek]"_q));
+	CHECK(Parse(first.text).ok());
+	CHECK_EQ(Parse(first.text).settings.schedule.rules.size(), size_t(1));
+
+	// No schedule at all: the section goes in with the rule.
+	const auto none = u"[presets.work]\nlist_order = []\n"_q;
+	const auto started = Purple::AppendScheduleRule(
+		none,
+		Path(),
+		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(started.ok());
+	CHECK(started.text.startsWith(none));
+	CHECK(started.text.contains(u"\n[schedule]\n[[schedule.rules]]\n"_q));
+	CHECK(Parse(started.text).ok());
+	CHECK_EQ(Parse(started.text).settings.schedule.rules.size(), size_t(1));
+
+	// An empty file gains no leading blank line.
+	const auto fresh = Purple::AppendScheduleRule(
+		QString(),
+		Path(),
+		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(fresh.ok());
+	CHECK(fresh.text.startsWith(u"[schedule]\n[[schedule.rules]]\n"_q));
+	CHECK(fresh.text.endsWith(u"preset    = \"work\"\n"_q));
+
+	// The refusals: an inline [schedule], and a rule the parser would drop.
+	const auto inlined = u"schedule = { enabled_p = true }\n"_q;
+	const auto refused = Purple::AppendScheduleRule(
+		inlined,
+		Path(),
+		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(!refused.ok());
+	CHECK(refused.error.contains(u"inline"_q));
+	CHECK(refused.error.contains(u"line 1"_q));
+	CHECK_EQ(refused.text, inlined);
+
+	// A file with Windows endings keeps them, including on the lines we write.
+	const auto crlf = u"[presets.work]\r\nlist_order = []\r\n\r\n"
+		"[schedule]\r\nenabled_p = true\r\n"_q;
+	const auto kept = Purple::AppendScheduleRule(
+		crlf,
+		Path(),
+		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(kept.ok());
+	CHECK(kept.text.contains(u"[[schedule.rules]]\r\nenabled_p = true\r\n"_q));
+	CHECK(kept.text.contains(u"preset    = \"work\"\r\n"_q));
+	CHECK(!kept.text.contains(u"\n\n"_q));
+	CHECK_EQ(Parse(kept.text).settings.schedule.rules.size(), size_t(1));
+
+	const auto nameless = Purple::AppendScheduleRule(
+		text,
+		Path(),
+		Rule(true, { 1 }, 9 * 60, 17 * 60, QString()));
+	CHECK(!nameless.ok());
+	CHECK(nameless.error.contains(u"needs a preset"_q));
+	CHECK_EQ(nameless.text, text);
+}
+
+void TestSpliceScheduleRemove() {
+	Begin("splice schedule remove");
+
+	const auto text = ScheduleExample();
+	const auto first = Purple::RemoveScheduleRule(
+		text,
+		Path(),
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q });
+	CHECK(first.ok());
+	CHECK(first.changed);
+	CHECK(!first.text.contains(u"17:00"_q));
+
+	// The comment above the block it took out stays - it is the user's, and
+	// nothing here can tell whether it was about the rule or about the section.
+	// So does the blank line above the block that follows.
+	CHECK(first.text.contains(u"# the weekday window\n\n[[schedule.rules]]\n"
+		"from   = \"10:00\""_q));
+	CHECK(first.text.contains(u"# when work happens"_q));
+	CHECK(first.text.contains(u"[peek]"_q));
+
+	const auto back = Parse(first.text);
+	CHECK(back.ok());
+	CHECK_EQ(back.settings.schedule.rules.size(), size_t(1));
+	CHECK_EQ(back.settings.schedule.rules[0].sourceIndex, 1);
+	CHECK_EQ(back.settings.schedule.rules[0].from, 20 * 60);
+
+	// The last rule leaves the section that follows it where it was.
+	const auto last = Purple::RemoveScheduleRule(
+		text,
+		Path(),
+		2,
+		{ 20 * 60, 23 * 60, u"play"_q });
+	CHECK(last.ok());
+	CHECK(last.text.contains(u"preset = \"play\"\n\n[peek]"_q));
+	CHECK(!last.text.contains(u"23:00"_q));
+	CHECK_EQ(Parse(last.text).settings.schedule.rules.size(), size_t(1));
+
+	// The only rule there was leaves the section itself standing.
+	const auto single = u"[presets.work]\nlist_order = []\n\n[schedule]\n"
+		"[[schedule.rules]]\nfrom = \"09:00\"\nto = \"10:00\"\n"
+		"preset = \"work\"\n"_q;
+	const auto emptied = Purple::RemoveScheduleRule(
+		single,
+		Path(),
+		0,
+		{ 9 * 60, 10 * 60, u"work"_q });
+	CHECK(emptied.ok());
+	CHECK_EQ(
+		emptied.text,
+		u"[presets.work]\nlist_order = []\n\n[schedule]\n"_q);
+	CHECK(Parse(emptied.text).settings.schedule.rules.empty());
+	CHECK(Parse(emptied.text).settings.schedule.enabled);
+
+	// The same two refusals as the other ops.
+	const auto stale = Purple::RemoveScheduleRule(
+		text,
+		Path(),
+		2,
+		{ 21 * 60, 23 * 60, u"play"_q });
+	CHECK(!stale.ok());
+	CHECK(stale.error.contains(u"changed underneath"_q));
+	CHECK_EQ(stale.text, text);
+
+	const auto gone = Purple::RemoveScheduleRule(
+		text,
+		Path(),
+		9,
+		{ 20 * 60, 23 * 60, u"play"_q });
+	CHECK(!gone.ok());
+	CHECK_EQ(gone.text, text);
+
+	const auto inlined = u"[schedule]\nrules = [{ from = \"09:00\", "
+		"to = \"10:00\", preset = \"work\" }]\n"_q;
+	const auto refused = Purple::RemoveScheduleRule(
+		inlined,
+		Path(),
+		0,
+		{ 9 * 60, 10 * 60, u"work"_q });
+	CHECK(!refused.ok());
+	CHECK(refused.error.contains(u"inline"_q));
+	CHECK_EQ(refused.text, inlined);
+}
+
+void TestSetTableBoolImplicitHeader() {
+	Begin("set table bool implicit header");
+
+	// A file with rules but no [schedule] line of its own. toml++ still hands
+	// back a table, pointing at the first rule - so the key has to bring the
+	// missing header with it rather than being filed inside that rule.
+	const auto text = u"# rules only\n\n[presets.work]\nlist_order = []\n\n"
+		"[[schedule.rules]]\ndays   = [\"mon\"]\nfrom   = \"09:00\"\n"
+		"to     = \"17:00\"\npreset = \"work\"\n"_q;
+	const auto off = Purple::SetTableBool(
+		text,
+		Path(),
+		u"schedule"_q,
+		u"enabled_p"_q,
+		false);
+	CHECK(off.ok());
+	CHECK(off.changed);
+	CHECK(off.text.contains(u"[schedule]\nenabled_p = false\n\n"
+		"[[schedule.rules]]"_q));
+	CHECK(off.text.contains(u"# rules only"_q));
+	const auto back = Parse(off.text);
+	CHECK(back.ok());
+	CHECK(!back.settings.schedule.enabled);
+	CHECK_EQ(back.settings.schedule.rules.size(), size_t(1));
+
+	// Once the header is there the key is edited in place like any other.
+	const auto on = Purple::SetTableBool(
+		off.text,
+		Path(),
+		u"schedule"_q,
+		u"enabled_p"_q,
+		true);
+	CHECK(on.ok());
+	CHECK(on.text.contains(u"[schedule]\nenabled_p = true\n"_q));
+	CHECK_EQ(on.text.count('\n'), off.text.count('\n'));
+
+	// A table written as dotted keys has no header to insert under, and a
+	// header inserted above one would swallow it. So it says what to do.
+	const auto dotted = Purple::SetTableBool(
+		u"schedule.rules = []\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"enabled_p"_q,
+		true);
+	CHECK(!dotted.ok());
+	CHECK(dotted.error.contains(u"dotted keys"_q));
+
+	// An inline table is refused by name rather than by a parse failure the
+	// user cannot act on.
+	const auto inlined = Purple::SetTableBool(
+		u"premium = { enabled_p = true }\n"_q,
+		Path(),
+		u"premium"_q,
+		u"other_p"_q,
+		true);
+	CHECK(!inlined.ok());
+	CHECK(inlined.error.contains(u"inline"_q));
+}
+
 void TestStateRoundTrip() {
 	Begin("state round trip");
 
@@ -2650,6 +3124,94 @@ overrides = [
 	CHECK_EQ(broken.overrides.front().peer, Purple::PeerIdValue(1));
 }
 
+// The two keys added for the Android screens: one global, one per preset, both
+// defaulting to true and both read in silence by a build that predates them.
+void TestSuggestionsAndArchive() {
+	Begin("suggestions and archive");
+
+	const auto silent = Parse(uR"(
+[lists.os]
+members = [1]
+
+[presets.work]
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(silent.ok());
+	CHECK(silent.warnings.empty());
+	CHECK(silent.settings.suggestions.hideInvisible);
+	CHECK(!silent.settings.preset(u"work"_q)->hideArchive.has_value());
+	CHECK(Purple::Resolve(silent.settings, u"work"_q)->hideArchive);
+
+	const auto off = Parse(uR"(
+[suggestions]
+hide_invisible_p = false
+
+[lists.os]
+members = [1]
+
+[presets.work]
+hide_archive_p = false
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(off.ok());
+	CHECK(off.warnings.empty());
+	CHECK(!off.settings.suggestions.hideInvisible);
+	CHECK_EQ(off.settings.preset(u"work"_q)->hideArchive.value_or(true), false);
+	CHECK(!Purple::Resolve(off.settings, u"work"_q)->hideArchive);
+
+	// Normal never asks - the consumer keys on whether a preset is filtering at
+	// all - so it carries the default and nothing acts on it.
+	CHECK(Purple::Resolve(off.settings, u"normal"_q)->hideArchive);
+
+	// Anything that is not a boolean is a warning and the default, like every
+	// other flag in the file.
+	const auto wrong = Parse(uR"(
+[suggestions]
+hide_invisible_p = "yes"
+
+[lists.os]
+members = [1]
+
+[presets.work]
+hide_archive_p = "no"
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(wrong.ok());
+	CHECK(wrong.settings.suggestions.hideInvisible);
+	CHECK(WarnsAbout(wrong, u"'hide_invisible_p' should be true or false"_q));
+	CHECK(WarnsAbout(wrong, u"'hide_archive_p' should be true or false"_q));
+	CHECK(!wrong.settings.preset(u"work"_q)->hideArchive.has_value());
+	CHECK(Purple::Resolve(wrong.settings, u"work"_q)->hideArchive);
+
+	const auto notATable = Parse(u"suggestions = 1\n"_q);
+	CHECK(notATable.ok());
+	CHECK(notATable.settings.suggestions.hideInvisible);
+	CHECK(WarnsAbout(notATable, u"'suggestions' should be a table"_q));
+
+	// The archive flag rides in the resolved cache, so a settings.toml broken
+	// mid-edit does not hand the archive back while the preset still runs.
+	auto state = Purple::State();
+	state.activePreset = u"work"_q;
+	state.resolvedCache = Purple::ToCache(
+		*Purple::Resolve(off.settings, u"work"_q));
+	const auto written = Purple::SerializeState(state);
+	CHECK(written.contains(u"hide_archive = false"_q));
+	const auto read = Purple::ParseState(written, u"state.toml"_q);
+	CHECK(read.resolvedCache.valid());
+	CHECK(!read.resolvedCache.hideArchive);
+	CHECK(!Purple::FromCache(read.resolvedCache)->hideArchive);
+
+	// A state.toml written before the key existed restores the default rather
+	// than the false an absent boolean would otherwise read as.
+	const auto older = Purple::ParseState(
+		u"active_preset = \"work\"\n[resolved_cache]\npreset = \"work\"\n"
+		"lists = [{ list = \"os\", notify = true }]\n"_q,
+		u"state.toml"_q);
+	CHECK(older.resolvedCache.valid());
+	CHECK(older.resolvedCache.hideArchive);
+	CHECK(Purple::FromCache(older.resolvedCache)->hideArchive);
+}
+
 void TestReservedHotkeys() {
 	Begin("reserved hotkeys");
 
@@ -3034,6 +3596,17 @@ void TestScheduleTarget() {
 	CHECK_EQ(target(several, at(1, 10, 0)), u"first"_q);
 	several.rules[0].enabled = false;
 	CHECK_EQ(target(several, at(1, 10, 0)), u"second"_q);
+
+	// The rule behind that answer, for a screen that has to say which window it
+	// is in rather than only which preset it wants.
+	const auto now = Purple::ScheduleRuleNow(several, at(1, 10, 0));
+	CHECK(now != nullptr);
+	CHECK_EQ(now->preset, u"second"_q);
+	CHECK_EQ(now->till, 17 * 60);
+	CHECK(now == &several.rules[1]);
+	CHECK(!Purple::ScheduleRuleNow(several, at(6, 10, 0)));
+	several.enabled = false;
+	CHECK(!Purple::ScheduleRuleNow(several, at(1, 10, 0)));
 }
 
 void TestResolvedCache() {
@@ -3176,6 +3749,11 @@ int main() {
 	TestSplicePresetPinned();
 	TestSpliceViewPinned();
 	TestSetTableBool();
+	TestScheduleRuleIdentity();
+	TestSpliceScheduleSet();
+	TestSpliceScheduleAppend();
+	TestSpliceScheduleRemove();
+	TestSetTableBoolImplicitHeader();
 	TestStateRoundTrip();
 	TestStateDefaults();
 	TestStateQuoting();
@@ -3189,6 +3767,7 @@ int main() {
 	TestNamedExplicitly();
 	TestPresetHotkeys();
 	TestOverrides();
+	TestSuggestionsAndArchive();
 	TestReservedHotkeys();
 	TestStories();
 	TestRecent();

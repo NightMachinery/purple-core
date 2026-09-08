@@ -253,4 +253,16 @@ struct Visibility {
 	const Schedule &schedule,
 	const QDateTime &now);
 
+// The rule the schedule is inside right now, or null when none covers the
+// moment - which includes a schedule that is switched off or has no rules.
+// Points into `schedule.rules'.
+//
+// This is what ScheduleTarget() answers with, before it collapses the answer to
+// a preset name. A screen that wants to say "work until 17:00" needs the rule
+// itself, and working out which one it was a second time would mean a second
+// copy of the midnight-crossing rule to keep in step.
+[[nodiscard]] const ScheduleRule *ScheduleRuleNow(
+	const Schedule &schedule,
+	const QDateTime &now);
+
 } // namespace Purple

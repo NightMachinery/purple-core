@@ -323,6 +323,19 @@ struct ScheduleRule {
 	int from = -1; // Minutes since local midnight.
 	int till = -1;
 	QString preset;
+
+	// Where this rule sits in the raw [[schedule.rules]] array, counted from
+	// zero and counting the rules the parser threw away - which is what makes
+	// it an address the splicer can edit by. A rule has no name key and needs
+	// none: adding one would be a second thing to keep in step with the file,
+	// and a screen editing a rule already has to say which rule it read.
+	//
+	// -1 for a rule that did not come from a file at all.
+	int sourceIndex = -1;
+
+	// The line its [[schedule.rules]] header is on, 1-based, for a screen that
+	// wants to point at it. Zero when there is no file behind the rule.
+	int sourceLine = 0;
 };
 
 struct Schedule {
@@ -529,7 +542,14 @@ struct ParseResult {
 // "HH:MM" to minutes since midnight.
 [[nodiscard]] std::optional<int> ParseTimeOfDay(const QString &value);
 
+// And back, zero-padded, so a time the app writes into the file looks like one
+// a person typed. Empty for a number that is not a time of day.
+[[nodiscard]] QString TimeOfDayText(int minutes);
+
 // "mon" .. "sun" to Qt::Monday .. Qt::Sunday.
 [[nodiscard]] std::optional<int> ParseWeekday(const QString &value);
+
+// And back. Empty for anything outside Monday .. Sunday.
+[[nodiscard]] QString WeekdayName(int day);
 
 } // namespace Purple
