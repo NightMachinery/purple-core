@@ -313,8 +313,8 @@ struct ScheduleForDevice {
 	const DeviceIdentity &device);
 
 // What the schedule wants active at this local time on this device: the preset
-// of the first rule covering the moment, or the active `outside' when rules
-// exist and none does.
+// of the NARROWEST rule covering the moment, or the active `outside' when rules
+// exist and none does. See ScheduleRuleNow for why narrowest and not first.
 //
 // Nothing at all when the schedule is off, or when no ruleset that applies to
 // this device has a rule in it - which is a different answer from wanting the
@@ -373,6 +373,10 @@ struct ScheduleForDevice {
 // moment - which includes a schedule that is switched off and one with no rule
 // for this device. Points into `schedule'.
 //
+// Windows nest, so it is the narrowest one covering the moment rather than the
+// first: "12:00-14:00 lunch" inside "08:00-17:00 work" means lunch at one
+// o'clock whichever of the two was typed first.
+//
 // This is what ScheduleTarget() answers with, before it collapses the answer to
 // a preset name. A screen that wants to say "work until 17:00" needs the rule
 // itself, and working out which one it was a second time would mean a second
@@ -386,7 +390,17 @@ struct ScheduleForDevice {
 	const Schedule &schedule,
 	const QDateTime &now);
 
-// The first rule in an already-resolved schedule that covers this moment.
+// The narrowest rule in an already-resolved schedule that covers this moment.
+//
+// Narrowest by the length of its window in minutes, a midnight crossing
+// measured the long way round through midnight. Ties - two rules with the same
+// window - keep the order the rules were merged in: ruleset specificity first,
+// then file position.
+//
+// Because the far end of a nested window is a move to the WIDER rule's preset
+// rather than to `outside', ScheduleApplies reads it as a window starting, and
+// the wider rule resumes even after a preset was chosen by hand inside the
+// narrow one.
 [[nodiscard]] const ScheduleRule *ScheduleRuleNow(
 	const ScheduleForDevice &active,
 	const QDateTime &now);

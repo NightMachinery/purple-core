@@ -513,6 +513,18 @@ bool ScheduleApplies(
 	return ScheduleApplies(schedule, DeviceIdentity(), target, activeSource);
 }
 
+// How long a rule's window is, in minutes. Internal: nothing outside this
+// file has a reason to rank two windows against each other.
+[[nodiscard]] static int ScheduleRuleSpan(const ScheduleRule &rule) {
+	// A window crossing midnight is measured through it rather than as a
+	// negative number: "22:00 to 06:00" is eight hours, not minus sixteen.
+	// Getting this wrong would make every night rule the narrowest thing in
+	// the file and let it win against anything nested inside it.
+	return (rule.from < rule.till)
+		? (rule.till - rule.from)
+		: (24 * 60 - rule.from + rule.till);
+}
+
 const ScheduleRule *ScheduleRuleNow(
 		const ScheduleForDevice &active,
 		const QDateTime &now) {
@@ -525,33 +537,56 @@ const ScheduleRule *ScheduleRuleNow(
 	const auto today = now.date().dayOfWeek();
 	const auto yesterday = (today == 1) ? 7 : (today - 1);
 
-	// First match wins, in the order the rulesets were merged, which is the
-	// order the lists follow within one of them. Two rules covering one moment
-	// is a thing a hand-written file will do, and picking by position is the
-	// only answer that can be predicted by reading.
+	// The NARROWEST window covering the moment wins, not the first one.
+	//
+	// Windows nest: "08:00-17:00 work" with "12:00-14:00 lunch" inside it is
+	// how anybody would write a lunch break, and under first-match-wins the
+	// answer depended on which of the two happened to be typed first - which
+	// is exactly the kind of thing nobody remembers about their own file. The
+	// narrower rule is the more specific statement, the same way a ruleset
+	// naming this phone beats one naming mobiles.
+	//
+	// Ties keep the order the rules were merged in: ruleset specificity first,
+	// then file position. Two rules with the same window really are the same
+	// statement twice, and position is the only answer left that can be
+	// predicted by reading.
+	//
+	// It also makes the far end of the nested window a window STARTING rather
+	// than one ending: at 14:00 the target moves from lunch back to work, and
+	// ScheduleApplies sees a move to something that is not the outside preset,
+	// so work resumes even if a preset was chosen by hand during lunch.
+	const ScheduleRule *result = nullptr;
+	auto narrowest = 0;
 	for (const auto pointer : active.rules) {
 		const auto &rule = *pointer;
+		auto covering = false;
 		if (!rule.enabled) {
 			continue;
 		} else if (rule.from < rule.till) {
 			// Half-open, so 09:00-12:00 and 12:00-17:00 hand over cleanly
 			// rather than both claiming noon. The parser has already refused
 			// a rule whose ends are equal, so there is no empty window here.
-			if (covers(rule, today)
+			covering = covers(rule, today)
 				&& minutes >= rule.from
-				&& minutes < rule.till) {
-				return &rule;
-			}
-		} else if ((covers(rule, today) && minutes >= rule.from)
-			|| (covers(rule, yesterday) && minutes < rule.till)) {
+				&& minutes < rule.till;
+		} else {
 			// A window crossing midnight belongs to the day it starts on, so
 			// "mon, 22:00 to 06:00" runs into Tuesday morning instead of
 			// stopping at midnight or needing Tuesday listed as well - which
 			// would also have claimed Tuesday 00:00 to 06:00 twice over.
-			return &rule;
+			covering = (covers(rule, today) && minutes >= rule.from)
+				|| (covers(rule, yesterday) && minutes < rule.till);
+		}
+		if (!covering) {
+			continue;
+		}
+		const auto span = ScheduleRuleSpan(rule);
+		if (!result || span < narrowest) {
+			result = &rule;
+			narrowest = span;
 		}
 	}
-	return nullptr;
+	return result;
 }
 
 const ScheduleRule *ScheduleRuleNow(
