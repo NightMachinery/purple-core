@@ -534,6 +534,25 @@ struct Suggestions {
 	// Whether a chat the preset hides is left out of them. Only ever asked
 	// while a preset is filtering - under Normal the strips are stock.
 	bool hideInvisible = true;
+
+	// Whether the "similar channels" strip a channel offers is shown at all.
+	// Off by default, unlike everything else here: it is the one suggestion
+	// not assembled out of your own chats - the server picks it - so it is the
+	// one a fork about deciding who reaches you should not switch on for you.
+	// Asked under every preset, Normal included, because it is a claim about
+	// the strip itself rather than about what a preset lets through.
+	bool recommendedChannels = false;
+};
+
+// The `[sync]' table: what settings.toml does on its way to your other
+// devices. See docs/purple/sync.md in the desktop fork.
+struct Sync {
+	// Whether saving settings.toml also sends it to Saved Messages, so the
+	// other machine has something newer to find on its next launch. Off by
+	// default because sending is a message in a real chat: it should be
+	// something you asked for once, in words, and not something an upgrade
+	// started doing on your behalf.
+	bool sendAfterSave = false;
 };
 
 struct Premium {
@@ -568,6 +587,7 @@ struct Settings {
 	Recent recent;
 	Overrides overrides;
 	Suggestions suggestions;
+	Sync sync;
 
 	// [devices], in file order.
 	std::vector<DeviceLabel> devices;

@@ -1361,6 +1361,38 @@ void WarnUnknownLists(
 		u"suggestions"_q,
 		warnings
 	).value_or(true);
+	result.recommendedChannels = ReadBool(
+		table,
+		"recommended_channels_p",
+		u"suggestions"_q,
+		warnings
+	).value_or(false);
+	return result;
+}
+
+// [sync]: what settings.toml does on its way to your other devices. Shaped
+// exactly like ReadSuggestions, down to the warning for a value that is not a
+// table at all, because there is nothing here that deserves to be read
+// differently from the rest of the file.
+[[nodiscard]] Sync ReadSync(
+		const toml::table &root,
+		std::vector<QString> &warnings) {
+	auto result = Sync();
+	const auto node = root.get("sync");
+	if (!node) {
+		return result;
+	} else if (!node->as_table()) {
+		warnings.push_back(
+			u"'sync' should be a table (%1)."_q.arg(At(*node)));
+		return result;
+	}
+	const auto &table = *node->as_table();
+	result.sendAfterSave = ReadBool(
+		table,
+		"send_after_save_p",
+		u"sync"_q,
+		warnings
+	).value_or(false);
 	return result;
 }
 
@@ -1863,6 +1895,7 @@ ParseResult ParseSettings(const QString &text, const QString &path) {
 	result.settings.recent = ReadRecent(root, result.warnings);
 	result.settings.overrides = ReadOverrides(root, result.warnings);
 	result.settings.suggestions = ReadSuggestions(root, result.warnings);
+	result.settings.sync = ReadSync(root, result.warnings);
 	result.settings.devices = ReadDevices(root, result.warnings);
 
 	// Hotkeys last, because this is the one check that needs the presets and
