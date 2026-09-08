@@ -2012,6 +2012,7 @@ void TestSpliceScheduleSet() {
 	const auto edited = Purple::SetScheduleRule(
 		text,
 		Path(),
+		QString(),
 		0,
 		{ 9 * 60, 17 * 60, u"work"_q },
 		Rule(true, { 1, 5 }, 8 * 60 + 30, 16 * 60, u"play"_q));
@@ -2049,6 +2050,7 @@ void TestSpliceScheduleSet() {
 	const auto same = Purple::SetScheduleRule(
 		text,
 		Path(),
+		QString(),
 		2,
 		{ 20 * 60, 23 * 60, u"play"_q },
 		Rule(false, { 6 }, 20 * 60, 23 * 60, u"play"_q));
@@ -2061,6 +2063,7 @@ void TestSpliceScheduleSet() {
 	const auto stale = Purple::SetScheduleRule(
 		text,
 		Path(),
+		QString(),
 		0,
 		{ 8 * 60, 17 * 60, u"work"_q },
 		Rule(true, { 1 }, 9 * 60, 10 * 60, u"work"_q));
@@ -2072,6 +2075,7 @@ void TestSpliceScheduleSet() {
 	const auto gone = Purple::SetScheduleRule(
 		text,
 		Path(),
+		QString(),
 		7,
 		{ 9 * 60, 17 * 60, u"work"_q },
 		Rule(true, { 1 }, 9 * 60, 10 * 60, u"work"_q));
@@ -2083,6 +2087,7 @@ void TestSpliceScheduleSet() {
 	const auto repaired = Purple::SetScheduleRule(
 		text,
 		Path(),
+		QString(),
 		1,
 		{ 10 * 60, -1, u"play"_q },
 		Rule(true, { 3 }, 10 * 60, 11 * 60, u"play"_q));
@@ -2105,6 +2110,7 @@ void TestSpliceScheduleSet() {
 	const auto refused = Purple::SetScheduleRule(
 		inlined,
 		Path(),
+		QString(),
 		0,
 		{ 9 * 60, 10 * 60, u"work"_q },
 		Rule(true, { 1 }, 9 * 60, 11 * 60, u"work"_q));
@@ -2118,6 +2124,7 @@ void TestSpliceScheduleSet() {
 	const auto empty = Purple::SetScheduleRule(
 		text,
 		Path(),
+		QString(),
 		0,
 		{ 9 * 60, 17 * 60, u"work"_q },
 		Rule(true, { 1 }, 9 * 60, 9 * 60, u"work"_q));
@@ -2133,6 +2140,7 @@ void TestSpliceScheduleSet() {
 	const auto rewritten = Purple::SetScheduleRule(
 		windows,
 		Path(),
+		QString(),
 		0,
 		{ 9 * 60, 17 * 60, u"work"_q },
 		Rule(true, { 2 }, 10 * 60, 18 * 60, u"work"_q));
@@ -2148,6 +2156,7 @@ void TestSpliceScheduleSet() {
 	const auto broken = Purple::SetScheduleRule(
 		u"[schedule\nenabled_p = true"_q,
 		Path(),
+		QString(),
 		0,
 		{ 9 * 60, 17 * 60, u"work"_q },
 		Rule(true, { 1 }, 9 * 60, 10 * 60, u"work"_q));
@@ -2162,6 +2171,7 @@ void TestSpliceScheduleAppend() {
 	const auto added = Purple::AppendScheduleRule(
 		text,
 		Path(),
+		QString(),
 		Rule(true, { 7 }, 18 * 60, 20 * 60, u"work"_q));
 	CHECK(added.ok());
 	CHECK(added.changed);
@@ -2190,6 +2200,7 @@ void TestSpliceScheduleAppend() {
 	const auto first = Purple::AppendScheduleRule(
 		bare,
 		Path(),
+		QString(),
 		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
 	CHECK(first.ok());
 	CHECK(first.text.contains(u"# off for now\nenabled_p = false\n\n"
@@ -2203,6 +2214,7 @@ void TestSpliceScheduleAppend() {
 	const auto started = Purple::AppendScheduleRule(
 		none,
 		Path(),
+		QString(),
 		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
 	CHECK(started.ok());
 	CHECK(started.text.startsWith(none));
@@ -2214,6 +2226,7 @@ void TestSpliceScheduleAppend() {
 	const auto fresh = Purple::AppendScheduleRule(
 		QString(),
 		Path(),
+		QString(),
 		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
 	CHECK(fresh.ok());
 	CHECK(fresh.text.startsWith(u"[schedule]\n[[schedule.rules]]\n"_q));
@@ -2224,6 +2237,7 @@ void TestSpliceScheduleAppend() {
 	const auto refused = Purple::AppendScheduleRule(
 		inlined,
 		Path(),
+		QString(),
 		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
 	CHECK(!refused.ok());
 	CHECK(refused.error.contains(u"inline"_q));
@@ -2236,6 +2250,7 @@ void TestSpliceScheduleAppend() {
 	const auto kept = Purple::AppendScheduleRule(
 		crlf,
 		Path(),
+		QString(),
 		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
 	CHECK(kept.ok());
 	CHECK(kept.text.contains(u"[[schedule.rules]]\r\nenabled_p = true\r\n"_q));
@@ -2246,6 +2261,7 @@ void TestSpliceScheduleAppend() {
 	const auto nameless = Purple::AppendScheduleRule(
 		text,
 		Path(),
+		QString(),
 		Rule(true, { 1 }, 9 * 60, 17 * 60, QString()));
 	CHECK(!nameless.ok());
 	CHECK(nameless.error.contains(u"needs a preset"_q));
@@ -2259,6 +2275,7 @@ void TestSpliceScheduleRemove() {
 	const auto first = Purple::RemoveScheduleRule(
 		text,
 		Path(),
+		QString(),
 		0,
 		{ 9 * 60, 17 * 60, u"work"_q });
 	CHECK(first.ok());
@@ -2283,6 +2300,7 @@ void TestSpliceScheduleRemove() {
 	const auto last = Purple::RemoveScheduleRule(
 		text,
 		Path(),
+		QString(),
 		2,
 		{ 20 * 60, 23 * 60, u"play"_q });
 	CHECK(last.ok());
@@ -2297,6 +2315,7 @@ void TestSpliceScheduleRemove() {
 	const auto emptied = Purple::RemoveScheduleRule(
 		single,
 		Path(),
+		QString(),
 		0,
 		{ 9 * 60, 10 * 60, u"work"_q });
 	CHECK(emptied.ok());
@@ -2310,6 +2329,7 @@ void TestSpliceScheduleRemove() {
 	const auto stale = Purple::RemoveScheduleRule(
 		text,
 		Path(),
+		QString(),
 		2,
 		{ 21 * 60, 23 * 60, u"play"_q });
 	CHECK(!stale.ok());
@@ -2319,6 +2339,7 @@ void TestSpliceScheduleRemove() {
 	const auto gone = Purple::RemoveScheduleRule(
 		text,
 		Path(),
+		QString(),
 		9,
 		{ 20 * 60, 23 * 60, u"play"_q });
 	CHECK(!gone.ok());
@@ -2329,11 +2350,396 @@ void TestSpliceScheduleRemove() {
 	const auto refused = Purple::RemoveScheduleRule(
 		inlined,
 		Path(),
+		QString(),
 		0,
 		{ 9 * 60, 10 * 60, u"work"_q });
 	CHECK(!refused.ok());
 	CHECK(refused.error.contains(u"inline"_q));
 	CHECK_EQ(refused.text, inlined);
+}
+
+// One file describing three devices: a flat array that predates rulesets, a
+// ruleset for phones, a ruleset that runs everywhere alongside whatever wins,
+// and one for a laptop nobody in these tests is holding.
+[[nodiscard]] QString RulesetsExample() {
+	return uR"(# my settings
+
+[presets.work]
+list_order = []
+
+[presets.home]
+list_order = []
+
+[schedule]
+# when work happens
+enabled_p = true
+
+# the rules everybody had before rulesets existed
+[[schedule.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"   # the important one
+
+# the phone works longer hours
+[[schedule.rulesets]]
+name    = "phone"
+device  = "mobile"
+outside = "home"
+
+[[schedule.rulesets.rules]]
+days   = ["mon"]
+from   = "08:00"
+to     = "18:00"
+preset = "work"
+
+[[schedule.rulesets]]
+name = "quiet"
+mode = "always"
+
+[[schedule.rulesets.rules]]
+days   = ["mon"]
+from   = "22:00"
+to     = "07:00"
+preset = "home"
+
+[[schedule.rulesets]]
+name   = "the laptop"
+device = "mac-3f9a"
+
+[[schedule.rulesets.rules]]
+days   = ["mon"]
+from   = "10:00"
+to     = "11:00"
+preset = "home"
+
+[peek]
+hotkey = "Ctrl+Alt+K"
+)"_q;
+}
+
+[[nodiscard]] Purple::DeviceIdentity Device(
+		const QString &id,
+		const QString &platform,
+		const QString &cls) {
+	auto result = Purple::DeviceIdentity();
+	result.id = id;
+	result.platform = platform;
+	result.cls = cls;
+	return result;
+}
+
+void TestSpliceRulesets() {
+	Begin("splice rulesets");
+
+	const auto text = RulesetsExample();
+
+	// A new ruleset lands after everything the schedule already holds, so the
+	// file keeps its schedule in one piece rather than growing a second one at
+	// the bottom. Only what differs from the default is written down.
+	const auto added = Purple::AddRuleset(
+		text,
+		Path(),
+		u"tablet"_q,
+		u"android"_q,
+		Purple::RulesetMode::Always);
+	CHECK(added.ok());
+	CHECK(added.changed);
+	CHECK(added.text.contains(u"[[schedule.rulesets]]\nname    = \"tablet\"\n"
+		"device  = \"android\"\nmode    = \"always\"\n\n[peek]"_q));
+	CHECK(added.text.contains(u"# my settings"_q));
+	CHECK(added.text.contains(u"# the phone works longer hours"_q));
+	const auto backAdded = Parse(added.text);
+	CHECK(backAdded.ok());
+	CHECK_EQ(backAdded.settings.schedule.rulesets.size(), size_t(5));
+	const auto &tablet = backAdded.settings.schedule.rulesets[4];
+	CHECK_EQ(tablet.name, u"tablet"_q);
+	CHECK_EQ(tablet.device, u"android"_q);
+	CHECK(tablet.mode == Purple::RulesetMode::Always);
+	CHECK(tablet.rules.empty());
+
+	// The defaults are left unwritten, because a file that spells out what it
+	// would have meant anyway is harder to read for no gain.
+	const auto plain = Purple::AddRuleset(
+		text,
+		Path(),
+		u"tablet"_q,
+		u"any"_q,
+		Purple::RulesetMode::Enabled);
+	CHECK(plain.ok());
+	CHECK(plain.text.contains(u"[[schedule.rulesets]]\nname    = \"tablet\"\n"_q));
+	CHECK(!plain.text.contains(u"mode    = \"enabled\""_q));
+
+	// The name is the address every later edit goes through, so a second
+	// ruleset cannot take one that is already in use.
+	const auto taken = Purple::AddRuleset(
+		text,
+		Path(),
+		u"PHONE"_q,
+		QString(),
+		Purple::RulesetMode::Enabled);
+	CHECK(!taken.ok());
+	CHECK(!taken.changed);
+	CHECK(taken.error.contains(u"already a schedule ruleset"_q));
+
+	const auto nameless = Purple::AddRuleset(
+		text,
+		Path(),
+		u"   "_q,
+		QString(),
+		Purple::RulesetMode::Enabled);
+	CHECK(!nameless.ok());
+	CHECK(nameless.error.contains(u"needs a name"_q));
+
+	// A file with no schedule at all gains the section along with the ruleset.
+	const auto fresh = Purple::AddRuleset(
+		u"[presets.work]\nlist_order = []\n"_q,
+		Path(),
+		u"phone"_q,
+		u"mobile"_q,
+		Purple::RulesetMode::Enabled);
+	CHECK(fresh.ok());
+	CHECK(fresh.text.contains(u"[schedule]\n[[schedule.rulesets]]\n"
+		"name    = \"phone\"\ndevice  = \"mobile\"\n"_q));
+	CHECK(Parse(fresh.text).ok());
+
+	// One key at a time, where it stands, comment and spacing kept.
+	const auto moved = Purple::SetRulesetString(
+		text,
+		Path(),
+		u"phone"_q,
+		u"outside"_q,
+		u"normal"_q);
+	CHECK(moved.ok());
+	CHECK(moved.text.contains(u"outside = \"normal\""_q));
+	CHECK_EQ(moved.text.count('\n'), text.count('\n'));
+	CHECK_EQ(
+		Parse(moved.text).settings.schedule.rulesets[1].outside.value_or(
+			QString()),
+		u"normal"_q);
+
+	// A key the ruleset never had joins the end of its own block, above the
+	// first of its rules rather than inside it.
+	const auto scoped = Purple::SetRulesetString(
+		text,
+		Path(),
+		u"quiet"_q,
+		u"device"_q,
+		u"desktop"_q);
+	CHECK(scoped.ok());
+	CHECK(scoped.text.contains(u"name = \"quiet\"\nmode = \"always\"\n"
+		"device = \"desktop\"\n\n[[schedule.rulesets.rules]]"_q));
+	CHECK_EQ(
+		Parse(scoped.text).settings.schedule.rulesets[2].device,
+		u"desktop"_q);
+
+	// An empty value takes the key out, which is how a screen says "back to the
+	// default" without writing the default down.
+	const auto cleared = Purple::SetRulesetString(
+		text,
+		Path(),
+		u"phone"_q,
+		u"outside"_q,
+		QString());
+	CHECK(cleared.ok());
+	CHECK(cleared.changed);
+	CHECK(!cleared.text.contains(u"outside = \"home\""_q));
+	CHECK(cleared.text.contains(u"device  = \"mobile\"\n\n"
+		"[[schedule.rulesets.rules]]"_q));
+	CHECK(!Parse(cleared.text).settings.schedule.rulesets[1]
+		.outside.has_value());
+
+	// Clearing what is not there, and setting what is already set, both write
+	// nothing at all.
+	const auto twice = Purple::SetRulesetString(
+		cleared.text,
+		Path(),
+		u"phone"_q,
+		u"outside"_q,
+		QString());
+	CHECK(twice.ok());
+	CHECK(!twice.changed);
+	const auto same = Purple::SetRulesetString(
+		text,
+		Path(),
+		u"phone"_q,
+		u"device"_q,
+		u"mobile"_q);
+	CHECK(same.ok());
+	CHECK(!same.changed);
+	CHECK_EQ(same.text, text);
+
+	// A rename is allowed; a rename onto an address already in use is not.
+	const auto renamed = Purple::SetRulesetString(
+		text,
+		Path(),
+		u"phone"_q,
+		u"name"_q,
+		u"pocket"_q);
+	CHECK(renamed.ok());
+	CHECK_EQ(
+		Parse(renamed.text).settings.schedule.rulesets[1].name,
+		u"pocket"_q);
+	const auto collides = Purple::SetRulesetString(
+		text,
+		Path(),
+		u"phone"_q,
+		u"name"_q,
+		u"quiet"_q);
+	CHECK(!collides.ok());
+	CHECK(collides.error.contains(u"already a schedule ruleset"_q));
+
+	const auto missing = Purple::SetRulesetString(
+		text,
+		Path(),
+		u"nobody"_q,
+		u"device"_q,
+		u"mobile"_q);
+	CHECK(!missing.ok());
+	CHECK(missing.error.contains(u"no schedule ruleset called 'nobody'"_q));
+
+	// A ruleset goes with its rules: they are its rules and mean nothing
+	// without it. The comment above it stays, the way it does for a rule.
+	const auto gone = Purple::RemoveRuleset(text, Path(), u"phone"_q);
+	CHECK(gone.ok());
+	CHECK(gone.changed);
+	CHECK(!gone.text.contains(u"08:00"_q));
+	CHECK(!gone.text.contains(u"\"mobile\""_q));
+	CHECK(gone.text.contains(u"# the phone works longer hours\n\n"
+		"[[schedule.rulesets]]\nname = \"quiet\""_q));
+	CHECK(gone.text.contains(u"[peek]"_q));
+	const auto backGone = Parse(gone.text);
+	CHECK(backGone.ok());
+	CHECK_EQ(backGone.settings.schedule.rulesets.size(), size_t(3));
+	CHECK_EQ(backGone.settings.schedule.rulesets[1].name, u"quiet"_q);
+	CHECK_EQ(backGone.settings.schedule.rules.size(), size_t(1));
+
+	// The last ruleset in the file leaves the section after it where it was.
+	const auto lastGone = Purple::RemoveRuleset(
+		text,
+		Path(),
+		u"the laptop"_q);
+	CHECK(lastGone.ok());
+	CHECK(lastGone.text.contains(u"preset = \"home\"\n\n[peek]"_q));
+	CHECK(!lastGone.text.contains(u"mac-3f9a"_q));
+
+	const auto neverWas = Purple::RemoveRuleset(text, Path(), u"nobody"_q);
+	CHECK(!neverWas.ok());
+	CHECK_EQ(neverWas.text, text);
+}
+
+void TestSpliceRulesetRules() {
+	Begin("splice ruleset rules");
+
+	const auto text = RulesetsExample();
+
+	// The same op as for a flat rule, addressed inside a ruleset, and the index
+	// counts within that ruleset alone.
+	const auto edited = Purple::SetScheduleRule(
+		text,
+		Path(),
+		u"phone"_q,
+		0,
+		{ 8 * 60, 18 * 60, u"work"_q },
+		Rule(true, { 1, 2 }, 7 * 60 + 30, 19 * 60, u"home"_q));
+	CHECK(edited.ok());
+	CHECK(edited.changed);
+	CHECK(edited.text.contains(u"days   = [\"mon\", \"tue\"]"_q));
+	CHECK(edited.text.contains(u"from   = \"07:30\""_q));
+	CHECK(edited.text.contains(u"to     = \"19:00\""_q));
+
+	// The flat rule and the other rulesets are exactly where they were.
+	CHECK(edited.text.contains(u"preset = \"work\"   # the important one"_q));
+	CHECK(edited.text.contains(u"# the phone works longer hours"_q));
+	CHECK(edited.text.contains(u"name = \"quiet\"\nmode = \"always\""_q));
+	const auto back = Parse(edited.text);
+	CHECK(back.ok());
+	CHECK_EQ(back.settings.schedule.rules.size(), size_t(1));
+	CHECK_EQ(back.settings.schedule.rules[0].from, 9 * 60);
+	CHECK_EQ(back.settings.schedule.rulesets[1].rules[0].from, 7 * 60 + 30);
+	CHECK_EQ(back.settings.schedule.rulesets[1].rules[0].preset, u"home"_q);
+	CHECK_EQ(back.settings.schedule.rulesets[2].rules[0].from, 22 * 60);
+
+	// The guard against a stale screen holds inside a ruleset too: the same
+	// index in the flat array is a different rule, and it is not touched.
+	const auto stale = Purple::SetScheduleRule(
+		text,
+		Path(),
+		u"phone"_q,
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(true, { 1 }, 7 * 60, 19 * 60, u"home"_q));
+	CHECK(!stale.ok());
+	CHECK(!stale.changed);
+	CHECK_EQ(stale.text, text);
+	CHECK(stale.error.contains(u"schedule ruleset 'phone' rule 1"_q));
+	CHECK(stale.error.contains(u"changed underneath"_q));
+
+	const auto nowhere = Purple::SetScheduleRule(
+		text,
+		Path(),
+		u"nobody"_q,
+		0,
+		{ 8 * 60, 18 * 60, u"work"_q },
+		Rule(true, { 1 }, 7 * 60, 19 * 60, u"home"_q));
+	CHECK(!nowhere.ok());
+	CHECK(nowhere.error.contains(u"no schedule ruleset called 'nobody'"_q));
+
+	// A rule appended to a ruleset goes after that ruleset's last rule, before
+	// the next ruleset's header.
+	const auto appended = Purple::AppendScheduleRule(
+		text,
+		Path(),
+		u"quiet"_q,
+		Rule(true, { 6, 7 }, 12 * 60, 13 * 60, u"home"_q));
+	CHECK(appended.ok());
+	CHECK(appended.text.contains(u"[[schedule.rulesets.rules]]\n"
+		"enabled_p = true\ndays      = [\"sat\", \"sun\"]\n"
+		"from      = \"12:00\"\nto        = \"13:00\"\n"
+		"preset    = \"home\"\n\n[[schedule.rulesets]]\n"
+		"name   = \"the laptop\""_q));
+	const auto backAppended = Parse(appended.text);
+	CHECK(backAppended.ok());
+	CHECK_EQ(backAppended.settings.schedule.rulesets[2].rules.size(), size_t(2));
+	CHECK_EQ(backAppended.settings.schedule.rulesets[2].rules[1].from, 12 * 60);
+	CHECK_EQ(backAppended.settings.schedule.rulesets[3].name, u"the laptop"_q);
+	CHECK_EQ(backAppended.settings.schedule.rules.size(), size_t(1));
+
+	// A ruleset with no rules yet takes its first one under its own keys, which
+	// is where somebody reading the file looks for it.
+	const auto bare = u"[presets.work]\nlist_order = []\n\n"
+		"[[schedule.rulesets]]\nname   = \"phone\"\ndevice = \"mobile\"\n\n"
+		"[peek]\nhotkey = \"Ctrl+Alt+K\"\n"_q;
+	const auto started = Purple::AppendScheduleRule(
+		bare,
+		Path(),
+		u"phone"_q,
+		Rule(true, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(started.ok());
+	CHECK(started.text.contains(u"device = \"mobile\"\n\n"
+		"[[schedule.rulesets.rules]]\nenabled_p = true"_q));
+	CHECK(started.text.contains(u"[peek]"_q));
+	const auto backStarted = Parse(started.text);
+	CHECK(backStarted.ok());
+	CHECK_EQ(backStarted.settings.schedule.rulesets[0].rules.size(), size_t(1));
+
+	// And taking one out leaves the ruleset and everything after it alone.
+	const auto removed = Purple::RemoveScheduleRule(
+		text,
+		Path(),
+		u"phone"_q,
+		0,
+		{ 8 * 60, 18 * 60, u"work"_q });
+	CHECK(removed.ok());
+	CHECK(removed.changed);
+	CHECK(!removed.text.contains(u"08:00"_q));
+	CHECK(removed.text.contains(u"outside = \"home\"\n\n"
+		"[[schedule.rulesets]]\nname = \"quiet\""_q));
+	const auto backRemoved = Parse(removed.text);
+	CHECK(backRemoved.ok());
+	CHECK(backRemoved.settings.schedule.rulesets[1].rules.empty());
+	CHECK_EQ(backRemoved.settings.schedule.rulesets[2].rules.size(), size_t(1));
+	CHECK_EQ(backRemoved.settings.schedule.rules.size(), size_t(1));
 }
 
 void TestSetTableBoolImplicitHeader() {
@@ -3994,6 +4400,249 @@ preset = "work"
 	CHECK(manual.activeSource == Purple::PresetSource::Manual);
 }
 
+void TestRulesets() {
+	Begin("schedule rulesets");
+
+	const auto parsed = Parse(RulesetsExample());
+	CHECK(parsed.ok());
+	const auto &schedule = parsed.settings.schedule;
+
+	// The flat array is still read as the flat array, and it is ALSO the first
+	// ruleset: everything downstream then has one shape to work with, and a
+	// file that never heard of rulesets resolves through the same path.
+	CHECK_EQ(schedule.rules.size(), size_t(1));
+	CHECK_EQ(schedule.rulesets.size(), size_t(4));
+	CHECK(schedule.rulesets[0].implicit());
+	CHECK_EQ(schedule.rulesets[0].name, u"rules"_q);
+	CHECK_EQ(schedule.rulesets[0].device, u"any"_q);
+	CHECK(schedule.rulesets[0].mode == Purple::RulesetMode::Enabled);
+	CHECK(!schedule.rulesets[0].outside.has_value());
+	CHECK_EQ(schedule.rulesets[0].rules.size(), size_t(1));
+
+	CHECK(!schedule.rulesets[1].implicit());
+	CHECK_EQ(schedule.rulesets[1].name, u"phone"_q);
+	CHECK_EQ(schedule.rulesets[1].device, u"mobile"_q);
+	CHECK(schedule.rulesets[1].mode == Purple::RulesetMode::Enabled);
+	CHECK_EQ(schedule.rulesets[1].outside.value_or(QString()), u"home"_q);
+	CHECK_EQ(schedule.rulesets[1].sourceIndex, 0);
+	CHECK_EQ(schedule.rulesets[1].rules.size(), size_t(1));
+	CHECK_EQ(schedule.rulesets[1].rules[0].from, 8 * 60);
+
+	CHECK(schedule.rulesets[2].mode == Purple::RulesetMode::Always);
+	CHECK_EQ(schedule.rulesets[2].device, u"any"_q);
+	CHECK_EQ(schedule.rulesets[3].device, u"mac-3f9a"_q);
+	CHECK_EQ(schedule.rulesets[3].sourceIndex, 2);
+
+	// A rule inside a ruleset is addressed within that ruleset, so a broken
+	// rule in one cannot move the addresses in another.
+	CHECK_EQ(schedule.rulesets[1].rules[0].sourceIndex, 0);
+	CHECK_EQ(schedule.rulesets[2].rules[0].sourceIndex, 0);
+
+	// A ruleset with no name is no use to anything that has to edit it, and one
+	// whose name is already taken would make the address ambiguous. Both are
+	// skipped, named by the position a person can count to in the file.
+	const auto broken = Parse(uR"(
+[presets.work]
+list_order = []
+
+[[schedule.rulesets]]
+device = "mobile"
+
+[[schedule.rulesets]]
+name = "phone"
+
+[[schedule.rulesets]]
+name = "PHONE"
+
+[[schedule.rulesets]]
+name   = "odd"
+device = ""
+mode   = "sometimes"
+)"_q);
+	CHECK(broken.ok());
+	CHECK(WarnsAbout(broken, u"schedule ruleset 1: needs a 'name'"_q));
+	CHECK(WarnsAbout(
+		broken,
+		u"schedule ruleset 3: another ruleset is already called 'PHONE'"_q));
+	CHECK_EQ(broken.settings.schedule.rulesets.size(), size_t(2));
+	CHECK_EQ(broken.settings.schedule.rulesets[0].name, u"phone"_q);
+
+	const auto &odd = broken.settings.schedule.rulesets[1];
+	CHECK_EQ(odd.name, u"odd"_q);
+	CHECK_EQ(odd.device, u"any"_q);
+	CHECK(WarnsAbout(broken, u"'device' is empty, applying it to every"_q));
+
+	// A mode nobody can read switches the ruleset OFF rather than on: running
+	// rules whose reason cannot be read back is the worse way to be wrong.
+	CHECK(odd.mode == Purple::RulesetMode::Disabled);
+	CHECK(WarnsAbout(broken, u"'mode' should be \"disabled\""_q));
+
+	// A ruleset's outside is checked like any other preset reference, and when
+	// it names nothing it falls back to the schedule's rather than to normal.
+	const auto ghost = Parse(uR"(
+[presets.work]
+list_order = []
+
+[[schedule.rulesets]]
+name    = "phone"
+outside = "ghost"
+)"_q);
+	CHECK(ghost.ok());
+	CHECK(WarnsAbout(ghost, u"outside: preset 'ghost' does not exist"_q));
+	CHECK(!ghost.settings.schedule.rulesets[0].outside.has_value());
+}
+
+void TestActiveSchedule() {
+	Begin("active schedule");
+
+	const auto parsed = Parse(RulesetsExample());
+	CHECK(parsed.ok());
+	const auto &schedule = parsed.settings.schedule;
+	const auto phone = Device(u"pixel-11ff"_q, u"android"_q, u"mobile"_q);
+	const auto laptop = Device(u"mac-3f9a"_q, u"macos"_q, u"desktop"_q);
+	const auto other = Device(u"win-0001"_q, u"windows"_q, u"desktop"_q);
+
+	CHECK_EQ(Purple::RulesetSpecificity(schedule.rulesets[0]), 0);
+	CHECK_EQ(Purple::RulesetSpecificity(schedule.rulesets[1]), 1);
+	CHECK_EQ(Purple::RulesetSpecificity(schedule.rulesets[3]), 3);
+	CHECK(Purple::RulesetAppliesTo(schedule.rulesets[1], phone));
+	CHECK(!Purple::RulesetAppliesTo(schedule.rulesets[1], laptop));
+	CHECK(Purple::RulesetAppliesTo(schedule.rulesets[3], laptop));
+	CHECK(!Purple::RulesetAppliesTo(schedule.rulesets[3], other));
+
+	// On the phone the mobile ruleset REPLACES the flat one rather than piling
+	// on top of it - that is what makes "one file, refined per device" work -
+	// while the `always' ruleset comes along whatever won.
+	const auto onPhone = Purple::ActiveSchedule(schedule, phone);
+	CHECK_EQ(onPhone.chosen.size(), size_t(2));
+	CHECK_EQ(onPhone.chosen[0]->name, u"phone"_q);
+	CHECK_EQ(onPhone.chosen[1]->name, u"quiet"_q);
+	CHECK_EQ(onPhone.rules.size(), size_t(2));
+	CHECK_EQ(onPhone.rules[0]->from, 8 * 60);
+	CHECK_EQ(onPhone.outside, u"home"_q);
+
+	// The laptop's own ruleset is the most specific thing it has, so the flat
+	// rules go the same way the phone's did.
+	const auto onLaptop = Purple::ActiveSchedule(schedule, laptop);
+	CHECK_EQ(onLaptop.chosen.size(), size_t(2));
+	CHECK_EQ(onLaptop.chosen[0]->name, u"the laptop"_q);
+	CHECK_EQ(onLaptop.chosen[1]->name, u"quiet"_q);
+	CHECK_EQ(onLaptop.outside, u"normal"_q);
+
+	// A device nothing was written for keeps the flat rules, which is exactly
+	// what the file meant before any of this existed.
+	const auto onOther = Purple::ActiveSchedule(schedule, other);
+	CHECK_EQ(onOther.chosen.size(), size_t(2));
+	CHECK(onOther.chosen[0]->implicit());
+	CHECK_EQ(onOther.chosen[1]->name, u"quiet"_q);
+	CHECK_EQ(onOther.rules.size(), size_t(2));
+	CHECK_EQ(onOther.rules[0]->from, 9 * 60);
+	CHECK_EQ(onOther.outside, u"normal"_q);
+
+	// And a caller with no identity to offer sees only what asked for no device
+	// in particular - the same answer as a file written before rulesets.
+	const auto nowhere = Purple::ActiveSchedule(
+		schedule,
+		Purple::DeviceIdentity());
+	CHECK_EQ(nowhere.chosen.size(), size_t(2));
+	CHECK(nowhere.chosen[0]->implicit());
+
+	// 2026-08-17 is a Monday, so dayOfWeek() runs 1..7 across that week.
+	const auto at = [](int weekday, int hour, int minute) {
+		return QDateTime(
+			QDate(2026, 8, 16 + weekday),
+			QTime(hour, minute));
+	};
+	const auto target = [&](
+			const Purple::DeviceIdentity &device,
+			const QDateTime &when) {
+		const auto result = Purple::ScheduleTarget(schedule, when, device);
+		return result ? *result : u"<nothing>"_q;
+	};
+
+	// Eight in the morning: the phone is working, and the desktop that only has
+	// the flat rules is between windows - so it takes the outside preset even
+	// though a rule covering the moment is right there in the file, because it
+	// is a rule for somebody else's device.
+	CHECK_EQ(target(phone, at(1, 8, 0)), u"work"_q);
+	CHECK_EQ(target(other, at(1, 8, 0)), u"normal"_q);
+	CHECK_EQ(target(laptop, at(1, 8, 0)), u"normal"_q);
+
+	// Ten o'clock: everybody is working, each by its own rule, and the laptop
+	// by the one written for it.
+	CHECK_EQ(target(phone, at(1, 10, 0)), u"work"_q);
+	CHECK_EQ(target(other, at(1, 10, 0)), u"work"_q);
+	CHECK_EQ(target(laptop, at(1, 10, 30)), u"home"_q);
+
+	// Six in the evening, and the phone's own outside is what it goes back to.
+	CHECK_EQ(target(phone, at(1, 18, 0)), u"home"_q);
+	CHECK_EQ(target(other, at(1, 18, 0)), u"normal"_q);
+
+	// The `always' ruleset runs on all of them, at an hour none of the rest
+	// covers.
+	CHECK_EQ(target(phone, at(1, 23, 0)), u"home"_q);
+	CHECK_EQ(target(other, at(1, 23, 0)), u"home"_q);
+	CHECK_EQ(target(laptop, at(1, 23, 0)), u"home"_q);
+
+	// The rule behind the answer, for a screen that has to name the window.
+	const auto rule = Purple::ScheduleRuleNow(schedule, at(1, 8, 30), phone);
+	CHECK(rule != nullptr);
+	CHECK_EQ(rule->till, 18 * 60);
+	CHECK(!Purple::ScheduleRuleNow(schedule, at(1, 8, 30), other));
+
+	// The boundary rule reads the outside this device settled on, not the one
+	// at the top of the file.
+	using Source = Purple::PresetSource;
+	CHECK(!Purple::ScheduleApplies(onPhone, u"home"_q, Source::Manual));
+	CHECK(Purple::ScheduleApplies(onPhone, u"home"_q, Source::Schedule));
+	CHECK(Purple::ScheduleApplies(onPhone, u"normal"_q, Source::Manual));
+	CHECK(!Purple::ScheduleApplies(onOther, u"normal"_q, Source::Manual));
+	CHECK(Purple::ScheduleApplies(onOther, u"home"_q, Source::Manual));
+
+	// A ruleset switched off is written down and not run, and one for a device
+	// nobody is holding is simply never chosen.
+	const auto off = Parse(uR"(
+[presets.work]
+list_order = []
+
+[[schedule.rulesets]]
+name = "phone"
+mode = "disabled"
+
+[[schedule.rulesets.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)"_q);
+	CHECK(off.ok());
+	CHECK_EQ(off.settings.schedule.rulesets.size(), size_t(1));
+	const auto quiet = Purple::ActiveSchedule(off.settings.schedule, phone);
+	CHECK(quiet.chosen.empty());
+	CHECK(quiet.rules.empty());
+
+	// Nothing at all rather than the outside preset: a file that describes only
+	// other people's devices must not drive this one.
+	CHECK(!Purple::ScheduleTarget(off.settings.schedule, at(1, 10, 0), phone));
+}
+
+void TestDevices() {
+	Begin("devices");
+
+	const auto parsed = Parse(uR"(
+[devices]
+"mac-3f9a"   = "Work laptop"
+"pixel-11ff" = "Phone"
+bare         = 7
+)"_q);
+	CHECK(parsed.ok());
+	CHECK_EQ(parsed.settings.devices.size(), size_t(2));
+	CHECK(parsed.settings.device(u"mac-3f9a"_q) != nullptr);
+	CHECK_EQ(parsed.settings.device(u"MAC-3F9A"_q)->label, u"Work laptop"_q);
+	CHECK(!parsed.settings.device(u"nothing"_q));
+	CHECK(WarnsAbout(parsed, u"'bare' should be a name in quotes"_q));
+}
+
 void TestResolvedCache() {
 	Begin("resolved cache");
 
@@ -4138,6 +4787,8 @@ int main() {
 	TestSpliceScheduleSet();
 	TestSpliceScheduleAppend();
 	TestSpliceScheduleRemove();
+	TestSpliceRulesets();
+	TestSpliceRulesetRules();
 	TestSetTableBoolImplicitHeader();
 	TestSetTableString();
 	TestStateRoundTrip();
@@ -4160,6 +4811,9 @@ int main() {
 	TestHideScope();
 	TestScheduleTarget();
 	TestScheduleOutside();
+	TestRulesets();
+	TestActiveSchedule();
+	TestDevices();
 	TestSchedulePauseUntil();
 	TestResolvedCache();
 

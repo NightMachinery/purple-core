@@ -243,14 +243,92 @@ struct Visibility {
 [[nodiscard]] ResolvedCache ToCache(const Resolved &resolved);
 [[nodiscard]] std::optional<Resolved> FromCache(const ResolvedCache &cache);
 
-// What the schedule wants active at this local time: the preset of the first
-// rule covering the moment, or `schedule.outside' when rules exist and none
-// does.
+// What this install is, as far as a ruleset is concerned. Every field comes
+// from the client, never from the file: the whole point of rulesets is that one
+// settings.toml is carried between devices unchanged, so the file describes
+// devices and the device describes itself.
+struct DeviceIdentity {
+	// Stable and unique to this install - "mac-3f9a" - and the string a ruleset
+	// names to mean this one device. Empty when the client has none, which
+	// matches only rulesets that ask for no device in particular.
+	QString id;
+
+	// "android", "ios", "macos", "windows" or "linux".
+	QString platform;
+
+	// "mobile" or "desktop".
+	QString cls;
+};
+
+// Whether a ruleset is for this device at all: "any", its class, its platform,
+// or its id outright. Case is ignored, because a device id ends up typed by
+// hand into a file at least once.
+[[nodiscard]] bool RulesetAppliesTo(
+	const ScheduleRuleset &ruleset,
+	const DeviceIdentity &device);
+
+// How narrowly a ruleset aimed at the device it applies to: 3 for one naming a
+// device id, 2 for a platform, 1 for a class, 0 for "any". It is a property of
+// what the ruleset asked for and nothing else, so two devices always agree on
+// which of two rulesets is the more specific.
+[[nodiscard]] int RulesetSpecificity(const ScheduleRuleset &ruleset);
+
+// The schedule this device actually runs, once the rulesets have been sorted
+// out. Everything downstream sees a single flat list of rules and one outside
+// preset, which is what lets the first-match-wins engine stay exactly as it was
+// before rulesets existed.
 //
-// Nothing at all when the schedule is off or has no rules, which is a different
-// answer from wanting the outside preset and has to be: otherwise an empty
-// [schedule] section would quietly force Normal over every other way of
-// choosing a preset.
+// The pointers are into the Schedule this was built from and are only good for
+// as long as it is.
+struct ScheduleForDevice {
+	// The chosen rulesets' enabled rules, concatenated: the most specific
+	// ruleset's rules first, then file order among equals.
+	std::vector<const ScheduleRule*> rules;
+
+	// The preset wanted between the windows: the most specific chosen ruleset
+	// that names one, or [schedule] outside when none does.
+	QString outside;
+
+	// Which rulesets were chosen, in the order their rules were merged. For a
+	// screen that has to explain why a rule is or is not running today.
+	std::vector<const ScheduleRuleset*> chosen;
+};
+
+// Choosing among the rulesets, in one place because the rule has three parts
+// and every one of them is a decision somebody will want to read back:
+//
+// - a ruleset applies when its device matches and its mode is not `disabled';
+// - among the applicable `enabled' ones only the most specific tier runs, so a
+//   ruleset naming this phone REPLACES the one for mobiles rather than piling
+//   on top of it - which is what makes "the same file everywhere, refined per
+//   device" work at all;
+// - every applicable `always' ruleset runs as well, whatever won above, for the
+//   rules that are true on every device and should not be copied into each.
+//
+// The flat [[schedule.rules]] array takes part as the implicit ruleset the
+// parser materialises for it, so a file that never heard of rulesets resolves
+// through exactly the same path.
+[[nodiscard]] ScheduleForDevice ActiveSchedule(
+	const Schedule &schedule,
+	const DeviceIdentity &device);
+
+// What the schedule wants active at this local time on this device: the preset
+// of the first rule covering the moment, or the active `outside' when rules
+// exist and none does.
+//
+// Nothing at all when the schedule is off, or when no ruleset that applies to
+// this device has a rule in it - which is a different answer from wanting the
+// outside preset and has to be: otherwise a file describing only OTHER devices
+// would quietly drive this one, and an empty [schedule] section would force
+// Normal over every other way of choosing a preset.
+[[nodiscard]] std::optional<QString> ScheduleTarget(
+	const Schedule &schedule,
+	const QDateTime &now,
+	const DeviceIdentity &device);
+
+// The same for a caller with no device identity to offer. It matches only the
+// rulesets that asked for no device in particular, which is every rule in a
+// file written before rulesets existed.
 [[nodiscard]] std::optional<QString> ScheduleTarget(
 	const Schedule &schedule,
 	const QDateTime &now);
@@ -264,10 +342,11 @@ struct Visibility {
 // preset has passed, which is no reason at all to undo something asked for, so
 // it lands only when the schedule is what put the running preset there.
 //
-// "Ending" is a move to `schedule.outside', not a move to Normal. Once the
-// preset outside every window is a key, five o'clock aiming at Home is a window
-// ending like any other and must not steamroll a manual choice - which is the
-// one thing a client mirroring `target != normal' would get wrong.
+// "Ending" is a move to the ACTIVE outside - the one this device's chosen
+// rulesets settled on - not a move to Normal. Once the preset between windows
+// is a key, five o'clock aiming at Home is a window ending like any other and
+// must not steamroll a manual choice, which is the one thing a client mirroring
+// `target != normal' would get wrong.
 //
 // Focus is left alone in both directions: it is the more immediate signal, and
 // a schedule fighting it would make both unreadable.
@@ -275,13 +354,24 @@ struct Visibility {
 // It lives here rather than in each app's tick because there are two ticks, and
 // a rule this easy to get subtly wrong is worth having one copy of.
 [[nodiscard]] bool ScheduleApplies(
+	const ScheduleForDevice &active,
+	const QString &target,
+	PresetSource activeSource);
+
+[[nodiscard]] bool ScheduleApplies(
+	const Schedule &schedule,
+	const DeviceIdentity &device,
+	const QString &target,
+	PresetSource activeSource);
+
+[[nodiscard]] bool ScheduleApplies(
 	const Schedule &schedule,
 	const QString &target,
 	PresetSource activeSource);
 
 // The rule the schedule is inside right now, or null when none covers the
-// moment - which includes a schedule that is switched off or has no rules.
-// Points into `schedule.rules'.
+// moment - which includes a schedule that is switched off and one with no rule
+// for this device. Points into `schedule'.
 //
 // This is what ScheduleTarget() answers with, before it collapses the answer to
 // a preset name. A screen that wants to say "work until 17:00" needs the rule
@@ -289,6 +379,16 @@ struct Visibility {
 // copy of the midnight-crossing rule to keep in step.
 [[nodiscard]] const ScheduleRule *ScheduleRuleNow(
 	const Schedule &schedule,
+	const QDateTime &now,
+	const DeviceIdentity &device);
+
+[[nodiscard]] const ScheduleRule *ScheduleRuleNow(
+	const Schedule &schedule,
+	const QDateTime &now);
+
+// The first rule in an already-resolved schedule that covers this moment.
+[[nodiscard]] const ScheduleRule *ScheduleRuleNow(
+	const ScheduleForDevice &active,
 	const QDateTime &now);
 
 } // namespace Purple

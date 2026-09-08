@@ -10,6 +10,7 @@ option) any later version.
 #include <QtCore/QStringList>
 
 #include <algorithm>
+#include <functional>
 
 // Return parse errors instead of throwing, so a hand-edited file with a typo
 // degrades to "keep the last good settings and show a banner" rather than to an
@@ -873,6 +874,228 @@ void WarnUnknownLists(
 	return result;
 }
 
+// The rules out of one [[...rules]] array, flat or inside a ruleset. `context'
+// names a rule the way its warnings will: "schedule rule 2" for the flat array,
+// "schedule ruleset 'phone' rule 2" for one inside a ruleset.
+[[nodiscard]] std::vector<ScheduleRule> ReadScheduleRules(
+		const toml::array &array,
+		const std::vector<Preset> &presets,
+		const std::function<QString(int)> &context,
+		std::vector<QString> &warnings) {
+	auto result = std::vector<ScheduleRule>();
+	auto index = 0;
+	for (auto &&element : array) {
+		const auto where = context(++index);
+		const auto fields = element.as_table();
+		if (!fields) {
+			warnings.push_back(u"%1: should be a table (%2)."_q
+				.arg(where, At(element)));
+			continue;
+		}
+		auto rule = ScheduleRule();
+
+		// The counter above is not reset by a `continue', so it still counts
+		// the rules that were skipped - which is the whole point: an index
+		// that shifted when a rule broke would make every edit made from a
+		// screen land on the wrong rule. Inside a ruleset it counts within that
+		// ruleset, because that is what the splice ops address by.
+		rule.sourceIndex = index - 1;
+		rule.sourceLine = int(fields->source().begin.line);
+		rule.enabled = ReadBool(*fields, "enabled_p", where, warnings)
+			.value_or(true);
+		const auto from = ReadString(*fields, "from", where, warnings);
+		const auto till = ReadString(*fields, "to", where, warnings);
+		const auto preset = ReadString(*fields, "preset", where, warnings);
+		if (!from || !till || !preset) {
+			warnings.push_back(
+				u"%1: needs 'from', 'to' and 'preset', skipping it."_q
+					.arg(where));
+			continue;
+		}
+		const auto parsedFrom = ParseTimeOfDay(*from);
+		const auto parsedTill = ParseTimeOfDay(*till);
+		if (!parsedFrom || !parsedTill) {
+			warnings.push_back(
+				u"%1: 'from' and 'to' should look like \"09:00\", "
+				"skipping it."_q.arg(where));
+			continue;
+		} else if (*parsedFrom == *parsedTill) {
+			warnings.push_back(
+				u"%1: 'from' and 'to' are the same time, skipping it."_q
+					.arg(where));
+			continue;
+		} else if (rule.enabled && !KnownPresetReference(presets, *preset)) {
+			// Only for a rule that would actually fire. A disabled rule aimed
+			// at a preset you have not written yet is the normal state of the
+			// example in the starter file, and warning about it would mean a
+			// fresh install complains on every single start.
+			warnings.push_back(
+				u"%1: preset '%2' does not exist, skipping it."_q
+					.arg(where, *preset));
+			continue;
+		}
+		rule.from = *parsedFrom;
+		rule.till = *parsedTill;
+		rule.preset = *preset;
+
+		if (const auto days = fields->get("days")) {
+			if (const auto list = days->as_array()) {
+				for (auto &&day : *list) {
+					const auto name = day.value<std::string_view>();
+					const auto parsed = name
+						? ParseWeekday(Text(*name))
+						: std::nullopt;
+					if (parsed) {
+						rule.days.push_back(*parsed);
+					} else {
+						warnings.push_back(
+							u"%1: '%2' is not a weekday like \"mon\" (%3)."_q
+								.arg(
+									where,
+									name ? Text(*name) : u"?"_q,
+									At(day)));
+					}
+				}
+			} else {
+				warnings.push_back(u"%1: 'days' should be an array (%2)."_q
+					.arg(where, At(*days)));
+			}
+		}
+		if (rule.days.empty()) {
+			warnings.push_back(
+				u"%1: no weekdays given, applying it every day."_q.arg(where));
+			rule.days = { 1, 2, 3, 4, 5, 6, 7 };
+		}
+		result.push_back(std::move(rule));
+	}
+	return result;
+}
+
+// A ruleset's own `outside'. Unset and "does not exist" are deliberately the
+// same answer here: both leave the question to [schedule] outside, which is a
+// value that has already been checked.
+[[nodiscard]] std::optional<QString> ReadRulesetOutside(
+		const toml::table &fields,
+		const std::vector<Preset> &presets,
+		const QString &context,
+		std::vector<QString> &warnings) {
+	const auto outside = ReadString(fields, "outside", context, warnings);
+	if (!outside) {
+		return std::nullopt;
+	} else if (!KnownPresetReference(presets, *outside)) {
+		warnings.push_back(
+			u"%1: outside: preset '%2' does not exist, using the one the "
+			"schedule sets."_q.arg(context, *outside));
+		return std::nullopt;
+	}
+	return outside;
+}
+
+[[nodiscard]] std::vector<ScheduleRuleset> ReadRulesets(
+		const toml::table &table,
+		const std::vector<Preset> &presets,
+		std::vector<QString> &warnings) {
+	auto result = std::vector<ScheduleRuleset>();
+	const auto node = table.get("rulesets");
+	if (!node) {
+		return result;
+	}
+	const auto array = node->as_array();
+	if (!array) {
+		warnings.push_back(u"'schedule.rulesets' should be an array (%1)."_q
+			.arg(At(*node)));
+		return result;
+	}
+	auto index = 0;
+	for (auto &&element : *array) {
+		// Counted the way rules are, the skipped ones included, so a warning
+		// names the block a person can count to in the file.
+		const auto raw = index++;
+		const auto position = u"schedule ruleset %1"_q.arg(raw + 1);
+		const auto fields = element.as_table();
+		if (!fields) {
+			warnings.push_back(u"%1: should be a [[schedule.rulesets]] table "
+				"(%2)."_q.arg(position, At(element)));
+			continue;
+		}
+		auto ruleset = ScheduleRuleset();
+		ruleset.sourceIndex = raw;
+		ruleset.sourceLine = int(fields->source().begin.line);
+		ruleset.name = ReadString(*fields, "name", position, warnings)
+			.value_or(QString())
+			.trimmed();
+		if (ruleset.name.isEmpty()) {
+			// Skipped rather than given one, because the name is the address
+			// every edit from a screen goes through: a ruleset the app cannot
+			// name is a ruleset it cannot safely touch.
+			warnings.push_back(
+				u"%1: needs a 'name', skipping it."_q.arg(position));
+			continue;
+		}
+		const auto taken = std::any_of(
+			result.begin(),
+			result.end(),
+			[&](const ScheduleRuleset &other) {
+				return !other.name.compare(ruleset.name, Qt::CaseInsensitive);
+			});
+		if (taken) {
+			warnings.push_back(
+				u"%1: another ruleset is already called '%2', skipping it."_q
+					.arg(position, ruleset.name));
+			continue;
+		}
+		const auto context = u"schedule ruleset '%1'"_q.arg(ruleset.name);
+
+		if (const auto device = ReadString(
+				*fields,
+				"device",
+				context,
+				warnings)) {
+			if (device->trimmed().isEmpty()) {
+				warnings.push_back(u"%1: 'device' is empty, applying it to "
+					"every device."_q.arg(context));
+			} else {
+				ruleset.device = device->trimmed();
+			}
+		}
+		if (const auto mode = ReadString(*fields, "mode", context, warnings)) {
+			if (const auto parsed = ParseRulesetMode(*mode)) {
+				ruleset.mode = *parsed;
+			} else {
+				// Off rather than on. A mode nobody can read is a sentence the
+				// file did not finish, and running rules whose reason cannot be
+				// read back is the worse of the two ways to be wrong.
+				warnings.push_back(u"%1: 'mode' should be \"disabled\", "
+					"\"enabled\" or \"always\", switching it off."_q
+						.arg(context));
+				ruleset.mode = RulesetMode::Disabled;
+			}
+		}
+		ruleset.outside = ReadRulesetOutside(
+			*fields,
+			presets,
+			context,
+			warnings);
+
+		if (const auto rules = fields->get("rules")) {
+			if (const auto inner = rules->as_array()) {
+				ruleset.rules = ReadScheduleRules(
+					*inner,
+					presets,
+					[&](int at) {
+						return u"%1 rule %2"_q.arg(context).arg(at);
+					},
+					warnings);
+			} else {
+				warnings.push_back(u"%1: 'rules' should be an array (%2)."_q
+					.arg(context, At(*rules)));
+			}
+		}
+		result.push_back(std::move(ruleset));
+	}
+	return result;
+}
+
 [[nodiscard]] Schedule ReadSchedule(
 		const toml::table &root,
 		const std::vector<Preset> &presets,
@@ -909,100 +1132,31 @@ void WarnUnknownLists(
 		}
 	}
 
-	const auto rules = table.get("rules");
-	if (!rules) {
-		return result;
+	if (const auto rules = table.get("rules")) {
+		if (const auto array = rules->as_array()) {
+			result.rules = ReadScheduleRules(
+				*array,
+				presets,
+				[](int at) { return u"schedule rule %1"_q.arg(at); },
+				warnings);
+		} else {
+			warnings.push_back(u"'schedule.rules' should be an array (%1)."_q
+				.arg(At(*rules)));
+		}
 	}
-	const auto array = rules->as_array();
-	if (!array) {
-		warnings.push_back(u"'schedule.rules' should be an array (%1)."_q
-			.arg(At(*rules)));
-		return result;
-	}
-	auto index = 0;
-	for (auto &&element : *array) {
-		const auto context = u"schedule rule %1"_q.arg(++index);
-		const auto fields = element.as_table();
-		if (!fields) {
-			warnings.push_back(u"%1: should be a [[schedule.rules]] table "
-				"(%2)."_q.arg(context, At(element)));
-			continue;
-		}
-		auto rule = ScheduleRule();
+	result.rulesets = ReadRulesets(table, presets, warnings);
 
-		// The counter above is not reset by a `continue', so it still counts
-		// the rules that were skipped - which is the whole point: an index
-		// that shifted when a rule broke would make every edit made from a
-		// screen land on the wrong rule.
-		rule.sourceIndex = index - 1;
-		rule.sourceLine = int(fields->source().begin.line);
-		rule.enabled = ReadBool(*fields, "enabled_p", context, warnings)
-			.value_or(true);
-		const auto from = ReadString(*fields, "from", context, warnings);
-		const auto till = ReadString(*fields, "to", context, warnings);
-		const auto preset = ReadString(*fields, "preset", context, warnings);
-		if (!from || !till || !preset) {
-			warnings.push_back(
-				u"%1: needs 'from', 'to' and 'preset', skipping it."_q
-					.arg(context));
-			continue;
-		}
-		const auto parsedFrom = ParseTimeOfDay(*from);
-		const auto parsedTill = ParseTimeOfDay(*till);
-		if (!parsedFrom || !parsedTill) {
-			warnings.push_back(
-				u"%1: 'from' and 'to' should look like \"09:00\", "
-				"skipping it."_q.arg(context));
-			continue;
-		} else if (*parsedFrom == *parsedTill) {
-			warnings.push_back(
-				u"%1: 'from' and 'to' are the same time, skipping it."_q
-					.arg(context));
-			continue;
-		} else if (rule.enabled && !KnownPresetReference(presets, *preset)) {
-			// Only for a rule that would actually fire. A disabled rule aimed
-			// at a preset you have not written yet is the normal state of the
-			// example in the starter file, and warning about it would mean a
-			// fresh install complains on every single start.
-			warnings.push_back(
-				u"%1: preset '%2' does not exist, skipping it."_q
-					.arg(context, *preset));
-			continue;
-		}
-		rule.from = *parsedFrom;
-		rule.till = *parsedTill;
-		rule.preset = *preset;
-
-		if (const auto days = fields->get("days")) {
-			if (const auto list = days->as_array()) {
-				for (auto &&day : *list) {
-					const auto name = day.value<std::string_view>();
-					const auto parsed = name
-						? ParseWeekday(Text(*name))
-						: std::nullopt;
-					if (parsed) {
-						rule.days.push_back(*parsed);
-					} else {
-						warnings.push_back(
-							u"%1: '%2' is not a weekday like \"mon\" (%3)."_q
-								.arg(
-									context,
-									name ? Text(*name) : u"?"_q,
-									At(day)));
-					}
-				}
-			} else {
-				warnings.push_back(u"%1: 'days' should be an array (%2)."_q
-					.arg(context, At(*days)));
-			}
-		}
-		if (rule.days.empty()) {
-			warnings.push_back(
-				u"%1: no weekdays given, applying it every day."_q
-					.arg(context));
-			rule.days = { 1, 2, 3, 4, 5, 6, 7 };
-		}
-		result.rules.push_back(std::move(rule));
+	// The flat array joins the rulesets as one of them, first, so everything
+	// downstream has a single shape to work with. It is the file's base layer:
+	// for every device, always written down, and never more specific than a
+	// ruleset that named one - which is exactly what the files that have only
+	// this array have always meant.
+	if (!result.rules.empty()) {
+		auto implicit = ScheduleRuleset();
+		implicit.name = u"rules"_q;
+		implicit.sourceLine = result.rules.front().sourceLine;
+		implicit.rules = result.rules;
+		result.rulesets.insert(result.rulesets.begin(), std::move(implicit));
 	}
 	return result;
 }
@@ -1150,6 +1304,39 @@ void WarnUnknownLists(
 				"\"keep_in_folder_but_exclude_from_badge_count\" or "
 				"\"keep_in_folder\", keeping \"%1\"."_q.arg(
 					HideScopeName(result.hideScope)));
+		}
+	}
+	return result;
+}
+
+// [devices]: an id a client reports for itself, and what to call it on a
+// screen. Every key here is a device somebody owns, so there is no such thing
+// as an unknown key to warn about - only a value that is not a name at all.
+[[nodiscard]] std::vector<DeviceLabel> ReadDevices(
+		const toml::table &root,
+		std::vector<QString> &warnings) {
+	auto result = std::vector<DeviceLabel>();
+	const auto node = root.get("devices");
+	if (!node) {
+		return result;
+	}
+	const auto table = node->as_table();
+	if (!table) {
+		warnings.push_back(u"'devices' should be a table (%1)."_q
+			.arg(At(*node)));
+		return result;
+	}
+	for (auto &&[key, value] : *table) {
+		const auto id = Text(key.str()).trimmed();
+		const auto label = value.value<std::string_view>();
+		if (id.isEmpty()) {
+			warnings.push_back(u"devices: an entry has no device id (%1), "
+				"ignoring it."_q.arg(At(value)));
+		} else if (!label) {
+			warnings.push_back(u"devices: '%1' should be a name in quotes "
+				"(%2), ignoring it."_q.arg(id, At(value)));
+		} else {
+			result.push_back({ id, Text(*label).trimmed() });
 		}
 	}
 	return result;
@@ -1546,6 +1733,27 @@ QString TimeOfDayText(int minutes) {
 	return result;
 }
 
+std::optional<RulesetMode> ParseRulesetMode(const QString &value) {
+	const auto trimmed = value.trimmed().toLower();
+	if (trimmed == u"disabled"_q) {
+		return RulesetMode::Disabled;
+	} else if (trimmed == u"enabled"_q) {
+		return RulesetMode::Enabled;
+	} else if (trimmed == u"always"_q) {
+		return RulesetMode::Always;
+	}
+	return std::nullopt;
+}
+
+QString RulesetModeName(RulesetMode value) {
+	switch (value) {
+	case RulesetMode::Disabled: return u"disabled"_q;
+	case RulesetMode::Enabled: return u"enabled"_q;
+	case RulesetMode::Always: return u"always"_q;
+	}
+	return QString();
+}
+
 std::optional<int> ParseWeekday(const QString &value) {
 	const auto &names = WeekdayNames();
 	const auto trimmed = value.trimmed().toLower();
@@ -1578,6 +1786,16 @@ const Preset *Settings::preset(const QString &name) const {
 		presets.end(),
 		[&](const Preset &preset) { return preset.name == name; });
 	return (i == presets.end()) ? nullptr : &*i;
+}
+
+const DeviceLabel *Settings::device(const QString &id) const {
+	const auto i = std::find_if(
+		devices.begin(),
+		devices.end(),
+		[&](const DeviceLabel &device) {
+			return !device.id.compare(id, Qt::CaseInsensitive);
+		});
+	return (i == devices.end()) ? nullptr : &*i;
 }
 
 ParseResult ParseSettings(const QString &text, const QString &path) {
@@ -1645,6 +1863,7 @@ ParseResult ParseSettings(const QString &text, const QString &path) {
 	result.settings.recent = ReadRecent(root, result.warnings);
 	result.settings.overrides = ReadOverrides(root, result.warnings);
 	result.settings.suggestions = ReadSuggestions(root, result.warnings);
+	result.settings.devices = ReadDevices(root, result.warnings);
 
 	// Hotkeys last, because this is the one check that needs the presets and
 	// [peek] at once. Two actions holding the same sequence make it ambiguous

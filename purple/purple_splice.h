@@ -134,11 +134,21 @@ struct ScheduleRuleExpected {
 	QString preset;
 };
 
-// Rewrites one [[schedule.rules]] block in place, key by key: each of
-// 'enabled_p', 'days', 'from', 'to' and 'preset' has its value replaced where
-// it stands, or is added at the end of the block when the rule never had it.
-// Everything else - a key the app knows nothing about, a comment, the spacing -
-// is left exactly where the user put it.
+// WHERE a rule lives, in every op below. An empty `ruleset' is the flat
+// [[schedule.rules]] array, which is the only place rules could be before
+// rulesets existed and is still where a file that never grew one keeps them.
+// A name is a [[schedule.rulesets]] block, matched ignoring case, and the index
+// then counts within THAT ruleset's own [[schedule.rulesets.rules]] blocks.
+//
+// A ruleset is addressed by name and never by position, because its position
+// moves whenever one above it is added or taken away, and an index a dialog
+// read a minute ago would then edit the wrong ruleset.
+
+// Rewrites one rule block in place, key by key: each of 'enabled_p', 'days',
+// 'from', 'to' and 'preset' has its value replaced where it stands, or is added
+// at the end of the block when the rule never had it. Everything else - a key
+// the app knows nothing about, a comment, the spacing - is left exactly where
+// the user put it.
 //
 // `index' is ScheduleRule::sourceIndex: the position in the RAW array, counting
 // the rules the parser threw away, which is what stops a broken rule in the
@@ -146,27 +156,60 @@ struct ScheduleRuleExpected {
 [[nodiscard]] SpliceResult SetScheduleRule(
 	const QString &text,
 	const QString &path,
+	const QString &ruleset,
 	int index,
 	const ScheduleRuleExpected &expected,
 	const ScheduleRule &rule);
 
-// Writes a new rule after the last [[schedule.rules]] block, or under
-// [schedule] when there are no rules yet, or as a fresh [schedule] section at
-// the end of the file when there is no schedule at all.
+// Adds a rule at the end of wherever it belongs: after the last rule of the
+// named ruleset and before whatever header comes next, or after the last flat
+// rule. A file with no [schedule] at all gains the section along with the rule.
 [[nodiscard]] SpliceResult AppendScheduleRule(
 	const QString &text,
 	const QString &path,
+	const QString &ruleset,
 	const ScheduleRule &rule);
 
-// Takes a rule out: its header down to the line before the next one. The blank
-// line and any comment block above that next header stay where they are - they
-// belong to what follows, not to what is going - and so does anything written
-// above the rule's own header, which may well be a note about the section.
+// Takes one rule out, header through the line before the next block, leaving
+// the blank line and any comment above the block that follows.
 [[nodiscard]] SpliceResult RemoveScheduleRule(
 	const QString &text,
 	const QString &path,
+	const QString &ruleset,
 	int index,
 	const ScheduleRuleExpected &expected);
+
+// Adds an empty [[schedule.rulesets]] block after everything the schedule
+// already holds. `device' and `mode' are written only when they are not the
+// defaults ("any" and enabled), because a file where every ruleset spells out
+// what it would have meant anyway is harder to read for no gain.
+//
+// Refuses an empty name and one already taken, ignoring case: the name is the
+// address every later edit goes through.
+[[nodiscard]] SpliceResult AddRuleset(
+	const QString &text,
+	const QString &path,
+	const QString &name,
+	const QString &device,
+	RulesetMode mode);
+
+// Takes a whole ruleset out, its rules with it - they are its rules and mean
+// nothing without it.
+[[nodiscard]] SpliceResult RemoveRuleset(
+	const QString &text,
+	const QString &path,
+	const QString &name);
+
+// Sets one of a ruleset's own string keys - 'device', 'mode', 'outside', or
+// 'name' for a rename - keeping the spacing and any trailing comment. An empty
+// `value' takes the key out of the file, which is how a screen says "back to
+// the default" without writing the default down.
+[[nodiscard]] SpliceResult SetRulesetString(
+	const QString &text,
+	const QString &path,
+	const QString &name,
+	const QString &key,
+	const QString &value);
 
 // Exposed for the tests: the ids a list holds, in file order.
 [[nodiscard]] std::vector<PeerIdValue> ListMembers(

@@ -349,33 +349,173 @@ std::optional<Resolved> FromCache(const ResolvedCache &cache) {
 	return result;
 }
 
+bool RulesetAppliesTo(
+		const ScheduleRuleset &ruleset,
+		const DeviceIdentity &device) {
+	const auto wanted = ruleset.device.trimmed();
+	if (wanted.isEmpty() || !wanted.compare(u"any"_q, Qt::CaseInsensitive)) {
+		return true;
+	}
+	const auto names = [&](const QString &what) {
+		return !what.isEmpty() && !wanted.compare(what, Qt::CaseInsensitive);
+	};
+	return names(device.cls) || names(device.platform) || names(device.id);
+}
+
+int RulesetSpecificity(const ScheduleRuleset &ruleset) {
+	const auto wanted = ruleset.device.trimmed();
+	if (wanted.isEmpty() || !wanted.compare(u"any"_q, Qt::CaseInsensitive)) {
+		return 0;
+	}
+	for (const auto &cls : { u"mobile"_q, u"desktop"_q }) {
+		if (!wanted.compare(cls, Qt::CaseInsensitive)) {
+			return 1;
+		}
+	}
+	for (const auto &platform : {
+			u"android"_q,
+			u"ios"_q,
+			u"macos"_q,
+			u"windows"_q,
+			u"linux"_q }) {
+		if (!wanted.compare(platform, Qt::CaseInsensitive)) {
+			return 2;
+		}
+	}
+
+	// The list of platforms is closed and the list of devices is not, so
+	// anything left is a device id. That is also what makes a typo the most
+	// specific thing in the file rather than a warning: "andriod" is a device
+	// nobody owns, and a ruleset for a device nobody owns simply never applies.
+	return 3;
+}
+
+ScheduleForDevice ActiveSchedule(
+		const Schedule &schedule,
+		const DeviceIdentity &device) {
+	auto result = ScheduleForDevice();
+	result.outside = schedule.outside;
+
+	// A Schedule the parser did not build - one assembled in a test or by a
+	// caller filling in the flat list - has no ruleset to stand for its rules,
+	// so they are taken as they are. Reading a file always goes the other way:
+	// ReadSchedule() materialises the implicit ruleset, so the flat rules take
+	// their place in the merge order rather than being bolted on ahead of it.
+	if (schedule.rulesets.empty()) {
+		for (const auto &rule : schedule.rules) {
+			if (rule.enabled) {
+				result.rules.push_back(&rule);
+			}
+		}
+		return result;
+	}
+
+	auto applicable = std::vector<const ScheduleRuleset*>();
+	for (const auto &ruleset : schedule.rulesets) {
+		if (ruleset.mode != RulesetMode::Disabled
+			&& RulesetAppliesTo(ruleset, device)) {
+			applicable.push_back(&ruleset);
+		}
+	}
+
+	// Only the narrowest tier of the ordinary rulesets runs. Everything less
+	// specific has been replaced rather than added to, which is the difference
+	// between "the same file everywhere, refined per device" and a file whose
+	// every layer keeps firing at once.
+	auto tier = -1;
+	for (const auto ruleset : applicable) {
+		if (ruleset->mode == RulesetMode::Enabled) {
+			tier = std::max(tier, RulesetSpecificity(*ruleset));
+		}
+	}
+	for (const auto ruleset : applicable) {
+		if (ruleset->mode == RulesetMode::Always
+			|| RulesetSpecificity(*ruleset) == tier) {
+			result.chosen.push_back(ruleset);
+		}
+	}
+
+	// Most specific first, then file order. stable_sort rather than a
+	// comparison that reaches for sourceIndex, because file order is the order
+	// they are already in and the implicit ruleset has no index to compare.
+	std::stable_sort(
+		result.chosen.begin(),
+		result.chosen.end(),
+		[](const ScheduleRuleset *a, const ScheduleRuleset *b) {
+			return RulesetSpecificity(*a) > RulesetSpecificity(*b);
+		});
+
+	for (const auto ruleset : result.chosen) {
+		if (ruleset->outside) {
+			// The first one to name a preset, in the order above: the most
+			// specific chosen ruleset that has an opinion, ties by file order.
+			result.outside = *ruleset->outside;
+			break;
+		}
+	}
+	for (const auto ruleset : result.chosen) {
+		for (const auto &rule : ruleset->rules) {
+			if (rule.enabled) {
+				result.rules.push_back(&rule);
+			}
+		}
+	}
+	return result;
+}
+
+std::optional<QString> ScheduleTarget(
+		const Schedule &schedule,
+		const QDateTime &now,
+		const DeviceIdentity &device) {
+	if (!schedule.enabled) {
+		return std::nullopt;
+	}
+	const auto active = ActiveSchedule(schedule, device);
+	if (active.rules.empty()) {
+		return std::nullopt;
+	}
+	const auto rule = ScheduleRuleNow(active, now);
+	return rule ? rule->preset : active.outside;
+}
+
 std::optional<QString> ScheduleTarget(
 		const Schedule &schedule,
 		const QDateTime &now) {
-	if (!schedule.enabled || schedule.rules.empty()) {
-		return std::nullopt;
+	return ScheduleTarget(schedule, now, DeviceIdentity());
+}
+
+bool ScheduleApplies(
+		const ScheduleForDevice &active,
+		const QString &target,
+		PresetSource activeSource) {
+	if (activeSource == PresetSource::Focus) {
+		return false;
 	}
-	const auto rule = ScheduleRuleNow(schedule, now);
-	return rule ? rule->preset : schedule.outside;
+	return (target != active.outside)
+		|| (activeSource == PresetSource::Schedule);
+}
+
+bool ScheduleApplies(
+		const Schedule &schedule,
+		const DeviceIdentity &device,
+		const QString &target,
+		PresetSource activeSource) {
+	return ScheduleApplies(
+		ActiveSchedule(schedule, device),
+		target,
+		activeSource);
 }
 
 bool ScheduleApplies(
 		const Schedule &schedule,
 		const QString &target,
 		PresetSource activeSource) {
-	if (activeSource == PresetSource::Focus) {
-		return false;
-	}
-	return (target != schedule.outside)
-		|| (activeSource == PresetSource::Schedule);
+	return ScheduleApplies(schedule, DeviceIdentity(), target, activeSource);
 }
 
 const ScheduleRule *ScheduleRuleNow(
-		const Schedule &schedule,
+		const ScheduleForDevice &active,
 		const QDateTime &now) {
-	if (!schedule.enabled) {
-		return nullptr;
-	}
 	const auto covers = [](const ScheduleRule &rule, int day) {
 		return std::find(rule.days.begin(), rule.days.end(), day)
 			!= rule.days.end();
@@ -385,10 +525,12 @@ const ScheduleRule *ScheduleRuleNow(
 	const auto today = now.date().dayOfWeek();
 	const auto yesterday = (today == 1) ? 7 : (today - 1);
 
-	// First match wins, in file order, the same rule the lists follow. Two
-	// rules covering one moment is a thing a hand-written file will do, and
-	// picking by position is the only answer that can be predicted by reading.
-	for (const auto &rule : schedule.rules) {
+	// First match wins, in the order the rulesets were merged, which is the
+	// order the lists follow within one of them. Two rules covering one moment
+	// is a thing a hand-written file will do, and picking by position is the
+	// only answer that can be predicted by reading.
+	for (const auto pointer : active.rules) {
+		const auto &rule = *pointer;
 		if (!rule.enabled) {
 			continue;
 		} else if (rule.from < rule.till) {
@@ -410,6 +552,22 @@ const ScheduleRule *ScheduleRuleNow(
 		}
 	}
 	return nullptr;
+}
+
+const ScheduleRule *ScheduleRuleNow(
+		const Schedule &schedule,
+		const QDateTime &now,
+		const DeviceIdentity &device) {
+	if (!schedule.enabled) {
+		return nullptr;
+	}
+	return ScheduleRuleNow(ActiveSchedule(schedule, device), now);
+}
+
+const ScheduleRule *ScheduleRuleNow(
+		const Schedule &schedule,
+		const QDateTime &now) {
+	return ScheduleRuleNow(schedule, now, DeviceIdentity());
 }
 
 } // namespace Purple

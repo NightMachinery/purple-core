@@ -338,6 +338,72 @@ struct ScheduleRule {
 	int sourceLine = 0;
 };
 
+// What a ruleset does on a device it applies to. Three states rather than a
+// boolean, because "on" has two meanings that a file with several rulesets has
+// to be able to tell apart: the ordinary one competes for the device and only
+// the most specific competitor wins, while `always' runs alongside whichever
+// one that turns out to be.
+enum class RulesetMode : uchar {
+	// Written down and switched off. Not skipped by the parser - a ruleset you
+	// are not using this month is not a mistake in the file - just never chosen.
+	Disabled,
+
+	Enabled,
+
+	// Merged in on every device it applies to, whatever else wins. For the rules
+	// that are true everywhere - "never during the night" - so they do not have
+	// to be copied into each device's ruleset and kept in step by hand.
+	Always,
+};
+
+[[nodiscard]] std::optional<RulesetMode> ParseRulesetMode(const QString &value);
+[[nodiscard]] QString RulesetModeName(RulesetMode value);
+
+// A named group of rules, and the answer to "which devices is this for". One
+// settings.toml is meant to be carried between a phone and a laptop unchanged,
+// so the file says what belongs where rather than each device keeping its own
+// copy to drift out of step.
+struct ScheduleRuleset {
+	// Required, unique among rulesets ignoring case, and the address every
+	// splice op uses - a ruleset is edited by name because its position moves
+	// whenever one above it is added or taken away, and a screen that read it
+	// would then edit the wrong one. A ruleset with no name, or with a name
+	// already taken, is skipped with a warning.
+	QString name;
+
+	// "any", a class ("mobile", "desktop"), a platform ("android", "ios",
+	// "macos", "windows", "linux") or a device id the client reports for
+	// itself. Anything else is taken as a device id: the list of platforms is
+	// closed, but the list of devices belongs to the person carrying them.
+	QString device = u"any"_q;
+
+	RulesetMode mode = RulesetMode::Enabled;
+
+	// What this ruleset wants between its windows. Unset - which is not the
+	// same as "normal" - leaves the question to [schedule] outside, so a
+	// ruleset only says it when it means to override that.
+	std::optional<QString> outside;
+
+	std::vector<ScheduleRule> rules;
+
+	// Where it sits in the raw [[schedule.rulesets]] array, counting the ones
+	// the parser threw away, so a warning can name a ruleset that has no usable
+	// name to be named by.
+	//
+	// -1 for the implicit ruleset described on Schedule::rulesets below.
+	int sourceIndex = -1;
+
+	// The line its [[schedule.rulesets]] header is on, 1-based. Zero when there
+	// is no file behind it.
+	int sourceLine = 0;
+
+	// Whether this is the flat [[schedule.rules]] array wearing a ruleset's
+	// clothes rather than something the file spelled out.
+	[[nodiscard]] bool implicit() const {
+		return sourceIndex < 0;
+	}
+};
+
 struct Schedule {
 	bool enabled = true;
 
@@ -350,7 +416,22 @@ struct Schedule {
 	// rule a rule's own 'preset' follows.
 	QString outside = u"normal"_q;
 
+	// The flat [[schedule.rules]] array. It is the shape every file had before
+	// rulesets existed and it keeps working forever; the splice ops still
+	// address it with an empty ruleset name.
 	std::vector<ScheduleRule> rules;
+
+	// Every [[schedule.rulesets]] block, in file order - and, first, an implicit
+	// one wrapping the flat rules above when there are any: name "rules", device
+	// "any", mode Enabled, no outside of its own.
+	//
+	// It is materialised rather than special-cased at every use because the
+	// resolution has to hand back pointers to the rulesets it chose, and a
+	// ruleset synthesised on the way out would be dangling by the time the
+	// caller read it. Its rules are therefore the same rules as `rules' above,
+	// written down twice; nothing mutates a parsed Schedule, so the two cannot
+	// drift.
+	std::vector<ScheduleRuleset> rulesets;
 };
 
 struct FocusSync {
@@ -459,6 +540,15 @@ struct Premium {
 	bool enabled = true;
 };
 
+// A friendly name for a device id, out of [devices]. The id is what a ruleset
+// names and what the client reports for itself - a machine-readable thing that
+// is no use on a screen - so the file gets to say what to call it. Nothing
+// depends on a device being listed here: an unlisted id shows as itself.
+struct DeviceLabel {
+	QString id;
+	QString label;
+};
+
 struct Settings {
 	// What the file says it is, as written. A file with no `version' at all is
 	// one - every file written before the key existed is - and that is read in
@@ -479,8 +569,15 @@ struct Settings {
 	Overrides overrides;
 	Suggestions suggestions;
 
+	// [devices], in file order.
+	std::vector<DeviceLabel> devices;
+
 	[[nodiscard]] const List *list(const QString &name) const;
 	[[nodiscard]] const Preset *preset(const QString &name) const;
+
+	// The label written for this device id, or null. Ignores case, the same as
+	// a ruleset matching one.
+	[[nodiscard]] const DeviceLabel *device(const QString &id) const;
 };
 
 // Everything recoverable is a warning and leaves usable settings behind; only

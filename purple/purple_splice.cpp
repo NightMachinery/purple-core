@@ -508,33 +508,177 @@ struct Position {
 	return array;
 }
 
-// One rule by its raw position. The array is walked as it is rather than
-// filtered: an element the parser threw away is still an element, and a rule
-// keeping its address while the one above it is broken is the whole point of
-// addressing rules this way.
+[[nodiscard]] const toml::array *FindRulesets(
+		const toml::table &root,
+		QString &error) {
+	const auto table = FindScheduleTable(root, error);
+	if (!table) {
+		return nullptr;
+	}
+	const auto node = table->get("rulesets");
+	if (!node) {
+		error = u"settings.toml has no [[schedule.rulesets]] blocks."_q;
+		return nullptr;
+	}
+	const auto array = node->as_array();
+	if (!array) {
+		error = u"'schedule.rulesets' is not an array (line %1)."_q
+			.arg(int(node->source().begin.line));
+		return nullptr;
+	}
+	return array;
+}
+
+// A ruleset and where it sits in the raw array. Found by name because that is
+// how a screen addresses one: a ruleset's position moves whenever another is
+// added above it, and an index a dialog read a minute ago would then edit the
+// wrong ruleset. The raw position comes back anyway, because the fingerprint
+// the edit is checked against is indexed by it.
+struct FoundRuleset {
+	const toml::table *fields = nullptr;
+	int index = -1;
+};
+
+[[nodiscard]] FoundRuleset FindRulesetNamed(
+		const toml::table &root,
+		const QString &name,
+		QString &error) {
+	const auto array = FindRulesets(root, error);
+	if (!array) {
+		return FoundRuleset();
+	}
+	const auto wanted = name.trimmed();
+	auto index = 0;
+	for (auto &&element : *array) {
+		const auto raw = index++;
+		const auto fields = element.as_table();
+		if (!fields) {
+			continue;
+		}
+		const auto node = fields->get("name");
+		if (!node) {
+			continue;
+		}
+		const auto text = node->value<std::string_view>();
+		if (!text
+			|| Text(*text).trimmed().compare(wanted, Qt::CaseInsensitive)) {
+			continue;
+		} else if (fields->is_inline()) {
+			error = u"schedule ruleset '%1' is written inline (line %2); "
+				"rewrite it as a [[schedule.rulesets]] table before editing it "
+				"from the app."_q.arg(wanted)
+					.arg(int(fields->source().begin.line));
+			return FoundRuleset();
+		}
+
+		// The first one wins, which is the one the parser kept: a name used
+		// twice makes the second ruleset a warning and nothing else.
+		return FoundRuleset{ fields, raw };
+	}
+	error = u"settings.toml has no schedule ruleset called '%1'."_q.arg(wanted);
+	return FoundRuleset();
+}
+
+[[nodiscard]] bool RulesetNameTaken(
+		const toml::table &root,
+		const QString &name) {
+	auto ignored = QString();
+	const auto array = FindRulesets(root, ignored);
+	if (!array) {
+		return false;
+	}
+	const auto wanted = name.trimmed();
+	for (auto &&element : *array) {
+		const auto fields = element.as_table();
+		if (!fields) {
+			continue;
+		}
+		const auto node = fields->get("name");
+		if (!node) {
+			continue;
+		}
+		const auto text = node->value<std::string_view>();
+		if (text && !Text(*text).trimmed().compare(wanted, Qt::CaseInsensitive)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// How a rule is named in a message, which is also how the parser names it in a
+// warning, so the two can be read side by side.
+[[nodiscard]] QString RuleWhere(const QString &ruleset, int index) {
+	const auto trimmed = ruleset.trimmed();
+	return trimmed.isEmpty()
+		? u"schedule rule %1"_q.arg(index + 1)
+		: u"schedule ruleset '%1' rule %2"_q.arg(trimmed).arg(index + 1);
+}
+
+// One rule by its raw position within whichever array holds it. The array is
+// walked as it is rather than filtered: an element the parser threw away is
+// still an element, and a rule keeping its address while the one above it is
+// broken is the whole point of addressing rules this way.
 [[nodiscard]] const toml::table *ScheduleRuleAt(
 		const toml::array &rules,
+		const QString &ruleset,
 		int index,
 		QString &error) {
+	const auto where = RuleWhere(ruleset, index);
+	const auto header = ruleset.trimmed().isEmpty()
+		? u"[[schedule.rules]]"_q
+		: u"[[schedule.rulesets.rules]]"_q;
 	if (index < 0 || index >= int(rules.size())) {
-		error = u"there is no schedule rule %1 any more."_q.arg(index + 1);
+		error = u"there is no %1 any more."_q.arg(where);
 		return nullptr;
 	}
 	const auto element = rules.get(index);
 	const auto fields = element ? element->as_table() : nullptr;
 	if (!fields) {
-		error = u"schedule rule %1 is not a table (line %2)."_q
-			.arg(index + 1)
+		error = u"%1 is not a table (line %2)."_q
+			.arg(where)
 			.arg(element ? int(element->source().begin.line) : 0);
 		return nullptr;
 	} else if (fields->is_inline()) {
-		error = u"schedule rule %1 is written inline (line %2); rewrite it as a "
-			"[[schedule.rules]] table before editing it from the app."_q
-			.arg(index + 1)
-			.arg(int(fields->source().begin.line));
+		error = u"%1 is written inline (line %2); rewrite it as a %3 table "
+			"before editing it from the app."_q
+			.arg(where)
+			.arg(int(fields->source().begin.line))
+			.arg(header);
 		return nullptr;
 	}
 	return fields;
+}
+
+// The array a rule address points into: the flat [[schedule.rules]] for an
+// empty ruleset name, otherwise the named ruleset's own rules.
+[[nodiscard]] const toml::array *FindRuleArray(
+		const toml::table &root,
+		const QString &ruleset,
+		int &rulesetIndex,
+		QString &error) {
+	if (ruleset.trimmed().isEmpty()) {
+		rulesetIndex = -1;
+		return FindScheduleRules(root, error);
+	}
+	const auto found = FindRulesetNamed(root, ruleset, error);
+	if (!found.fields) {
+		return nullptr;
+	}
+	rulesetIndex = found.index;
+	const auto node = found.fields->get("rules");
+	if (!node) {
+		error = u"schedule ruleset '%1' has no rules yet."_q
+			.arg(ruleset.trimmed());
+		return nullptr;
+	}
+	const auto array = node->as_array();
+	if (!array) {
+		error = u"'rules' in schedule ruleset '%1' is not an array (line %2)."_q
+			.arg(ruleset.trimmed())
+			.arg(int(node->source().begin.line));
+		return nullptr;
+	}
+	return array;
 }
 
 // Everything the app owns in one rule, as one string, so an edit can be checked
@@ -582,6 +726,82 @@ struct Position {
 	return result;
 }
 
+// A ruleset's own keys, the same way and for the same reason. `override' lets a
+// caller ask what the signature WOULD be with one key set to something else, or
+// to nothing at all, which is how an edit says what it meant to do without
+// having to spell the whole thing out again.
+[[nodiscard]] QString RulesetSignature(
+		const toml::table &fields,
+		const QString &override = QString(),
+		const std::optional<QString> &value = std::nullopt) {
+	const auto read = [&](const char *key) -> QString {
+		if (!override.isEmpty() && override == QLatin1String(key)) {
+			return value ? *value : u"-"_q;
+		}
+		const auto node = fields.get(std::string_view(key));
+		if (!node) {
+			return u"-"_q;
+		}
+		const auto text = node->value<std::string_view>();
+		return text ? Text(*text) : u"?"_q;
+	};
+	return QStringList{
+		read("name"),
+		read("device"),
+		read("mode"),
+		read("outside"),
+	}.join(u"|"_q);
+}
+
+// Everything under [schedule] that an edit could disturb: the flat rules, and
+// every ruleset with its own keys and its own rules. An op builds this from the
+// file, applies to it exactly the change it means to make, and refuses unless
+// the file it wrote reads back as that - so a splice that lands in the wrong
+// block is caught by the block it should not have touched, not only by the one
+// it should have.
+struct ScheduleFingerprint {
+	QStringList flat;
+	std::vector<std::pair<QString, QStringList>> rulesets;
+
+	friend bool operator==(
+		const ScheduleFingerprint &,
+		const ScheduleFingerprint &) = default;
+};
+
+[[nodiscard]] ScheduleFingerprint Fingerprint(const toml::table &root) {
+	auto result = ScheduleFingerprint();
+	const auto node = root.get("schedule");
+	const auto schedule = node ? node->as_table() : nullptr;
+	if (!schedule) {
+		return result;
+	}
+	if (const auto rules = schedule->get("rules")) {
+		if (const auto array = rules->as_array()) {
+			result.flat = RuleSignatures(*array);
+		}
+	}
+	const auto rulesets = schedule->get("rulesets");
+	const auto array = rulesets ? rulesets->as_array() : nullptr;
+	if (!array) {
+		return result;
+	}
+	for (auto &&element : *array) {
+		const auto fields = element.as_table();
+		if (!fields) {
+			result.rulesets.push_back({ u"?"_q, QStringList() });
+			continue;
+		}
+		auto rules = QStringList();
+		if (const auto inner = fields->get("rules")) {
+			if (const auto list = inner->as_array()) {
+				rules = RuleSignatures(*list);
+			}
+		}
+		result.rulesets.push_back({ RulesetSignature(*fields), rules });
+	}
+	return result;
+}
+
 // The same signature for a rule we are about to write, spelt the way we write
 // it - which is why the check below can be an equality rather than a parse.
 [[nodiscard]] QString WrittenSignature(const ScheduleRule &rule) {
@@ -615,6 +835,24 @@ struct Position {
 	return ParseTimeOfDay(text("from")).value_or(-1) == expected.from
 		&& ParseTimeOfDay(text("to")).value_or(-1) == expected.till
 		&& text("preset") == expected.preset;
+}
+
+// The signature of a ruleset header the app is about to write, spelt the way it
+// writes it. Unset keys are the ones it leaves out of the file.
+[[nodiscard]] QString WrittenRulesetSignature(
+		const QString &name,
+		const std::optional<QString> &device,
+		const std::optional<QString> &mode,
+		const std::optional<QString> &outside) {
+	const auto part = [](const std::optional<QString> &value) {
+		return value ? BasicStringText(*value) : u"-"_q;
+	};
+	return QStringList{
+		BasicStringText(name),
+		part(device),
+		part(mode),
+		part(outside),
+	}.join(u"|"_q);
 }
 
 // Where the value starting at `from' ends: the line it ends on, and the index
@@ -695,6 +933,20 @@ struct ValueEnd {
 	return true;
 }
 
+// Takes out the whole line a key sits on, comment and all. A key and its value
+// have a line to themselves in a table that is not inline, and a comment beside
+// one is about the key that is going - so the line goes with it.
+[[nodiscard]] bool RemoveValueLines(QStringList &lines, Position at) {
+	const auto end = FindValueEnd(lines, at);
+	if (!end || at.line < 1 || end->line > lines.size()) {
+		return false;
+	}
+	auto rebuilt = lines.mid(0, at.line - 1);
+	rebuilt += lines.mid(end->line);
+	lines = std::move(rebuilt);
+	return true;
+}
+
 // The last line a block occupies: the line its own last value ends on. Asking
 // the values rather than scanning for the next header, because a `days' array
 // written one weekday per line has lines of its own that a scanner would have
@@ -714,6 +966,68 @@ struct ValueEnd {
 	return last;
 }
 
+// The same, counting only the keys the block writes on its own lines. An
+// array-of-tables key - `rules' inside a ruleset, `rules' and `rulesets' under
+// [schedule] - is not one of them: its blocks are tables of their own further
+// down the file, and counting them would file a key added to the ruleset inside
+// the ruleset's first rule.
+[[nodiscard]] int ScalarBlockLastLine(
+		const toml::table &fields,
+		const QStringList &lines) {
+	auto last = int(fields.source().begin.line);
+	for (auto &&[key, value] : fields) {
+		const auto array = value.as_array();
+		if (array && array->is_array_of_tables()) {
+			continue;
+		}
+		const auto at = Position{
+			int(value.source().begin.line),
+			int(value.source().begin.column),
+		};
+		const auto end = FindValueEnd(lines, at);
+		last = std::max(last, end ? end->line : at.line);
+	}
+	return last;
+}
+
+// The last line anything under [schedule] occupies: the section's own keys,
+// every flat rule block, every ruleset and every rule inside one. Where a new
+// ruleset goes, so the file keeps its schedule in one piece instead of growing
+// a second one at the bottom.
+[[nodiscard]] int ScheduleLastLine(
+		const toml::table &schedule,
+		const QStringList &lines) {
+	auto last = ScalarBlockLastLine(schedule, lines);
+	const auto blocks = [&](const toml::table &table, const char *key) {
+		const auto node = table.get(std::string_view(key));
+		const auto array = node ? node->as_array() : nullptr;
+		return array ? array : nullptr;
+	};
+	const auto consider = [&](const toml::node &element) {
+		const auto fields = element.as_table();
+		if (fields && !fields->is_inline()) {
+			last = std::max(last, ScalarBlockLastLine(*fields, lines));
+		}
+	};
+	if (const auto rules = blocks(schedule, "rules")) {
+		for (auto &&element : *rules) {
+			consider(element);
+		}
+	}
+	if (const auto rulesets = blocks(schedule, "rulesets")) {
+		for (auto &&element : *rulesets) {
+			consider(element);
+			const auto fields = element.as_table();
+			if (const auto inner = fields ? blocks(*fields, "rules") : nullptr) {
+				for (auto &&rule : *inner) {
+					consider(rule);
+				}
+			}
+		}
+	}
+	return last;
+}
+
 // Where a line added to a block goes, and where a block being taken out stops:
 // the next table header, backed over the blank lines and the comment block
 // above it, which belong to whatever follows rather than to what is here.
@@ -729,6 +1043,46 @@ struct ValueEnd {
 		--i;
 	}
 	return i;
+}
+
+// The blank line above a block that has gone stays, and so does the one below
+// it that belongs to whatever follows - which would leave two of them where
+// there was one. Closes that seam.
+void CloseSeam(QStringList &lines, int seam) {
+	if (seam >= 1
+		&& seam < lines.size()
+		&& lines[seam - 1].trimmed().isEmpty()
+		&& lines[seam].trimmed().isEmpty()) {
+		lines.removeAt(seam);
+	}
+}
+
+// Puts a block into the file at `at' - a line index to insert before, or the
+// line count for the end of it - with the blank lines around it that make it
+// read as a block rather than as more of whatever is above. `block' arrives
+// with its own leading blank line, which is dropped when there is nothing above
+// to be separated from.
+void InsertBlock(QStringList &lines, int at, QStringList block) {
+	if (at >= lines.size()) {
+		// At the end of the file, where there may be no trailing newline.
+		if (!lines.isEmpty() && lines.back().trimmed().isEmpty()) {
+			lines.removeLast();
+		}
+		if (lines.isEmpty()) {
+			lines += block.mid(1);
+		} else {
+			lines += block;
+		}
+		lines.push_back(QString());
+		return;
+	}
+	if (!lines[at].trimmed().isEmpty()) {
+		// A blank line below too, unless the file already has one there.
+		block.push_back(QString());
+	}
+	for (auto i = block.size(); i != 0;) {
+		lines.insert(at, block[--i]);
+	}
 }
 
 [[nodiscard]] QString DaysValue(const std::vector<int> &days) {
@@ -782,7 +1136,7 @@ struct ValueEnd {
 [[nodiscard]] QString VerifySchedule(
 		const QString &text,
 		const QString &path,
-		const QStringList &expected) {
+		const ScheduleFingerprint &expected) {
 	const auto utf8 = text.toUtf8();
 	auto parsed = toml::parse(
 		std::string_view(utf8.constData(), utf8.size()),
@@ -794,10 +1148,7 @@ struct ValueEnd {
 			.arg(error.source().begin.column)
 			.arg(Text(error.description()));
 	}
-	auto ignored = QString();
-	const auto rules = FindScheduleRules(parsed.table(), ignored);
-	const auto after = rules ? RuleSignatures(*rules) : QStringList();
-	if (after != expected) {
+	if (!(Fingerprint(parsed.table()) == expected)) {
 		return u"the edit left the schedule holding the wrong rules"_q;
 	}
 	return QString();
@@ -1495,6 +1846,7 @@ SpliceResult SetTableBool(
 SpliceResult SetScheduleRule(
 		const QString &text,
 		const QString &path,
+		const QString &ruleset,
 		int index,
 		const ScheduleRuleExpected &expected,
 		const ScheduleRule &rule) {
@@ -1513,20 +1865,28 @@ SpliceResult SetScheduleRule(
 			.arg(Text(error.description())));
 	}
 	auto error = QString();
-	const auto rules = FindScheduleRules(parsed.table(), error);
+	auto rulesetIndex = -1;
+	const auto rules = FindRuleArray(
+		parsed.table(),
+		ruleset,
+		rulesetIndex,
+		error);
 	if (!rules) {
 		return Refuse(text, error);
 	}
-	const auto fields = ScheduleRuleAt(*rules, index, error);
+	const auto fields = ScheduleRuleAt(*rules, ruleset, index, error);
 	if (!fields) {
 		return Refuse(text, error);
 	} else if (!RuleMatches(*fields, expected)) {
-		return Refuse(text, u"schedule rule %1 is not the rule you were "
-			"editing any more; the file changed underneath."_q.arg(index + 1));
+		return Refuse(text, u"%1 is not the rule you were editing any more; "
+			"the file changed underneath."_q.arg(RuleWhere(ruleset, index)));
 	}
-	const auto before = RuleSignatures(*rules);
+	const auto before = Fingerprint(parsed.table());
 	auto after = before;
-	after[index] = WrittenSignature(rule);
+	auto &signatures = (rulesetIndex < 0)
+		? after.flat
+		: after.rulesets[rulesetIndex].second;
+	signatures[index] = WrittenSignature(rule);
 	if (after == before) {
 		return Unchanged(text);
 	}
@@ -1539,8 +1899,8 @@ SpliceResult SetScheduleRule(
 	const auto ending = crlf ? u"\r"_q : QString();
 	const auto header = int(fields->source().begin.line);
 	if (header < 1 || header > lines.size()) {
-		return Refuse(text, u"could not locate schedule rule %1."_q
-			.arg(index + 1));
+		return Refuse(text, u"could not locate %1."_q
+			.arg(RuleWhere(ruleset, index)));
 	}
 
 	// A key the block already has is rewritten where it stands; one it never
@@ -1592,8 +1952,9 @@ SpliceResult SetScheduleRule(
 	});
 	for (const auto &[at, value] : rewrites) {
 		if (!ReplaceValue(lines, at, value)) {
-			return Refuse(text, u"could not rewrite schedule rule %1 (line "
-				"%2)."_q.arg(index + 1).arg(at.line));
+			return Refuse(text, u"could not rewrite %1 (line %2)."_q
+				.arg(RuleWhere(ruleset, index))
+				.arg(at.line));
 		}
 	}
 
@@ -1610,6 +1971,7 @@ SpliceResult SetScheduleRule(
 SpliceResult AppendScheduleRule(
 		const QString &text,
 		const QString &path,
+		const QString &ruleset,
 		const ScheduleRule &rule) {
 	if (const auto problem = RuleProblem(rule); !problem.isEmpty()) {
 		return Refuse(text, problem);
@@ -1633,11 +1995,42 @@ SpliceResult AppendScheduleRule(
 	});
 	const auto ending = crlf ? u"\r"_q : QString();
 
-	auto before = QStringList();
+	auto after = Fingerprint(parsed.table());
 	auto at = lines.size();
 	auto section = false;
-	if (parsed.table().get("schedule")) {
-		auto error = QString();
+	auto header = u"[[schedule.rules]]"_q;
+	auto error = QString();
+	if (!ruleset.trimmed().isEmpty()) {
+		const auto found = FindRulesetNamed(parsed.table(), ruleset, error);
+		if (!found.fields) {
+			return Refuse(text, error);
+		}
+		header = u"[[schedule.rulesets.rules]]"_q;
+		const auto node = found.fields->get("rules");
+		const auto rules = node ? node->as_array() : nullptr;
+		if (node && !rules) {
+			return Refuse(text, u"'rules' in schedule ruleset '%1' is not an "
+				"array (line %2)."_q.arg(ruleset.trimmed())
+					.arg(int(node->source().begin.line)));
+		} else if (rules && !rules->empty()) {
+			// After the ruleset's last rule, which is before whatever header
+			// comes next - the next ruleset, or another section entirely.
+			const auto last = ScheduleRuleAt(
+				*rules,
+				ruleset,
+				int(rules->size()) - 1,
+				error);
+			if (!last) {
+				return Refuse(text, error);
+			}
+			at = AfterBlock(lines, BlockLastLine(*last, lines));
+		} else {
+			// A ruleset with no rules yet: the first one goes under the
+			// ruleset's own keys, which is where somebody reading it looks.
+			at = AfterBlock(lines, ScalarBlockLastLine(*found.fields, lines));
+		}
+		after.rulesets[found.index].second.push_back(WrittenSignature(rule));
+	} else if (parsed.table().get("schedule")) {
 		const auto table = FindScheduleTable(parsed.table(), error);
 		if (!table) {
 			return Refuse(text, error);
@@ -1648,10 +2041,10 @@ SpliceResult AppendScheduleRule(
 			return Refuse(text, u"'schedule.rules' is not an array (line %1)."_q
 				.arg(int(node->source().begin.line)));
 		}
-		before = rules ? RuleSignatures(*rules) : QStringList();
 		if (rules && !rules->empty()) {
 			const auto last = ScheduleRuleAt(
 				*rules,
+				ruleset,
 				int(rules->size()) - 1,
 				error);
 			if (!last) {
@@ -1666,13 +2059,15 @@ SpliceResult AppendScheduleRule(
 			const auto line = int(table->source().begin.line);
 			if (line >= 1 && line <= lines.size()
 				&& DeclaresTable(lines[line - 1], u"schedule"_q)) {
-				at = AfterBlock(lines, BlockLastLine(*table, lines));
+				at = AfterBlock(lines, ScalarBlockLastLine(*table, lines));
 			}
 		}
+		after.flat.push_back(WrittenSignature(rule));
 	} else {
 		// No schedule at all. The section header goes in with the rule, so the
 		// file gains one readable block rather than a rules array under nothing.
 		section = true;
+		after.flat.push_back(WrittenSignature(rule));
 	}
 
 	auto block = QStringList();
@@ -1680,33 +2075,11 @@ SpliceResult AppendScheduleRule(
 	if (section) {
 		block.push_back(u"[schedule]"_q + ending);
 	}
-	block.push_back(u"[[schedule.rules]]"_q + ending);
+	block.push_back(header + ending);
 	for (const auto &[key, value] : RuleValues(rule)) {
 		block.push_back(key.leftJustified(9) + u" = "_q + value + ending);
 	}
-	if (at >= lines.size()) {
-		// At the end of the file, where there may be no trailing newline.
-		if (!lines.isEmpty() && lines.back().trimmed().isEmpty()) {
-			lines.removeLast();
-		}
-		if (lines.isEmpty()) {
-			// Nothing above to be separated from.
-			block.removeFirst();
-		}
-		lines += block;
-		lines.push_back(QString());
-	} else {
-		if (!lines[at].trimmed().isEmpty()) {
-			// A blank line below too, unless the file already has one there.
-			block.push_back(QString());
-		}
-		for (auto i = block.size(); i != 0;) {
-			lines.insert(at, block[--i]);
-		}
-	}
-
-	auto after = before;
-	after.push_back(WrittenSignature(rule));
+	InsertBlock(lines, at, block);
 
 	auto result = SpliceResult();
 	result.text = lines.join('\n');
@@ -1721,6 +2094,7 @@ SpliceResult AppendScheduleRule(
 SpliceResult RemoveScheduleRule(
 		const QString &text,
 		const QString &path,
+		const QString &ruleset,
 		int index,
 		const ScheduleRuleExpected &expected) {
 	const auto utf8 = text.toUtf8();
@@ -1735,42 +2109,307 @@ SpliceResult RemoveScheduleRule(
 			.arg(Text(error.description())));
 	}
 	auto error = QString();
-	const auto rules = FindScheduleRules(parsed.table(), error);
+	auto rulesetIndex = -1;
+	const auto rules = FindRuleArray(
+		parsed.table(),
+		ruleset,
+		rulesetIndex,
+		error);
 	if (!rules) {
 		return Refuse(text, error);
 	}
-	const auto fields = ScheduleRuleAt(*rules, index, error);
+	const auto fields = ScheduleRuleAt(*rules, ruleset, index, error);
 	if (!fields) {
 		return Refuse(text, error);
 	} else if (!RuleMatches(*fields, expected)) {
-		return Refuse(text, u"schedule rule %1 is not the rule you were "
-			"editing any more; the file changed underneath."_q.arg(index + 1));
+		return Refuse(text, u"%1 is not the rule you were editing any more; "
+			"the file changed underneath."_q.arg(RuleWhere(ruleset, index)));
 	}
-	auto after = RuleSignatures(*rules);
-	after.removeAt(index);
+	auto after = Fingerprint(parsed.table());
+	auto &signatures = (rulesetIndex < 0)
+		? after.flat
+		: after.rulesets[rulesetIndex].second;
+	signatures.removeAt(index);
 
 	auto lines = text.split('\n');
 	const auto header = int(fields->source().begin.line);
 	if (header < 1 || header > lines.size()) {
-		return Refuse(text, u"could not locate schedule rule %1."_q
-			.arg(index + 1));
+		return Refuse(text, u"could not locate %1."_q
+			.arg(RuleWhere(ruleset, index)));
 	}
 	const auto stop = AfterBlock(lines, BlockLastLine(*fields, lines));
 	if (stop < header) {
-		return Refuse(text, u"could not tell where schedule rule %1 ends."_q
-			.arg(index + 1));
+		return Refuse(text, u"could not tell where %1 ends."_q
+			.arg(RuleWhere(ruleset, index)));
 	}
 	lines.erase(lines.begin() + (header - 1), lines.begin() + stop);
+	CloseSeam(lines, header - 1);
 
-	// The blank line above the block that is going stays, and so does the one
-	// below it that belongs to whatever follows - which would leave two of them
-	// where there was one. Close the seam.
-	const auto seam = header - 1;
-	if (seam >= 1
-		&& seam < lines.size()
-		&& lines[seam - 1].trimmed().isEmpty()
-		&& lines[seam].trimmed().isEmpty()) {
-		lines.removeAt(seam);
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifySchedule(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	}
+	result.changed = true;
+	return result;
+}
+
+SpliceResult AddRuleset(
+		const QString &text,
+		const QString &path,
+		const QString &name,
+		const QString &device,
+		RulesetMode mode) {
+	const auto trimmed = BasicStringText(name);
+	if (trimmed.isEmpty()) {
+		return Refuse(text, u"a schedule ruleset needs a name."_q);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	} else if (RulesetNameTaken(parsed.table(), trimmed)) {
+		// The name is the address every later edit goes through, so two
+		// rulesets sharing one is not something to warn about afterwards.
+		return Refuse(text, u"there is already a schedule ruleset called "
+			"'%1'."_q.arg(trimmed));
+	}
+
+	auto lines = text.split('\n');
+	const auto crlf = std::any_of(lines.begin(), lines.end(), [](
+			const QString &line) {
+		return line.endsWith('\r');
+	});
+	const auto ending = crlf ? u"\r"_q : QString();
+
+	auto at = lines.size();
+	auto section = false;
+	auto error = QString();
+	if (parsed.table().get("schedule")) {
+		const auto table = FindScheduleTable(parsed.table(), error);
+		if (!table) {
+			return Refuse(text, error);
+		}
+
+		// After everything the schedule already holds, rules and rulesets
+		// alike, so the file keeps its schedule in one piece.
+		at = AfterBlock(lines, ScheduleLastLine(*table, lines));
+	} else {
+		section = true;
+	}
+
+	// Only what differs from the default is written down. A file where every
+	// ruleset spells out `mode = "enabled"' says no more than one that does not
+	// and is a good deal harder to read.
+	const auto wantsDevice = !BasicStringText(device).isEmpty()
+		&& BasicStringText(device).compare(u"any"_q, Qt::CaseInsensitive);
+	const auto wantsMode = (mode != RulesetMode::Enabled);
+	auto values = std::vector<std::pair<QString, QString>>();
+	values.push_back({ u"name"_q, QuotedValue(trimmed) });
+	if (wantsDevice) {
+		values.push_back({ u"device"_q, QuotedValue(device) });
+	}
+	if (wantsMode) {
+		values.push_back({ u"mode"_q, QuotedValue(RulesetModeName(mode)) });
+	}
+
+	auto after = Fingerprint(parsed.table());
+	after.rulesets.push_back({
+		WrittenRulesetSignature(
+			trimmed,
+			wantsDevice
+				? std::make_optional(BasicStringText(device))
+				: std::nullopt,
+			wantsMode
+				? std::make_optional(RulesetModeName(mode))
+				: std::nullopt,
+			std::nullopt),
+		QStringList(),
+	});
+
+	auto block = QStringList();
+	block.push_back(ending);
+	if (section) {
+		block.push_back(u"[schedule]"_q + ending);
+	}
+	block.push_back(u"[[schedule.rulesets]]"_q + ending);
+	for (const auto &[key, value] : values) {
+		block.push_back(key.leftJustified(7) + u" = "_q + value + ending);
+	}
+	InsertBlock(lines, at, block);
+
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifySchedule(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	}
+	result.changed = true;
+	return result;
+}
+
+SpliceResult RemoveRuleset(
+		const QString &text,
+		const QString &path,
+		const QString &name) {
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+	auto error = QString();
+	const auto found = FindRulesetNamed(parsed.table(), name, error);
+	if (!found.fields) {
+		return Refuse(text, error);
+	}
+	auto after = Fingerprint(parsed.table());
+	after.rulesets.erase(after.rulesets.begin() + found.index);
+
+	auto lines = text.split('\n');
+	const auto header = int(found.fields->source().begin.line);
+	if (header < 1 || header > lines.size()) {
+		return Refuse(text, u"could not locate schedule ruleset '%1'."_q
+			.arg(name.trimmed()));
+	}
+
+	// The ruleset ends where its LAST rule ends, not where its own keys do:
+	// every [[schedule.rulesets.rules]] block under it belongs to it and goes
+	// with it.
+	auto lastLine = ScalarBlockLastLine(*found.fields, lines);
+	if (const auto node = found.fields->get("rules")) {
+		if (const auto rules = node->as_array()) {
+			for (auto &&element : *rules) {
+				const auto block = element.as_table();
+				if (block && !block->is_inline()) {
+					lastLine = std::max(
+						lastLine,
+						ScalarBlockLastLine(*block, lines));
+				}
+			}
+		}
+	}
+	const auto stop = AfterBlock(lines, lastLine);
+	if (stop < header) {
+		return Refuse(text, u"could not tell where schedule ruleset '%1' "
+			"ends."_q.arg(name.trimmed()));
+	}
+	lines.erase(lines.begin() + (header - 1), lines.begin() + stop);
+	CloseSeam(lines, header - 1);
+
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifySchedule(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	}
+	result.changed = true;
+	return result;
+}
+
+SpliceResult SetRulesetString(
+		const QString &text,
+		const QString &path,
+		const QString &name,
+		const QString &key,
+		const QString &value) {
+	const auto trimmedKey = key.trimmed();
+	if (trimmedKey.isEmpty()) {
+		return Refuse(text, u"a schedule ruleset key needs a name."_q);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+	auto error = QString();
+	const auto found = FindRulesetNamed(parsed.table(), name, error);
+	if (!found.fields) {
+		return Refuse(text, error);
+	}
+	const auto wanted = BasicStringText(value);
+	const auto clearing = wanted.isEmpty();
+	if (trimmedKey == u"name"_q) {
+		// A rename is allowed, but not into nothing and not onto a name that is
+		// already an address: both would leave a ruleset nothing can edit.
+		if (clearing) {
+			return Refuse(text, u"a schedule ruleset needs a name."_q);
+		} else if (wanted.compare(name.trimmed(), Qt::CaseInsensitive)
+			&& RulesetNameTaken(parsed.table(), wanted)) {
+			return Refuse(text, u"there is already a schedule ruleset called "
+				"'%1'."_q.arg(wanted));
+		}
+	}
+	const auto before = Fingerprint(parsed.table());
+	auto after = before;
+	after.rulesets[found.index].first = RulesetSignature(
+		*found.fields,
+		trimmedKey,
+		clearing ? std::nullopt : std::make_optional(wanted));
+	if (after == before) {
+		return Unchanged(text);
+	}
+
+	auto lines = text.split('\n');
+	const auto keyUtf8 = trimmedKey.toUtf8();
+	const auto node = found.fields->get(
+		std::string_view(keyUtf8.constData(), keyUtf8.size()));
+	if (node && node->as_array() && node->as_array()->is_array_of_tables()) {
+		// 'rules' is the one key here that is blocks rather than a value. The
+		// verify would catch the attempt anyway, but not with a sentence saying
+		// which op the caller wanted.
+		return Refuse(text, u"'%1' in schedule ruleset '%2' is a set of blocks, "
+			"not a value; use the rule ops to change it."_q
+				.arg(trimmedKey, name.trimmed()));
+	} else if (node) {
+		const auto at = Position{
+			int(node->source().begin.line),
+			int(node->source().begin.column),
+		};
+		const auto done = clearing
+			? RemoveValueLines(lines, at)
+			: ReplaceValue(lines, at, QuotedValue(value));
+		if (!done) {
+			return Refuse(text, u"could not rewrite '%1' in schedule ruleset "
+				"'%2' (line %3)."_q.arg(trimmedKey, name.trimmed())
+					.arg(at.line));
+		}
+	} else if (!clearing) {
+		// A key the ruleset never had joins the end of its own block, above the
+		// first of its rules rather than inside it.
+		const auto lastLine = ScalarBlockLastLine(*found.fields, lines);
+		const auto at = AfterBlock(lines, lastLine);
+		const auto header = int(found.fields->source().begin.line);
+		auto indent = QString();
+		if (lastLine > header && lastLine <= lines.size()) {
+			indent = Indentation(lines[lastLine - 1]);
+		}
+		const auto crlf = std::any_of(lines.begin(), lines.end(), [](
+				const QString &line) {
+			return line.endsWith('\r');
+		});
+		lines.insert(
+			at,
+			indent + trimmedKey + u" = "_q + QuotedValue(value)
+				+ (crlf ? u"\r"_q : QString()));
 	}
 
 	auto result = SpliceResult();
