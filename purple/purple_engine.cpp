@@ -605,4 +605,232 @@ const ScheduleRule *ScheduleRuleNow(
 	return ScheduleRuleNow(schedule, now, DeviceIdentity());
 }
 
+std::optional<ScheduleTick> ScheduleStep(
+		const Settings &settings,
+		const State &state,
+		const QDateTime &now,
+		const DeviceIdentity &device) {
+	auto result = ScheduleTick();
+	result.state = state;
+	auto &fresh = result.state;
+
+	// A pause with a deadline lifts itself, both fields at once, and the
+	// ordinary boundary rule then runs below in this same step. That is what
+	// catches up, once and immediately, on the windows that opened and closed
+	// while it was held off - waiting for the next window edge instead would
+	// leave the preset wherever the pause found it, which for a pause lifting
+	// on a Sunday evening could be a whole day.
+	if (fresh.schedulePaused) {
+		if (!ScheduleUnpauseDue(fresh, now.toSecsSinceEpoch())) {
+			return std::nullopt;
+		}
+		fresh.schedulePaused = false;
+		fresh.schedulePausedUntil = 0;
+		result.unpaused = true;
+	}
+	const auto target = ScheduleTarget(settings.schedule, now, device);
+	const auto boundary = target && (*target != fresh.scheduleTarget);
+	if (!boundary && !result.unpaused) {
+		// Acting on the change rather than on the value is the whole design. It
+		// is what lets a preset chosen by hand stand until the next boundary
+		// instead of being overwritten on the next tick, and what makes a
+		// boundary missed while the app was closed still happen, once, at the
+		// next launch.
+		return std::nullopt;
+	}
+	result.target = boundary ? *target : fresh.scheduleTarget;
+	result.kept = fresh.activePreset;
+	result.keptSource = fresh.activeSource;
+
+	// Two rules, and the asymmetry between them is deliberate. A window
+	// starting is a positive instruction - "at nine, work mode" - and it
+	// overrides a preset chosen by hand. A window ending only means the reason
+	// for that preset has passed, which is no reason at all to undo something
+	// asked for. Focus is left alone in both directions: it is the more
+	// immediate signal, and a schedule fighting it would make both unreadable.
+	//
+	// All three of those live in ScheduleApplies rather than here, including
+	// the focus one: one of the two ticks this replaces also tested
+	// `activeSource != Focus' itself before asking, which read as a fourth rule
+	// and was in fact the same one written twice - ScheduleApplies answers
+	// false for Focus outright. Dropping the clause changes no answer and
+	// leaves one place to read the rule.
+	result.applied = boundary
+		&& ScheduleApplies(
+			settings.schedule,
+			device,
+			result.target,
+			result.keptSource);
+	if (boundary) {
+		fresh.scheduleTarget = result.target;
+	}
+	if (result.applied) {
+		fresh.activePreset = result.target;
+		fresh.activeSource = PresetSource::Schedule;
+	}
+	return result;
+}
+
+QString FocusChangeName(FocusChange value) {
+	switch (value) {
+	case FocusChange::None: return u"none"_q;
+	case FocusChange::Entered: return u"entered"_q;
+	case FocusChange::Kept: return u"kept"_q;
+	case FocusChange::Restored: return u"restored"_q;
+	case FocusChange::Exited: return u"exited"_q;
+	case FocusChange::Schedule: return u"schedule"_q;
+	}
+	return u"none"_q;
+}
+
+// Entering a focus session: remember what was running and why, so leaving can
+// put both back, and let the preset [focus_sync] names take over.
+//
+// Internal, like ScheduleRuleSpan above: the two halves are only ever reached
+// through FocusStep(), which is what decides that there IS an edge - and half
+// the policy applied on a tick with no edge would be a preset moving for no
+// reason anybody could name.
+static void FocusEnter(State &state, const Settings &settings) {
+	const auto from = state.activePreset;
+
+	// Focus cannot be what we remember returning to, or a hand-edited state
+	// file could leave the two pointing at each other.
+	const auto fromSource = (state.activeSource == PresetSource::Focus)
+		? PresetSource::Manual
+		: state.activeSource;
+	state.focusSeen = true;
+	state.previousPreset = from;
+	state.previousSource = fromSource;
+	state.activePreset = settings.focusSync.enterPreset;
+	state.activeSource = PresetSource::Focus;
+}
+
+// Leaving one. Answers which of the four things it did, for the caller's line.
+//
+// `enterTarget' is what the schedule wanted at the moment focus took over, or
+// null when nothing remembers - see the missed-window case below.
+[[nodiscard]] static FocusChange FocusLeave(
+		State &state,
+		const Settings &settings,
+		const DeviceIdentity &device,
+		const std::optional<QString> &enterTarget,
+		const QDateTime &now) {
+	if (state.activeSource != PresetSource::Focus) {
+		// The preset in force is not the one focus imposed: it was chosen while
+		// focus was on, and that choice outlives the focus session.
+		state.focusSeen = false;
+		return FocusChange::Kept;
+	}
+	const auto &sync = settings.focusSync;
+	const auto restore = IsPreviousPresetName(sync.exitPreset);
+	const auto previous = state.previousPreset;
+	const auto previousSource = state.previousSource;
+	state.focusSeen = false;
+	state.previousPreset = QString();
+	state.previousSource = PresetSource::Manual;
+	if (restore) {
+		// A schedule window that opened - or closed - while focus held the
+		// preset was recorded by the tick and never applied, because focus is
+		// the more immediate signal. Putting the pre-focus preset back now would
+		// leave the tick nothing to do, since the target it compares against has
+		// already moved, and the window would be missed until the next boundary.
+		// So the boundary rule runs here instead, on the same asymmetry the tick
+		// uses: a window that has opened overrides what was there, and one that
+		// has closed only undoes a preset the schedule itself set - which is why
+		// it is the pre-focus source, not the focus one, that decides.
+		//
+		// Only when something remembers what the schedule wanted when focus took
+		// over. That is not a key state.toml has, so a caller keeps it beside
+		// the file and it is simply absent after a restart, in which case this
+		// restores exactly as it would have without the rule.
+		const auto target = state.schedulePaused
+			? std::optional<QString>()
+			: ScheduleTarget(settings.schedule, now, device);
+		const auto moved = enterTarget
+			&& target
+			&& (*target != *enterTarget);
+
+		// The same boundary rule the tick runs, asked of ScheduleApplies rather
+		// than spelled out again here: with rulesets and an `outside' key, "a
+		// window ending" is no longer "the target is Normal", and two copies of
+		// that sentence would have drifted the moment one of them was fixed.
+		if (moved
+			&& ScheduleApplies(
+				settings.schedule,
+				device,
+				*target,
+				previousSource)) {
+			state.activePreset = *target;
+			state.activeSource = PresetSource::Schedule;
+			state.scheduleTarget = *target;
+			return FocusChange::Schedule;
+		}
+	}
+	const auto wanted = restore ? previous : sync.exitPreset;
+
+	// Restoring puts back the reason as well as the preset, so a window the
+	// schedule had opened still closes at its own boundary afterwards. A preset
+	// named outright was not put there by either, so it is the user's until
+	// something moves it.
+	state.activePreset = wanted.isEmpty() ? NormalPreset() : wanted;
+	state.activeSource = restore ? previousSource : PresetSource::Manual;
+	return restore ? FocusChange::Restored : FocusChange::Exited;
+}
+
+std::optional<FocusTick> FocusStep(
+		const Settings &settings,
+		const State &state,
+		bool focusActive,
+		const std::optional<QString> &enterTarget,
+		const QDateTime &now,
+		const DeviceIdentity &device) {
+	auto result = FocusTick();
+	result.state = state;
+	auto &fresh = result.state;
+	fresh.focusActive = focusActive;
+
+	const auto &sync = settings.focusSync;
+	if (!sync.enabled) {
+		// Switching focus sync off while it is holding a preset has to hand
+		// that preset back. Leaving it in force would be a preset nothing on
+		// screen explains and nothing left running would ever lift.
+		if (fresh.activeSource == PresetSource::Focus) {
+			result.change = FocusLeave(
+				fresh,
+				settings,
+				device,
+				enterTarget,
+				now);
+		} else if (fresh.focusSeen) {
+			fresh.focusSeen = false;
+		}
+	} else if (fresh.focusActive == fresh.focusSeen) {
+		// No edge, so nothing happens - which is exactly what makes a preset
+		// chosen by hand mid-session stand until focus itself changes. The flag
+		// above may still have moved on its own, and on a client where this
+		// call is what writes it, that write is the point of the call.
+	} else if (fresh.focusActive) {
+		FocusEnter(fresh, settings);
+		result.change = FocusChange::Entered;
+
+		// Handed back for the caller to keep until the session ends. Empty
+		// means the schedule wanted nothing, which is a different answer from
+		// wanting Normal and stays distinguishable from it.
+		result.enterTarget = ScheduleTarget(settings.schedule, now, device)
+			.value_or(QString());
+	} else {
+		result.change = FocusLeave(fresh, settings, device, enterTarget, now);
+	}
+
+	// Nothing to write, which is every pass but the ones at an edge. Comparing
+	// the serialisations rather than the fields is deliberate: "would this
+	// change the file" is the question the caller is actually asking, and a
+	// hand-written list of the fields the policy touches would have to be
+	// revisited every time the policy grew one - silently, since a forgotten
+	// field there fails as a write that never happens.
+	return (SerializeState(fresh) == SerializeState(state))
+		? std::nullopt
+		: std::optional<FocusTick>(std::move(result));
+}
+
 } // namespace Purple

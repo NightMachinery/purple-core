@@ -5087,6 +5087,506 @@ preset = "work"
 	CHECK(manual.activeSource == Purple::PresetSource::Manual);
 }
 
+// The schedule tick both clients used to carry in C++, now one function. The
+// hand-written tick above still stands beside it on purpose: it is the shape
+// the policy had, and these checks are what say the shape did not change.
+void TestScheduleStep() {
+	Begin("schedule step");
+
+	// 2026-08-17 is a Monday, so dayOfWeek() runs 1..7 across that week.
+	const auto at = [](int weekday, int hour, int minute) {
+		return QDateTime(
+			QDate(2026, 8, 16 + weekday),
+			QTime(hour, minute));
+	};
+	const auto seconds = [](const QDateTime &when) {
+		return int64(when.toSecsSinceEpoch());
+	};
+	const auto parsed = Parse(uR"(
+[presets.work]
+list_order = []
+
+[presets.home]
+list_order = []
+
+[schedule]
+outside = "home"
+
+[[schedule.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)"_q);
+	CHECK(parsed.ok());
+	const auto &settings = parsed.settings;
+	const auto device = Purple::DeviceIdentity();
+	const auto step = [&](
+			const Purple::State &state,
+			const QDateTime &now) {
+		return Purple::ScheduleStep(settings, state, now, device);
+	};
+	const auto running = [&](
+			const QString &preset,
+			Purple::PresetSource source,
+			const QString &target) {
+		auto result = Purple::State();
+		result.activePreset = preset;
+		result.activeSource = source;
+		result.scheduleTarget = target;
+		return result;
+	};
+	using Source = Purple::PresetSource;
+
+	// A pause with a deadline that has passed lifts itself AND catches up on
+	// the boundary it slept through, in one step. Two steps would leave the
+	// preset wherever the pause found it until something ticked again.
+	auto expired = running(u"home"_q, Source::Schedule, u"home"_q);
+	expired.schedulePaused = true;
+	expired.schedulePausedUntil = seconds(at(1, 10, 0));
+	const auto lifted = step(expired, at(1, 10, 0));
+	CHECK(lifted.has_value());
+	CHECK(lifted->unpaused);
+	CHECK(lifted->applied);
+	CHECK_EQ(lifted->target, u"work"_q);
+	CHECK(!lifted->state.schedulePaused);
+	CHECK_EQ(lifted->state.schedulePausedUntil, int64(0));
+	CHECK_EQ(lifted->state.activePreset, u"work"_q);
+	CHECK(lifted->state.activeSource == Source::Schedule);
+	CHECK_EQ(lifted->state.scheduleTarget, u"work"_q);
+
+	// A pause with no deadline is "until I say otherwise" and no clock reaches
+	// it; a pause that has not run out yet holds the same way. Neither writes.
+	auto open = running(u"home"_q, Source::Schedule, u"home"_q);
+	open.schedulePaused = true;
+	CHECK(!step(open, at(1, 10, 0)).has_value());
+	CHECK(!step(open, at(7, 23, 59)).has_value());
+
+	auto early = expired;
+	CHECK(!step(early, at(1, 9, 59)).has_value());
+
+	// An unpause with no boundary to catch up on is still a step: two fields
+	// were cleared and somebody has to write them. `unpaused' is what a caller
+	// whose own ticking is conditioned on the pause reloads on.
+	auto quiet = running(u"work"_q, Source::Schedule, u"work"_q);
+	quiet.schedulePaused = true;
+	quiet.schedulePausedUntil = seconds(at(1, 10, 0));
+	const auto cleared = step(quiet, at(1, 10, 0));
+	CHECK(cleared.has_value());
+	CHECK(cleared->unpaused);
+	CHECK(!cleared->applied);
+	CHECK(!cleared->state.schedulePaused);
+
+	// The target the line reports on such a step is the one already recorded:
+	// the schedule wants what it wanted, and nothing moved.
+	CHECK_EQ(cleared->target, u"work"_q);
+	CHECK_EQ(cleared->kept, u"work"_q);
+	CHECK(cleared->keptSource == Source::Schedule);
+
+	// A window OPENING is a positive instruction and overrides a preset chosen
+	// by hand.
+	const auto opening = step(
+		running(u"home"_q, Source::Manual, u"home"_q),
+		at(1, 9, 0));
+	CHECK(opening.has_value());
+	CHECK(opening->applied);
+	CHECK(!opening->unpaused);
+	CHECK_EQ(opening->target, u"work"_q);
+	CHECK_EQ(opening->state.activePreset, u"work"_q);
+	CHECK(opening->state.activeSource == Source::Schedule);
+
+	// A window ENDING only means the reason for the running preset has passed,
+	// which is no reason to undo something asked for. The target still moves -
+	// that is what stops it firing again every tick - but the preset does not.
+	const auto endingByHand = step(
+		running(u"work"_q, Source::Manual, u"work"_q),
+		at(1, 17, 0));
+	CHECK(endingByHand.has_value());
+	CHECK(!endingByHand->applied);
+	CHECK_EQ(endingByHand->target, u"home"_q);
+	CHECK_EQ(endingByHand->kept, u"work"_q);
+	CHECK(endingByHand->keptSource == Source::Manual);
+	CHECK_EQ(endingByHand->state.activePreset, u"work"_q);
+	CHECK(endingByHand->state.activeSource == Source::Manual);
+	CHECK_EQ(endingByHand->state.scheduleTarget, u"home"_q);
+
+	// ... and it does land on a preset the schedule itself put there.
+	const auto endingItsOwn = step(
+		running(u"work"_q, Source::Schedule, u"work"_q),
+		at(1, 17, 0));
+	CHECK(endingItsOwn.has_value());
+	CHECK(endingItsOwn->applied);
+	CHECK_EQ(endingItsOwn->state.activePreset, u"home"_q);
+	CHECK(endingItsOwn->state.activeSource == Source::Schedule);
+
+	// Focus is left alone in BOTH directions - it is the more immediate signal
+	// - though the target is still recorded, so leaving focus has something to
+	// compare against. See FocusStep().
+	const auto overFocusOpening = step(
+		running(u"focus"_q, Source::Focus, u"home"_q),
+		at(1, 9, 0));
+	CHECK(overFocusOpening.has_value());
+	CHECK(!overFocusOpening->applied);
+	CHECK_EQ(overFocusOpening->kept, u"focus"_q);
+	CHECK(overFocusOpening->keptSource == Source::Focus);
+	CHECK_EQ(overFocusOpening->state.activePreset, u"focus"_q);
+	CHECK(overFocusOpening->state.activeSource == Source::Focus);
+	CHECK_EQ(overFocusOpening->state.scheduleTarget, u"work"_q);
+
+	const auto overFocusEnding = step(
+		running(u"focus"_q, Source::Focus, u"work"_q),
+		at(1, 17, 0));
+	CHECK(overFocusEnding.has_value());
+	CHECK(!overFocusEnding->applied);
+	CHECK_EQ(overFocusEnding->state.activePreset, u"focus"_q);
+	CHECK_EQ(overFocusEnding->state.scheduleTarget, u"home"_q);
+
+	// It settles rather than looping: fed back the state it just produced, at
+	// the same moment, there is nothing left to write. This is the property the
+	// whole "act on the change, not on the value" design exists for, and the
+	// one a client polling every thirty seconds would notice first.
+	CHECK(!step(opening->state, at(1, 9, 0)).has_value());
+	CHECK(!step(opening->state, at(1, 10, 0)).has_value());
+	CHECK(!step(lifted->state, at(1, 10, 0)).has_value());
+	CHECK(!step(endingByHand->state, at(1, 17, 0)).has_value());
+	CHECK(!step(overFocusOpening->state, at(1, 9, 0)).has_value());
+
+	// A schedule that drives nothing writes nothing, whatever is running. It
+	// must not read as "wants Normal" here any more than it does in
+	// ScheduleTarget().
+	const auto silent = Parse(uR"(
+[presets.work]
+list_order = []
+)"_q);
+	CHECK(silent.ok());
+	CHECK(!Purple::ScheduleStep(
+		silent.settings,
+		running(u"work"_q, Source::Manual, QString()),
+		at(1, 10, 0),
+		device).has_value());
+}
+
+// The OS focus policy, which was written twice and agreed everywhere but the
+// missed-window case below - where the desktop copy simply had no such rule.
+void TestFocusStep() {
+	Begin("focus step");
+
+	// 2026-08-17 is a Monday, so dayOfWeek() runs 1..7 across that week.
+	const auto at = [](int weekday, int hour, int minute) {
+		return QDateTime(
+			QDate(2026, 8, 16 + weekday),
+			QTime(hour, minute));
+	};
+
+	// The same schedule as above - work inside the Monday window, home outside
+	// it - because half of what leaving focus does is a schedule decision.
+	const auto config = [](const QString &exitPreset, bool enabled) {
+		return uR"(
+[presets.work]
+list_order = []
+
+[presets.home]
+list_order = []
+
+[presets.deep]
+list_order = []
+
+[schedule]
+outside = "home"
+
+[[schedule.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+
+[focus_sync]
+enabled_p    = %1
+enter_preset = "deep"
+exit_preset  = "%2"
+)"_q.arg(enabled ? u"true"_q : u"false"_q, exitPreset);
+	};
+	const auto restoring = Parse(config(u"previous"_q, true));
+	const auto naming = Parse(config(u"home"_q, true));
+	const auto off = Parse(config(u"previous"_q, false));
+	CHECK(restoring.ok());
+	CHECK(restoring.settings.focusSync.enabled);
+	CHECK(naming.ok());
+	CHECK(off.ok());
+	CHECK(!off.settings.focusSync.enabled);
+
+	const auto device = Purple::DeviceIdentity();
+	const auto step = [&](
+			const Purple::Settings &settings,
+			const Purple::State &state,
+			bool active,
+			const std::optional<QString> &enterTarget,
+			const QDateTime &now) {
+		return Purple::FocusStep(
+			settings,
+			state,
+			active,
+			enterTarget,
+			now,
+			device);
+	};
+	const auto holding = [](
+			const QString &preset,
+			Purple::PresetSource source,
+			const QString &previous,
+			Purple::PresetSource previousSource,
+			const QString &target) {
+		// A running focus session, as the enter half leaves it.
+		auto result = Purple::State();
+		result.activePreset = preset;
+		result.activeSource = source;
+		result.previousPreset = previous;
+		result.previousSource = previousSource;
+		result.scheduleTarget = target;
+		result.focusActive = true;
+		result.focusSeen = true;
+		return result;
+	};
+	using Source = Purple::PresetSource;
+	using Change = Purple::FocusChange;
+
+	// The names the clients put in a log line or a JSON field, pinned because
+	// they are a wire format on Android and a grep target on the desktop.
+	CHECK_EQ(Purple::FocusChangeName(Change::None), u"none"_q);
+	CHECK_EQ(Purple::FocusChangeName(Change::Entered), u"entered"_q);
+	CHECK_EQ(Purple::FocusChangeName(Change::Kept), u"kept"_q);
+	CHECK_EQ(Purple::FocusChangeName(Change::Restored), u"restored"_q);
+	CHECK_EQ(Purple::FocusChangeName(Change::Exited), u"exited"_q);
+	CHECK_EQ(Purple::FocusChangeName(Change::Schedule), u"schedule"_q);
+
+	// Entering: what was running and why is remembered, so leaving can put both
+	// back, and what the schedule wanted right then comes back for the caller
+	// to keep until the session ends.
+	auto before = Purple::State();
+	before.activePreset = u"work"_q;
+	before.activeSource = Source::Schedule;
+	before.scheduleTarget = u"work"_q;
+	const auto entered = step(
+		restoring.settings,
+		before,
+		true,
+		std::nullopt,
+		at(1, 10, 0));
+	CHECK(entered.has_value());
+	CHECK(entered->change == Change::Entered);
+	CHECK_EQ(entered->state.activePreset, u"deep"_q);
+	CHECK(entered->state.activeSource == Source::Focus);
+	CHECK_EQ(entered->state.previousPreset, u"work"_q);
+	CHECK(entered->state.previousSource == Source::Schedule);
+	CHECK(entered->state.focusActive);
+	CHECK(entered->state.focusSeen);
+	CHECK(entered->enterTarget.has_value());
+	CHECK_EQ(*entered->enterTarget, u"work"_q);
+
+	// No edge, so nothing happens - which is what makes a preset chosen by hand
+	// mid-session stand until focus itself changes.
+	CHECK(!step(
+		restoring.settings,
+		entered->state,
+		true,
+		entered->enterTarget,
+		at(1, 11, 0)).has_value());
+
+	// Leaving with exit_preset = "previous": the preset AND the reason go back,
+	// so a window the schedule had opened still closes at its own boundary.
+	const auto restored = step(
+		restoring.settings,
+		entered->state,
+		false,
+		entered->enterTarget,
+		at(1, 11, 0));
+	CHECK(restored.has_value());
+	CHECK(restored->change == Change::Restored);
+	CHECK_EQ(restored->state.activePreset, u"work"_q);
+	CHECK(restored->state.activeSource == Source::Schedule);
+	CHECK_EQ(restored->state.previousPreset, QString());
+	CHECK(restored->state.previousSource == Source::Manual);
+	CHECK(!restored->state.focusSeen);
+	CHECK(!restored->state.focusActive);
+	CHECK(!restored->enterTarget.has_value());
+	CHECK(!step(
+		restoring.settings,
+		restored->state,
+		false,
+		std::nullopt,
+		at(1, 11, 0)).has_value());
+
+	// Leaving onto a preset named outright. Nothing put it there but the file,
+	// so it is the user's until something moves it - Manual, not Schedule.
+	const auto exited = step(
+		naming.settings,
+		holding(u"deep"_q, Source::Focus, u"work"_q, Source::Schedule, u"work"_q),
+		false,
+		u"work"_q,
+		at(1, 11, 0));
+	CHECK(exited.has_value());
+	CHECK(exited->change == Change::Exited);
+	CHECK_EQ(exited->state.activePreset, u"home"_q);
+	CHECK(exited->state.activeSource == Source::Manual);
+
+	// A preset chosen by hand mid-session is not focus's to take back: the
+	// session ends and the choice outlives it.
+	const auto kept = step(
+		restoring.settings,
+		holding(u"home"_q, Source::Manual, u"work"_q, Source::Schedule, u"work"_q),
+		false,
+		u"work"_q,
+		at(1, 11, 0));
+	CHECK(kept.has_value());
+	CHECK(kept->change == Change::Kept);
+	CHECK_EQ(kept->state.activePreset, u"home"_q);
+	CHECK(kept->state.activeSource == Source::Manual);
+	CHECK(!kept->state.focusSeen);
+
+	// Focus sync switched off while it holds a preset hands that preset back.
+	// Leaving it in force would be a preset nothing on screen explains and
+	// nothing left running would ever lift.
+	const auto handedBack = step(
+		off.settings,
+		holding(u"deep"_q, Source::Focus, u"work"_q, Source::Schedule, u"work"_q),
+		true,
+		u"work"_q,
+		at(1, 11, 0));
+	CHECK(handedBack.has_value());
+	CHECK(handedBack->change == Change::Restored);
+	CHECK_EQ(handedBack->state.activePreset, u"work"_q);
+	CHECK(handedBack->state.activeSource == Source::Schedule);
+	CHECK(!handedBack->state.focusSeen);
+
+	// With sync off and nothing imposed there is only the stale flag to clear,
+	// once, and then nothing at all.
+	auto stale = Purple::State();
+	stale.activePreset = u"home"_q;
+	stale.focusSeen = true;
+	const auto forgotten = step(
+		off.settings,
+		stale,
+		false,
+		std::nullopt,
+		at(1, 11, 0));
+	CHECK(forgotten.has_value());
+	CHECK(forgotten->change == Change::None);
+	CHECK(!forgotten->state.focusSeen);
+	CHECK_EQ(forgotten->state.activePreset, u"home"_q);
+	CHECK(!step(
+		off.settings,
+		forgotten->state,
+		false,
+		std::nullopt,
+		at(1, 11, 0)).has_value());
+
+	// The flag itself moving is a write even when no edge is acted on, because
+	// on a client where this call is what records it, that write is the point.
+	const auto noted = step(
+		off.settings,
+		forgotten->state,
+		true,
+		std::nullopt,
+		at(1, 11, 0));
+	CHECK(noted.has_value());
+	CHECK(noted->change == Change::None);
+	CHECK(noted->state.focusActive);
+
+	// The missed window. A boundary that passed while focus held the preset was
+	// recorded by the schedule tick and never applied, so restoring the
+	// pre-focus preset would leave the tick nothing to do and the window would
+	// be missed until the next boundary. Five o'clock passed during the
+	// session, so `schedule_target' has already moved to home while the entry
+	// target still says work.
+	const auto missedEnd = holding(
+		u"deep"_q,
+		Source::Focus,
+		u"work"_q,
+		Source::Schedule,
+		u"home"_q);
+	const auto caughtUp = step(
+		restoring.settings,
+		missedEnd,
+		false,
+		u"work"_q,
+		at(1, 18, 0));
+	CHECK(caughtUp.has_value());
+	CHECK(caughtUp->change == Change::Schedule);
+	CHECK_EQ(caughtUp->state.activePreset, u"home"_q);
+	CHECK(caughtUp->state.activeSource == Source::Schedule);
+	CHECK_EQ(caughtUp->state.scheduleTarget, u"home"_q);
+	CHECK_EQ(caughtUp->state.previousPreset, QString());
+
+	// Same shape the other way round: a window that OPENED during the session
+	// overrides even a pre-focus preset chosen by hand, exactly as the tick
+	// would have. Focus began before nine over a manual Home.
+	const auto missedStart = holding(
+		u"deep"_q,
+		Source::Focus,
+		u"home"_q,
+		Source::Manual,
+		u"work"_q);
+	const auto opened = step(
+		restoring.settings,
+		missedStart,
+		false,
+		u"home"_q,
+		at(1, 10, 0));
+	CHECK(opened.has_value());
+	CHECK(opened->change == Change::Schedule);
+	CHECK_EQ(opened->state.activePreset, u"work"_q);
+	CHECK(opened->state.activeSource == Source::Schedule);
+
+	// ... and the window that closed during the session still does NOT undo a
+	// pre-focus preset chosen by hand, because it is the pre-focus source that
+	// decides. Here that is Manual, so five o'clock leaves it alone.
+	const auto byHand = holding(
+		u"deep"_q,
+		Source::Focus,
+		u"work"_q,
+		Source::Manual,
+		u"home"_q);
+	const auto stillMine = step(
+		restoring.settings,
+		byHand,
+		false,
+		u"work"_q,
+		at(1, 18, 0));
+	CHECK(stillMine.has_value());
+	CHECK(stillMine->change == Change::Restored);
+	CHECK_EQ(stillMine->state.activePreset, u"work"_q);
+	CHECK(stillMine->state.activeSource == Source::Manual);
+
+	// Nothing remembers the entry target - after a restart, say - so there is
+	// no way to know a boundary passed, and leaving restores exactly as it
+	// would have without the rule.
+	const auto blind = step(
+		restoring.settings,
+		missedEnd,
+		false,
+		std::nullopt,
+		at(1, 18, 0));
+	CHECK(blind.has_value());
+	CHECK(blind->change == Change::Restored);
+	CHECK_EQ(blind->state.activePreset, u"work"_q);
+	CHECK(blind->state.activeSource == Source::Schedule);
+	CHECK_EQ(blind->state.scheduleTarget, u"home"_q);
+
+	// A paused schedule has no opinion to catch up on either, so the same
+	// session restores rather than moving.
+	auto whilePaused = missedEnd;
+	whilePaused.schedulePaused = true;
+	const auto held = step(
+		restoring.settings,
+		whilePaused,
+		false,
+		u"work"_q,
+		at(1, 18, 0));
+	CHECK(held.has_value());
+	CHECK(held->change == Change::Restored);
+	CHECK_EQ(held->state.activePreset, u"work"_q);
+}
+
 void TestRulesets() {
 	Begin("schedule rulesets");
 
@@ -6390,6 +6890,8 @@ int main() {
 	TestActiveSchedule();
 	TestDevices();
 	TestSchedulePauseUntil();
+	TestScheduleStep();
+	TestFocusStep();
 	TestResolvedCache();
 	TestLastSeenKeys();
 	TestLastSeenReasons();

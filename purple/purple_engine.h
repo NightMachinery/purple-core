@@ -406,4 +406,133 @@ struct ScheduleForDevice {
 	const ScheduleForDevice &active,
 	const QDateTime &now);
 
+// One tick of the schedule, exactly as both clients run it: a pause that has
+// reached its deadline lifts itself, and the ordinary boundary rule then
+// decides whether the preset moves - in that order, in one step, so the windows
+// that opened and closed while the schedule was held off are caught up on at
+// once rather than at the next window edge.
+//
+// It lives here for the same reason ScheduleApplies does, only more so. There
+// are two ticks in two apps, they were written twice in C++ down to the same
+// explanatory comments, and the order of those two halves is precisely the part
+// that is easy to get subtly wrong.
+struct ScheduleTick {
+	// What to write. Everything below is what the caller's log line needs to
+	// say about it, and nothing here has to be recomputed to produce that line.
+	State state;
+
+	// The preset the schedule wants now. On a step that only lifted a pause,
+	// with no boundary to catch up on, this is the target already recorded: the
+	// schedule wants what it wanted, and the line still reads.
+	QString target;
+
+	// Whether `target' took the running preset with it.
+	bool applied = false;
+
+	// Whether this is the step that lifted a pause which had run out. A caller
+	// whose own ticking is conditioned on the pause reloads on this as well as
+	// on `applied': a cleared pause that nothing reread would stop the clock
+	// that had just cleared it.
+	bool unpaused = false;
+
+	// The preset in force when the step began, and what had put it there. Only
+	// interesting when `applied' is false - that is the line which has to say
+	// what was kept and why - but filled in either way, because a field that is
+	// empty under some conditions is one more thing for a caller to get wrong
+	// than one it reads under a condition it is already testing.
+	QString kept;
+	PresetSource keptSource = PresetSource::Manual;
+};
+
+// Null when there is nothing to write, which is every tick but the ones at a
+// boundary and the one that lifts an expired pause. A step comes back whenever
+// the state changed AT ALL: an unpause with nothing to catch up on has still
+// cleared two fields somebody must persist.
+[[nodiscard]] std::optional<ScheduleTick> ScheduleStep(
+	const Settings &settings,
+	const State &state,
+	const QDateTime &now,
+	const DeviceIdentity &device);
+
+// Which of the six things one pass of focus sync did. An enum rather than the
+// strings themselves because a client puts these in a log line or a JSON field
+// and a typo in one copy of a spelling would be invisible until somebody
+// grepped for it.
+enum class FocusChange : uchar {
+	// No edge, so nothing was decided. The state may still have moved - the
+	// flag itself is written by this call on the clients that have only one -
+	// which is why a step can come back carrying this.
+	None,
+
+	// A session began: the preset [focus_sync] names took over.
+	Entered,
+
+	// A session ended over a preset focus did not impose. It was chosen while
+	// focus was on, and that choice outlives the session.
+	Kept,
+
+	// A session ended and the pre-focus preset went back, with the reason it
+	// was active - `exit_preset = "previous"'.
+	Restored,
+
+	// A session ended and the preset `exit_preset' names took over. It was put
+	// there by neither the schedule nor focus, so it is the user's.
+	Exited,
+
+	// A session ended onto a schedule boundary that had passed while it ran.
+	// See FocusStep().
+	Schedule,
+};
+
+// "none", "entered", "kept", "restored", "exited", "schedule".
+[[nodiscard]] QString FocusChangeName(FocusChange value);
+
+struct FocusTick {
+	// What to write. As with ScheduleTick, everything a caller's line says is
+	// either here or derivable from this without asking anything twice.
+	State state;
+
+	FocusChange change = FocusChange::None;
+
+	// What the schedule wanted at the moment this step started a session, for
+	// the caller to keep until that session ends; null when this step did not
+	// start one. Empty means the schedule wanted nothing at all, which is a
+	// different answer from wanting Normal and stays distinguishable from it.
+	//
+	// Not a key in state.toml because it is not a decision, only a note the
+	// missed-window rule below reads. It is simply absent after a restart, and
+	// that case is handled rather than special.
+	std::optional<QString> enterTarget;
+};
+
+// One pass of OS focus sync: the flag is the whole input, and an edge in it -
+// never a value - is what moves the preset. That is what makes a preset chosen
+// by hand in the middle of a focus session stand until focus itself changes.
+//
+// `focusActive' is what the OS says now; it is written into the returned state,
+// so a client with one caller for both halves - Android's receiver - needs only
+// this one call, while one with a separate detector passes back what the
+// detector already wrote.
+//
+// `enterTarget' is what the schedule wanted at the moment focus took over, or
+// null when nothing remembers - after a restart, say. It exists for the
+// missed-window case on the way out: a schedule boundary that passed while
+// focus held the preset was recorded by the schedule tick and never applied,
+// because focus is the more immediate signal. Putting the pre-focus preset back
+// would then leave the tick nothing to do, since the target it compares against
+// has already moved, and the window would be missed until the next boundary. So
+// leaving runs the boundary rule itself, on the pre-focus source.
+//
+// Null when the serialized state would be unchanged - which is the honest test
+// for "is there anything to write", and cheaper to keep right than a list of
+// the fields this touches, which would have to be revisited every time the
+// policy grew a field.
+[[nodiscard]] std::optional<FocusTick> FocusStep(
+	const Settings &settings,
+	const State &state,
+	bool focusActive,
+	const std::optional<QString> &enterTarget,
+	const QDateTime &now,
+	const DeviceIdentity &device);
+
 } // namespace Purple
