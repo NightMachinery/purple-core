@@ -2406,6 +2406,7 @@ void TestStateRoundTrip() {
 	state.focusActive = true;
 	state.focusSeen = true;
 	state.schedulePaused = true;
+	state.schedulePausedUntil = 1755500000;
 	state.scheduleTarget = u"work"_q;
 	state.peekActive = true;
 	state.peekDeadlineUnix = 1755400000;
@@ -2438,6 +2439,7 @@ void TestStateRoundTrip() {
 	CHECK(back.focusActive);
 	CHECK(back.focusSeen);
 	CHECK(back.schedulePaused);
+	CHECK_EQ(back.schedulePausedUntil, int64(1755500000));
 	CHECK_EQ(back.scheduleTarget, u"work"_q);
 	CHECK(back.peekActive);
 	CHECK_EQ(back.peekDeadlineUnix, int64(1755400000));
@@ -2488,6 +2490,7 @@ void TestStateDefaults() {
 		CHECK_EQ(state.activePreset, u"normal"_q);
 		CHECK(state.activeSource == Purple::PresetSource::Manual);
 		CHECK(!state.schedulePaused);
+		CHECK_EQ(state.schedulePausedUntil, int64(0));
 		CHECK(!state.focusActive);
 		CHECK(!state.focusSeen);
 		CHECK(!state.peekActive);
@@ -2501,6 +2504,14 @@ void TestStateDefaults() {
 		u"state.toml"_q);
 	CHECK_EQ(partial.activePreset, u"work"_q);
 	CHECK(!partial.resolvedCache.valid());
+
+	// A file written before the deadline existed: paused, and paused until it
+	// is lifted by hand, which is exactly what it meant when it was written.
+	const auto older = Purple::ParseState(
+		u"active_preset = \"work\"\nschedule_paused = true\n"_q,
+		u"state.toml"_q);
+	CHECK(older.schedulePaused);
+	CHECK_EQ(older.schedulePausedUntil, int64(0));
 
 	// An unknown source name is not a reason to refuse the rest of the file.
 	const auto odd = Purple::ParseState(
@@ -3772,6 +3783,217 @@ void TestScheduleTarget() {
 	CHECK(!Purple::ScheduleRuleNow(several, at(1, 10, 0)));
 }
 
+void TestScheduleOutside() {
+	Begin("schedule outside");
+
+	// Nothing said: the fallback is what every file written before the key
+	// existed meant, so an old settings.toml keeps behaving the same way.
+	const auto plain = Parse(uR"(
+[presets.work]
+list_order = []
+
+[[schedule.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)"_q);
+	CHECK(plain.ok());
+	CHECK_EQ(plain.settings.schedule.outside, u"normal"_q);
+
+	const auto named = Parse(uR"(
+[presets.work]
+list_order = []
+
+[presets.home]
+list_order = []
+
+[schedule]
+outside = "home"
+
+[[schedule.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)"_q);
+	CHECK(named.ok());
+	CHECK(!WarnsAbout(named, u"outside"_q));
+	CHECK_EQ(named.settings.schedule.outside, u"home"_q);
+
+	// A name nothing backs cannot be skipped the way a rule can - something has
+	// to be wanted outside the windows - so it says so and takes normal.
+	const auto ghost = Parse(uR"(
+[schedule]
+outside = "ghost"
+)"_q);
+	CHECK(ghost.ok());
+	CHECK(WarnsAbout(ghost, u"does not exist, using normal"_q));
+	CHECK(WarnsAbout(ghost, u"[schedule] outside: preset 'ghost'"_q));
+	CHECK_EQ(ghost.settings.schedule.outside, u"normal"_q);
+
+	// 2026-08-17 is a Monday, so dayOfWeek() runs 1..7 across that week.
+	const auto at = [](int weekday, int hour, int minute) {
+		return QDateTime(
+			QDate(2026, 8, 16 + weekday),
+			QTime(hour, minute));
+	};
+	const auto target = [](
+			const Purple::Schedule &schedule,
+			const QDateTime &when) {
+		const auto result = Purple::ScheduleTarget(schedule, when);
+		return result ? *result : u"<nothing>"_q;
+	};
+	const auto &schedule = named.settings.schedule;
+	CHECK_EQ(target(schedule, at(1, 10, 0)), u"work"_q);
+	CHECK_EQ(target(schedule, at(1, 17, 0)), u"home"_q);
+	CHECK_EQ(target(schedule, at(6, 10, 0)), u"home"_q);
+
+	// The boundary rule, restated with an outside preset that is not Normal.
+	// Nine o'clock is a window starting and takes over whatever is running;
+	// five o'clock is a window ending, so it lands only on a preset the
+	// schedule itself put there. Getting this wrong is what a client testing
+	// `target != normal' would do: it would read Home as a start and undo a
+	// preset the user chose by hand.
+	using Source = Purple::PresetSource;
+	CHECK(Purple::ScheduleApplies(schedule, u"work"_q, Source::Manual));
+	CHECK(Purple::ScheduleApplies(schedule, u"work"_q, Source::Schedule));
+	CHECK(!Purple::ScheduleApplies(schedule, u"home"_q, Source::Manual));
+	CHECK(Purple::ScheduleApplies(schedule, u"home"_q, Source::Schedule));
+
+	// Focus outranks both directions.
+	CHECK(!Purple::ScheduleApplies(schedule, u"work"_q, Source::Focus));
+	CHECK(!Purple::ScheduleApplies(schedule, u"home"_q, Source::Focus));
+
+	// And with the default outside the rule is exactly what it always was.
+	const auto normal = plain.settings.schedule;
+	CHECK(Purple::ScheduleApplies(normal, u"work"_q, Source::Manual));
+	CHECK(!Purple::ScheduleApplies(normal, u"normal"_q, Source::Manual));
+	CHECK(Purple::ScheduleApplies(normal, u"normal"_q, Source::Schedule));
+}
+
+void TestSchedulePauseUntil() {
+	Begin("schedule pause until");
+
+	// 2026-08-17 is a Monday, so dayOfWeek() runs 1..7 across that week.
+	const auto at = [](int weekday, int hour, int minute) {
+		return QDateTime(
+			QDate(2026, 8, 16 + weekday),
+			QTime(hour, minute));
+	};
+	const auto seconds = [](const QDateTime &when) {
+		return int64(when.toSecsSinceEpoch());
+	};
+
+	auto paused = Purple::State();
+	paused.schedulePaused = true;
+	paused.schedulePausedUntil = seconds(at(1, 10, 0));
+	CHECK(!Purple::ScheduleUnpauseDue(paused, seconds(at(1, 9, 59))));
+	CHECK(Purple::ScheduleUnpauseDue(paused, seconds(at(1, 10, 0))));
+	CHECK(Purple::ScheduleUnpauseDue(paused, seconds(at(2, 10, 0))));
+
+	// Zero is "until I say otherwise" and no clock reaches it.
+	auto openEnded = Purple::State();
+	openEnded.schedulePaused = true;
+	CHECK(!Purple::ScheduleUnpauseDue(openEnded, seconds(at(7, 23, 59))));
+
+	// A deadline left behind by a pause that was already lifted is not a
+	// reason to do anything, so nothing has to remember to clear it in order.
+	auto running = Purple::State();
+	running.schedulePausedUntil = seconds(at(1, 9, 0));
+	CHECK(!Purple::ScheduleUnpauseDue(running, seconds(at(1, 10, 0))));
+
+	const auto settings = Parse(uR"(
+[presets.work]
+list_order = []
+
+[presets.home]
+list_order = []
+
+[schedule]
+outside = "home"
+
+[[schedule.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)"_q);
+	CHECK(settings.ok());
+	const auto &schedule = settings.settings.schedule;
+
+	// The tick both clients run, written out in the order they run it: expire
+	// the pause first, then decide by the ordinary boundary rule. That order is
+	// what makes an expiry catch up in the same tick rather than sitting on the
+	// old preset until the next window edge.
+	const auto tick = [&](Purple::State &state, const QDateTime &now) {
+		if (Purple::ScheduleUnpauseDue(state, seconds(now))) {
+			state.schedulePaused = false;
+			state.schedulePausedUntil = 0;
+		}
+		if (state.schedulePaused) {
+			return;
+		}
+		const auto target = Purple::ScheduleTarget(schedule, now);
+		if (!target || *target == state.scheduleTarget) {
+			return;
+		}
+		state.scheduleTarget = *target;
+		if (Purple::ScheduleApplies(schedule, *target, state.activeSource)) {
+			state.activePreset = *target;
+			state.activeSource = Purple::PresetSource::Schedule;
+		}
+	};
+
+	auto state = Purple::State();
+	state.activePreset = u"home"_q;
+	state.activeSource = Purple::PresetSource::Schedule;
+	state.scheduleTarget = u"home"_q;
+	state.schedulePaused = true;
+	state.schedulePausedUntil = seconds(at(1, 10, 0));
+
+	// Inside the pause the schedule drives nothing, even mid-window.
+	tick(state, at(1, 9, 30));
+	CHECK(state.schedulePaused);
+	CHECK_EQ(state.activePreset, u"home"_q);
+	CHECK_EQ(state.scheduleTarget, u"home"_q);
+
+	// At the deadline the pause goes and the window it slept through is caught
+	// up on at once - one tick, not two.
+	tick(state, at(1, 10, 0));
+	CHECK(!state.schedulePaused);
+	CHECK_EQ(state.schedulePausedUntil, int64(0));
+	CHECK_EQ(state.activePreset, u"work"_q);
+	CHECK_EQ(state.scheduleTarget, u"work"_q);
+
+	// And the same pause with no deadline is still paused a week later.
+	auto open = Purple::State();
+	open.activePreset = u"home"_q;
+	open.activeSource = Purple::PresetSource::Schedule;
+	open.scheduleTarget = u"home"_q;
+	open.schedulePaused = true;
+	tick(open, at(1, 10, 0));
+	tick(open, at(7, 10, 0));
+	CHECK(open.schedulePaused);
+	CHECK_EQ(open.activePreset, u"home"_q);
+
+	// A preset chosen by hand while paused survives the expiry, because the
+	// catch-up is a window ENDING only when it aims at `outside'. Here it aims
+	// at work, a window starting, so it takes over - and the mirror case, the
+	// five o'clock end, leaves a hand-chosen preset alone.
+	auto manual = Purple::State();
+	manual.activePreset = u"work"_q;
+	manual.activeSource = Purple::PresetSource::Manual;
+	manual.scheduleTarget = u"work"_q;
+	manual.schedulePaused = true;
+	manual.schedulePausedUntil = seconds(at(1, 17, 0));
+	tick(manual, at(1, 17, 0));
+	CHECK(!manual.schedulePaused);
+	CHECK_EQ(manual.scheduleTarget, u"home"_q);
+	CHECK_EQ(manual.activePreset, u"work"_q);
+	CHECK(manual.activeSource == Purple::PresetSource::Manual);
+}
+
 void TestResolvedCache() {
 	Begin("resolved cache");
 
@@ -3937,6 +4159,8 @@ int main() {
 	TestRecent();
 	TestHideScope();
 	TestScheduleTarget();
+	TestScheduleOutside();
+	TestSchedulePauseUntil();
 	TestResolvedCache();
 
 	std::printf("%d checks, %d failures\n", Checks, Failures);

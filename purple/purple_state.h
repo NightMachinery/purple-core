@@ -146,6 +146,15 @@ struct State {
 
 	bool schedulePaused = false;
 
+	// When the pause runs out, in unix seconds, or 0 for a pause that lasts
+	// until it is lifted by hand - which is what a pause has always been, and
+	// what an older state.toml with no such key still says.
+	//
+	// Unix seconds rather than a monotonic deadline, for the same reason as
+	// peekDeadlineUnix: a pause is measured in hours or days, so it has to mean
+	// the same thing after the app has been closed and reopened.
+	int64 schedulePausedUntil = 0;
+
 	// The last preset the schedule computed, so it can act on a change rather
 	// than on every tick. That is what lets a preset chosen by hand survive
 	// until the next boundary instead of being overwritten a second later, and
@@ -169,6 +178,18 @@ struct State {
 // The comparison is what makes a peek that outlived the app expire on its own:
 // the deadline is in the past by the time anything reads it again.
 [[nodiscard]] bool PeekLive(const State &state, int64 nowUnix);
+
+// Whether a pause that was given a deadline has reached it. False for a pause
+// with no deadline - 0 means "until I say otherwise" - and false when nothing
+// is paused at all.
+//
+// The comparison is what makes a pause that ran out while the app was closed
+// expire on its own: by the time anything reads it again the deadline is in the
+// past. A caller that sees true clears BOTH fields and then runs the ordinary
+// boundary rule (ScheduleTarget + ScheduleApplies) in the same tick, so the
+// windows missed while paused are caught up on once, immediately, rather than
+// waiting for the next window edge.
+[[nodiscard]] bool ScheduleUnpauseDue(const State &state, int64 nowUnix);
 
 // The name that means "behave exactly like stock Telegram Desktop".
 [[nodiscard]] const QString &NormalPreset();

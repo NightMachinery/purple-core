@@ -343,6 +343,9 @@ State ParseState(const QString &text, const QString &path) {
 	result.focusActive = ReadBool(root, "focus_active", false);
 	result.focusSeen = ReadBool(root, "focus_seen", false);
 	result.schedulePaused = ReadBool(root, "schedule_paused", false);
+	if (const auto until = root.get("schedule_paused_until")) {
+		result.schedulePausedUntil = until->value_or(int64(0));
+	}
 	result.scheduleTarget = ReadString(root, "schedule_target");
 	result.peekActive = ReadBool(root, "peek_active", false);
 	result.overrides = ReadOverrides(root);
@@ -359,6 +362,12 @@ State ParseState(const QString &text, const QString &path) {
 bool PeekLive(const State &state, int64 nowUnix) {
 	return state.peekActive
 		&& (!state.peekDeadlineUnix || state.peekDeadlineUnix > nowUnix);
+}
+
+bool ScheduleUnpauseDue(const State &state, int64 nowUnix) {
+	return state.schedulePaused
+		&& state.schedulePausedUntil
+		&& state.schedulePausedUntil <= nowUnix;
 }
 
 std::optional<OverrideKind> ParseOverrideKind(const QString &value) {
@@ -447,21 +456,27 @@ QString SerializeState(const State &state) {
 	result += u"# Purple Telegram runtime state. This file is written by the "
 		"app and\n# rewritten whenever anything in it changes - edit "
 		"settings.toml instead.\n\n"_q;
-	result += u"active_preset        = %1\n"_q.arg(Quoted(state.activePreset));
-	result += u"active_preset_source = %1\n"_q
+	// The column the '=' sit in is one wider than it used to be, because
+	// schedule_paused_until is one character longer than anything else here.
+	// Nothing reads the alignment - the file is machine-owned and rewritten
+	// whole - but it is read by people looking for what went wrong.
+	result += u"active_preset         = %1\n"_q.arg(Quoted(state.activePreset));
+	result += u"active_preset_source  = %1\n"_q
 		.arg(Quoted(PresetSourceName(state.activeSource)));
-	result += u"previous_preset      = %1\n"_q
+	result += u"previous_preset       = %1\n"_q
 		.arg(Quoted(state.previousPreset));
-	result += u"previous_source      = %1\n"_q
+	result += u"previous_source       = %1\n"_q
 		.arg(Quoted(PresetSourceName(state.previousSource)));
-	result += u"focus_active         = %1\n"_q.arg(Boolean(state.focusActive));
-	result += u"focus_seen           = %1\n"_q.arg(Boolean(state.focusSeen));
-	result += u"schedule_paused      = %1\n"_q
+	result += u"focus_active          = %1\n"_q.arg(Boolean(state.focusActive));
+	result += u"focus_seen            = %1\n"_q.arg(Boolean(state.focusSeen));
+	result += u"schedule_paused       = %1\n"_q
 		.arg(Boolean(state.schedulePaused));
-	result += u"schedule_target      = %1\n"_q
+	result += u"schedule_paused_until = %1\n"_q
+		.arg(state.schedulePausedUntil);
+	result += u"schedule_target       = %1\n"_q
 		.arg(Quoted(state.scheduleTarget));
-	result += u"peek_active          = %1\n"_q.arg(Boolean(state.peekActive));
-	result += u"peek_deadline_unix   = %1\n"_q.arg(state.peekDeadlineUnix);
+	result += u"peek_active           = %1\n"_q.arg(Boolean(state.peekActive));
+	result += u"peek_deadline_unix    = %1\n"_q.arg(state.peekDeadlineUnix);
 	result += SerializeOverrides(state.overrides);
 
 	const auto &cache = state.resolvedCache;
