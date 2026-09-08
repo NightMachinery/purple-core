@@ -971,6 +971,74 @@ enabled_p = true
 	CHECK(WarnsAbout(order, u"each preset writes its own"_q));
 }
 
+void TestBooleanKeysAreStrict() {
+	Begin("boolean keys are strict");
+
+	// toml++ converts on the way out of value<bool>(): `1' comes back as true
+	// and `0' as false, while `"true"' is refused. That is a fine rule for a
+	// library and the wrong one for this file, where every flag is spelled
+	// with a _p suffix precisely so that its type is part of its name. A
+	// number is a mistake, and a mistake that behaves is the kind nobody finds.
+	const auto one = Parse(u"[premium]\nenabled_p = 1\n"_q);
+	CHECK(one.ok());
+	CHECK(WarnsAbout(one, u"should be true or false"_q));
+
+	// And it falls back to the default rather than to what the number looked
+	// like, which is what makes the warning worth reading: `enabled_p = 0'
+	// leaves Premium on, so the file and the app visibly disagree.
+	const auto zero = Parse(u"[premium]\nenabled_p = 0\n"_q);
+	CHECK(zero.ok());
+	CHECK(zero.settings.premium.enabled);
+	CHECK(WarnsAbout(zero, u"should be true or false"_q));
+
+	const auto quoted = Parse(u"[screen_time]\nenabled_p = \"true\"\n"_q);
+	CHECK(quoted.ok());
+	CHECK(!quoted.settings.screenTime.enabled);
+	CHECK(WarnsAbout(quoted, u"should be true or false"_q));
+
+	// The real thing still reads, and reads without a word.
+	const auto real = Parse(u"[screen_time]\nenabled_p = true\n"_q);
+	CHECK(real.ok());
+	CHECK(real.settings.screenTime.enabled);
+	CHECK(real.warnings.empty());
+
+	// The other half of the same bug: a switch flipped over a number must
+	// write, not answer "already that way". Comparing through value<bool>()
+	// would call `enabled_p = 1' equal to true and leave the file alone - a
+	// switch that reports success, changes nothing, and stays wrong.
+	const auto text = u"[premium]\nenabled_p = 1\n"_q;
+	const auto on = Purple::SetTableBool(
+		text,
+		Path(),
+		u"premium"_q,
+		u"enabled_p"_q,
+		true);
+	CHECK(on.ok());
+	CHECK(on.changed);
+	CHECK_EQ(on.text, u"[premium]\nenabled_p = true\n"_q);
+	CHECK(Parse(on.text).warnings.empty());
+
+	const auto off = Purple::SetTableBool(
+		text,
+		Path(),
+		u"premium"_q,
+		u"enabled_p"_q,
+		false);
+	CHECK(off.ok());
+	CHECK(off.changed);
+	CHECK_EQ(off.text, u"[premium]\nenabled_p = false\n"_q);
+
+	// A boolean that is already what was asked for is still nothing to write.
+	const auto again = Purple::SetTableBool(
+		on.text,
+		Path(),
+		u"premium"_q,
+		u"enabled_p"_q,
+		true);
+	CHECK(again.ok());
+	CHECK(!again.changed);
+}
+
 void TestVersion() {
 	Begin("version");
 
@@ -6294,6 +6362,7 @@ int main() {
 	TestSpliceBudgetSet();
 	TestSpliceBudgetRemove();
 	TestSetTableBoolImplicitHeader();
+	TestBooleanKeysAreStrict();
 	TestSetTableString();
 	TestStateRoundTrip();
 	TestStateDefaults();

@@ -75,8 +75,15 @@ constexpr auto kMaxSpreadDepth = 8;
 	const auto node = table.get(key);
 	if (!node) {
 		return std::nullopt;
-	} else if (const auto value = node->value<bool>()) {
-		return *value;
+	} else if (const auto value = node->as_boolean()) {
+		// as_boolean() rather than value<bool>(), which converts: toml++ hands
+		// back true for `1' and false for `0' while refusing `"true"'. Every
+		// _p key in the file comes through here, so taking that conversion
+		// would mean the whole schema quietly accepting a shape the docs say
+		// it does not - and then the first switch flipped in the app rewrites
+		// the number as a boolean, so the file the user wrote is not even the
+		// file they end up with.
+		return value->get();
 	}
 	warnings.push_back(u"%1: '%2' should be true or false (%3), ignoring it."_q
 		.arg(context, Text(key), At(*node)));

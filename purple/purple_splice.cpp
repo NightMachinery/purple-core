@@ -2029,9 +2029,15 @@ SpliceResult SetTableBool(
 	const auto tableNode = parsed.table().get(tableView);
 	const auto existing = tableNode ? tableNode->as_table() : nullptr;
 	const auto node = existing ? existing->get(keyView) : nullptr;
-	if (node && node->value<bool>() == value) {
+	const auto boolean = node ? node->as_boolean() : nullptr;
+	if (boolean && boolean->get() == value) {
 		return Unchanged(text);
 	}
+	// as_boolean() rather than value<bool>() for the reason ReadBool has it:
+	// toml++ reads `enabled_p = 1' as true, and a switch turned on over that
+	// would answer "already on", write nothing, and leave a file the parser
+	// then refuses to read the key out of at all. Falling through to the
+	// replacement below is what puts a real boolean there.
 
 	auto lines = text.split('\n');
 	const auto line = node ? int(node->source().begin.line) : 0;
@@ -2116,8 +2122,9 @@ SpliceResult SetTableBool(
 	if (!verify) {
 		return Refuse(text, u"the edit would not parse back"_q);
 	}
-	const auto written = verify.table()[tableView][keyView].value<bool>();
-	if (written != value) {
+	const auto node2 = verify.table()[tableView][keyView].node();
+	const auto written = node2 ? node2->as_boolean() : nullptr;
+	if (!written || written->get() != value) {
 		return Refuse(text, u"the edit did not set %1.%2"_q.arg(table, key));
 	}
 	auto splice = SpliceResult();
