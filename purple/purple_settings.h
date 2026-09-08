@@ -275,6 +275,18 @@ struct Preset {
 	// about what you are allowed to reach. See docs/purple/work_mode.md.
 	std::optional<bool> hideEverywhere;
 
+	// Whether the archive is out of the way while this preset runs: no pull
+	// gesture, no row in the list, the same state as an account that has never
+	// archived anything.
+	//
+	// Nothing means YES, which is the opposite default from hide_everywhere_p
+	// above and deliberately so: the archive is where you put what you are not
+	// dealing with, so a preset that has already named what gets through has no
+	// reason to leave a door to the rest of it open. Say false to keep it.
+	//
+	// Only ever asked while a preset is filtering, so Normal is untouched.
+	std::optional<bool> hideArchive;
+
 	// What the stories strip does while this preset runs. Unset means Follow:
 	// the strip follows the preset's decision about the person, so somebody it
 	// excludes outright loses their story and somebody it is merely holding

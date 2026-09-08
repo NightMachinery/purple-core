@@ -70,6 +70,7 @@ std::optional<Resolved> Resolve(
 		? DefaultViewName(preset)
 		: found->viewName;
 	result.hideEverywhere = found->hideEverywhere.value_or(false);
+	result.hideArchive = found->hideArchive.value_or(true);
 	result.pinned = found->pinned;
 	result.lists = Effective(found->listOrder);
 	result.folders = found->folders;
@@ -293,6 +294,7 @@ ResolvedCache ToCache(const Resolved &resolved) {
 	result.preset = resolved.preset;
 	result.viewName = resolved.viewName;
 	result.hideEverywhere = resolved.hideEverywhere;
+	result.hideArchive = resolved.hideArchive;
 	result.pinned = resolved.pinned;
 	result.folders = resolved.folders;
 	result.stories = resolved.stories;
@@ -327,6 +329,7 @@ std::optional<Resolved> FromCache(const ResolvedCache &cache) {
 		? DefaultViewName(cache.preset)
 		: cache.viewName;
 	result.hideEverywhere = cache.hideEverywhere;
+	result.hideArchive = cache.hideArchive;
 	result.pinned = cache.pinned;
 	result.folders = cache.folders;
 	result.exemptFolders = ExemptFolderList(result.folders);

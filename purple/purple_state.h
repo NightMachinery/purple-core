@@ -62,6 +62,10 @@ struct ResolvedCache {
 	std::vector<ResolvedList> lists;
 	bool hideEverywhere = false;
 
+	// True in a file written by an older build, which is also what a preset
+	// saying nothing asks for - so an upgrade changes nothing here.
+	bool hideArchive = true;
+
 	// The main view's own pinned order. Empty means the preset mirrors the
 	// account's, which is the default and what an older file restores as.
 	std::vector<PeerIdValue> pinned;

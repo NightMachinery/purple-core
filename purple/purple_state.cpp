@@ -203,6 +203,7 @@ void ReadOptionalBool(
 		result.viewName = DefaultViewName(result.preset);
 	}
 	result.hideEverywhere = ReadBool(*table, "hide_everywhere", false);
+	result.hideArchive = ReadBool(*table, "hide_archive", true);
 	if (const auto stories = table->get("stories")) {
 		if (const auto text = stories->value<std::string_view>()) {
 			// Falls back to Follow, which is also the default, so a file
@@ -474,6 +475,7 @@ QString SerializeState(const State &state) {
 	result += u"view_name = %1\n"_q.arg(Quoted(cache.viewName));
 	result += u"hide_everywhere = %1\n"_q
 		.arg(Boolean(cache.hideEverywhere));
+	result += u"hide_archive = %1\n"_q.arg(Boolean(cache.hideArchive));
 	result += u"stories = %1\n"_q.arg(Quoted(StoryPolicyName(cache.stories)));
 	if (!cache.pinned.empty()) {
 		auto ids = QStringList();

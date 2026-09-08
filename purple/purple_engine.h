@@ -154,6 +154,12 @@ struct Resolved {
 	// the view leaves it out. See Preset::hideEverywhere.
 	bool hideEverywhere = false;
 
+	// Whether the archive is out of the way while this preset runs. True
+	// unless the preset said otherwise; see Preset::hideArchive. Consumers ask
+	// this only while a preset is filtering, which is why Normal carrying the
+	// default here costs nothing.
+	bool hideArchive = true;
+
 	// A peek is running, so the preset's hiding is suspended - but not its
 	// silencing. Set by the gate from state.toml rather than by Resolve(): a
 	// peek is transient and expires on a clock, which is also why ToCache()
