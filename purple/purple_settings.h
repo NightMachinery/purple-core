@@ -407,6 +407,19 @@ struct Overrides {
 	HideScope hideScope = HideScope::KeepInFolderUncounted;
 };
 
+// The `[suggestions]' table: what the strips of chats the app suggests for you
+// - recent searches, frequent contacts, the share sheet's targets - do with a
+// chat the running preset hides.
+//
+// Not part of a preset, and for the same reason [peek], [overrides] and
+// [recent] are not: it is a decision about those strips, not about what any one
+// preset lets through.
+struct Suggestions {
+	// Whether a chat the preset hides is left out of them. Only ever asked
+	// while a preset is filtering - under Normal the strips are stock.
+	bool hideInvisible = true;
+};
+
 struct Premium {
 	bool enabled = true;
 };
@@ -429,6 +442,7 @@ struct Settings {
 	Peek peek;
 	Recent recent;
 	Overrides overrides;
+	Suggestions suggestions;
 
 	[[nodiscard]] const List *list(const QString &name) const;
 	[[nodiscard]] const Preset *preset(const QString &name) const;

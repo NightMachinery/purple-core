@@ -1124,6 +1124,28 @@ void WarnUnknownLists(
 	return result;
 }
 
+[[nodiscard]] Suggestions ReadSuggestions(
+		const toml::table &root,
+		std::vector<QString> &warnings) {
+	auto result = Suggestions();
+	const auto node = root.get("suggestions");
+	if (!node) {
+		return result;
+	} else if (!node->as_table()) {
+		warnings.push_back(
+			u"'suggestions' should be a table (%1)."_q.arg(At(*node)));
+		return result;
+	}
+	const auto &table = *node->as_table();
+	result.hideInvisible = ReadBool(
+		table,
+		"hide_invisible_p",
+		u"suggestions"_q,
+		warnings
+	).value_or(true);
+	return result;
+}
+
 // The one key that is about the file rather than about anything in it. A
 // number this build does not recognise is not an error: the keys it does know
 // are still where they were, so it reads what it understands and says out loud
@@ -1568,6 +1590,7 @@ ParseResult ParseSettings(const QString &text, const QString &path) {
 	result.settings.peek = ReadPeek(root, result.warnings);
 	result.settings.recent = ReadRecent(root, result.warnings);
 	result.settings.overrides = ReadOverrides(root, result.warnings);
+	result.settings.suggestions = ReadSuggestions(root, result.warnings);
 
 	// Hotkeys last, because this is the one check that needs the presets and
 	// [peek] at once. Two actions holding the same sequence make it ambiguous
