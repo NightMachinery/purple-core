@@ -104,6 +104,23 @@ struct SpliceResult {
 	const QString &key,
 	bool value);
 
+// The same op for a string, written as a TOML basic string with '"' and '\'
+// escaped. Used for [schedule] outside, the one string the app sets on the
+// user's behalf.
+//
+// The value is tidied the way every other string this file writes is: runs of
+// whitespace collapse and control characters are dropped, because a newline
+// arriving from a text field is a mis-paste rather than something worth keeping
+// in a TOML line. "Already set" is judged against that tidied form, so a value
+// the tidying changes still settles after one write instead of rewriting the
+// file on every call.
+[[nodiscard]] SpliceResult SetTableString(
+	const QString &text,
+	const QString &path,
+	const QString &table,
+	const QString &key,
+	const QString &value);
+
 // What a screen believes it is about to edit: the window and the preset it read
 // off the rule. Every schedule op takes one and refuses when the rule at that
 // index no longer says the same thing, so a dialog left open while the file

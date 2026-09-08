@@ -385,18 +385,32 @@ struct Position {
 	return '"' + escaped + '"';
 }
 
+// The text a basic string will actually carry: whitespace collapsed, control
+// characters dropped. Kept apart from the quoting because a caller that wants
+// to know whether the file already says this has to compare against what will
+// land, not against what it asked for - otherwise a value the quoting tidies
+// would read as changed on every single write.
+[[nodiscard]] QString BasicStringText(const QString &value) {
+	auto result = QString();
+	result.reserve(value.size());
+	for (const auto ch : value.simplified()) {
+		if (ch.unicode() >= 0x20) {
+			result += ch;
+		}
+	}
+	return result;
+}
+
 // A TOML basic string. Control characters are dropped rather than escaped: a
 // list title arrives from a text field, and a stray newline in one is a
 // mis-paste rather than something worth preserving.
 [[nodiscard]] QString QuotedValue(const QString &value) {
 	auto result = QString('"');
-	for (const auto ch : value.simplified()) {
+	for (const auto ch : BasicStringText(value)) {
 		if (ch == '"' || ch == '\\') {
 			result += '\\';
-			result += ch;
-		} else if (ch.unicode() >= 0x20) {
-			result += ch;
 		}
+		result += ch;
 	}
 	return result + '"';
 }
@@ -1215,6 +1229,141 @@ SpliceResult AddList(
 	}
 	result.changed = true;
 	return result;
+}
+
+SpliceResult SetTableString(
+		const QString &text,
+		const QString &path,
+		const QString &table,
+		const QString &key,
+		const QString &value) {
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		// Never write to a file that does not parse, for the same reason as
+		// SetTableBool: the user may be halfway through an edit, and a blind
+		// append would hand them a duplicate table to untangle on top of
+		// whatever they were already fixing.
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+	const auto tableUtf8 = table.toUtf8();
+	const auto keyUtf8 = key.toUtf8();
+	const auto tableView = std::string_view(
+		tableUtf8.constData(),
+		tableUtf8.size());
+	const auto keyView = std::string_view(keyUtf8.constData(), keyUtf8.size());
+	const auto tableNode = parsed.table().get(tableView);
+	const auto existing = tableNode ? tableNode->as_table() : nullptr;
+	const auto node = existing ? existing->get(keyView) : nullptr;
+	const auto wanted = BasicStringText(value);
+	if (node) {
+		const auto had = node->value<std::string_view>();
+		if (had && Text(*had) == wanted) {
+			return Unchanged(text);
+		}
+	}
+
+	auto lines = text.split('\n');
+	const auto quoted = QuotedValue(value);
+	auto done = false;
+	if (node) {
+		// Replace exactly the span toml++ read the value from, rather than
+		// scanning from the '=' the way the boolean does. A string can hold a
+		// '#' or a quoted space, and it can be a """ block over several lines;
+		// the recorded span is the only description of it that all three cases
+		// agree with.
+		const auto &at = node->source();
+		const auto first = int(at.begin.line);
+		const auto last = int(at.end.line);
+		const auto from = int(at.begin.column) - 1;
+		const auto till = int(at.end.column) - 1;
+		if (first >= 1
+			&& last >= first
+			&& last <= lines.size()
+			&& from >= 0
+			&& from <= lines[first - 1].size()
+			&& till >= 0
+			&& till <= lines[last - 1].size()) {
+			const auto head = lines[first - 1].left(from);
+			const auto tail = lines[last - 1].mid(till);
+			lines[first - 1] = head + quoted + tail;
+			if (last > first) {
+				lines.erase(
+					lines.begin() + first,
+					lines.begin() + last);
+			}
+			done = true;
+		}
+	}
+	auto result = QString();
+	if (done) {
+		result = lines.join('\n');
+	} else {
+		const auto assignment = u"%1 = %2"_q.arg(key, quoted);
+		if (existing && existing->is_inline()) {
+			return Refuse(text, u"[%1] is written inline; rewrite it as a table "
+				"before setting '%2' from the app."_q.arg(table, key));
+		}
+		const auto header = existing ? int(existing->source().begin.line) : 0;
+		if (header >= 1 && header <= lines.size()) {
+			if (DeclaresTable(lines[header - 1], table)) {
+				lines.insert(header, assignment);
+			} else if (lines[header - 1].trimmed().startsWith('[')) {
+				// toml++ hands back a position for a table it never saw a
+				// header for - one it invented because something deeper was
+				// written. [schedule] is the live case: a file holding nothing
+				// but [[schedule.rules]] blocks points here at the first of
+				// them, and putting the key under that line would file it
+				// inside the rule instead of the table. So write the header the
+				// file is missing, above the block that implied it.
+				lines.insert(header - 1, u"[%1]"_q.arg(TableKey(table)));
+				lines.insert(header, assignment);
+				lines.insert(header + 1, QString());
+			} else {
+				// A dotted key wrote the table - `schedule.outside = "home"'
+				// at the top level. A header inserted above that line would
+				// swallow the dotted key into it and mean something else.
+				return Refuse(text, u"[%1] is written as dotted keys (line %2); "
+					"give it a [%1] header before setting '%3' from the app."_q
+					.arg(table)
+					.arg(header)
+					.arg(key));
+			}
+			result = lines.join('\n');
+		} else {
+			result = text;
+			if (!result.isEmpty()) {
+				if (!result.endsWith('\n')) {
+					result += '\n';
+				}
+				result += '\n';
+			}
+			result += u"[%1]\n%2\n"_q.arg(table, assignment);
+		}
+	}
+
+	const auto verifyUtf8 = result.toUtf8();
+	auto verify = toml::parse(
+		std::string_view(verifyUtf8.constData(), verifyUtf8.size()),
+		path.toStdString());
+	if (!verify) {
+		return Refuse(text, u"the edit would not parse back"_q);
+	}
+	const auto back = verify.table()[tableView][keyView]
+		.value<std::string_view>();
+	if (!back || Text(*back) != wanted) {
+		return Refuse(text, u"the edit did not set %1.%2"_q.arg(table, key));
+	}
+	auto splice = SpliceResult();
+	splice.text = result;
+	splice.changed = true;
+	return splice;
 }
 
 SpliceResult SetTableBool(

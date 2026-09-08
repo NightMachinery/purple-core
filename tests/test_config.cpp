@@ -1758,6 +1758,169 @@ untouched = 1
 	CHECK_EQ(broken.text, u"[premium\nenabled = true"_q);
 }
 
+void TestSetTableString() {
+	Begin("set table string");
+
+	// The same contract as the boolean: one token changes and the rest of the
+	// user's file - spacing, comments, other tables - is left exactly as it is.
+	const auto text = uR"(# my settings
+[schedule]
+# what runs when no window does
+outside   =    "normal"   # this comment matters
+
+[other]
+untouched = 1
+)"_q;
+	const auto home = Purple::SetTableString(
+		text,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"home"_q);
+	CHECK(home.ok());
+	CHECK(home.changed);
+	CHECK(home.text.contains(
+		u"outside   =    \"home\"   # this comment matters"_q));
+	CHECK(home.text.contains(u"# what runs when no window does"_q));
+	CHECK(home.text.contains(u"# my settings"_q));
+	CHECK(home.text.contains(u"untouched = 1"_q));
+	CHECK_EQ(home.text.count('\n'), text.count('\n'));
+
+	// Setting what is already set writes nothing at all.
+	const auto same = Purple::SetTableString(
+		text,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"normal"_q);
+	CHECK(same.ok());
+	CHECK(!same.changed);
+	CHECK_EQ(same.text, text);
+
+	// A missing key joins the existing table rather than starting a new one.
+	const auto added = Purple::SetTableString(
+		u"[schedule]\n# a note\n\n[other]\nx = 1\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"normal"_q);
+	CHECK(added.ok());
+	CHECK(added.text.contains(u"outside = \"normal\""_q));
+	CHECK(added.text.contains(u"# a note"_q));
+	CHECK(Parse(added.text).ok());
+	CHECK_EQ(Parse(added.text).settings.schedule.outside, u"normal"_q);
+
+	// A missing table is appended, and an empty file gains no leading blank.
+	const auto fresh = Purple::SetTableString(
+		QString(),
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"normal"_q);
+	CHECK(fresh.ok());
+	CHECK_EQ(fresh.text, u"[schedule]\noutside = \"normal\"\n"_q);
+
+	const auto appended = Purple::SetTableString(
+		u"[other]\nx = 1\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"normal"_q);
+	CHECK(appended.ok());
+	CHECK(appended.text.startsWith(u"[other]\nx = 1\n"_q));
+	CHECK(appended.text.contains(u"[schedule]\noutside = \"normal\""_q));
+	CHECK(Parse(appended.text).ok());
+
+	// A file mid-edit is left exactly as it is.
+	const auto broken = Purple::SetTableString(
+		u"[schedule\noutside = \"normal\""_q,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"home"_q);
+	CHECK(!broken.ok());
+	CHECK(!broken.changed);
+	CHECK_EQ(broken.text, u"[schedule\noutside = \"normal\""_q);
+
+	// A quote in the value is escaped rather than closing the string early,
+	// and so is the backslash that escapes it. (`table' is one top-level key,
+	// the same as the boolean's, so this uses a real string setting rather
+	// than a dotted path the op does not take.)
+	const auto quotes = Purple::SetTableString(
+		u"[peek]\nhotkey = \"Ctrl+Alt+K\"\n"_q,
+		Path(),
+		u"peek"_q,
+		u"hotkey"_q,
+		uR"(say "hi" \ ok)"_q);
+	CHECK(quotes.ok());
+	CHECK(quotes.text.contains(uR"(hotkey = "say \"hi\" \\ ok")"_q));
+	const auto backQuotes = Parse(quotes.text);
+	CHECK(backQuotes.ok());
+	CHECK_EQ(backQuotes.settings.peek.hotkey, uR"(say "hi" \ ok)"_q);
+
+	// The value it reads back is the value it wrote, so a second call with the
+	// same text is a no-op rather than a rewrite.
+	const auto again = Purple::SetTableString(
+		quotes.text,
+		Path(),
+		u"peek"_q,
+		u"hotkey"_q,
+		uR"(say "hi" \ ok)"_q);
+	CHECK(again.ok());
+	CHECK(!again.changed);
+
+	// A '#' inside the value is part of the value, not the start of a comment:
+	// the replaced span is the one toml++ read, so nothing here scans for it.
+	const auto hash = Purple::SetTableString(
+		u"[schedule]\noutside = \"a # b\"  # real comment\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"c # d"_q);
+	CHECK(hash.ok());
+	CHECK(hash.text.contains(u"outside = \"c # d\"  # real comment"_q));
+
+	// A [schedule] with no header of its own gains one, exactly as the boolean
+	// does - this is the file the schedule screen actually meets.
+	const auto implicit = Purple::SetTableString(
+		u"# rules only\n\n[presets.home]\nlist_order = []\n\n"
+		"[[schedule.rules]]\ndays   = [\"mon\"]\nfrom   = \"09:00\"\n"
+		"to     = \"17:00\"\npreset = \"home\"\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"home"_q);
+	CHECK(implicit.ok());
+	CHECK(implicit.text.contains(u"[schedule]\noutside = \"home\"\n\n"
+		"[[schedule.rules]]"_q));
+	const auto backImplicit = Parse(implicit.text);
+	CHECK(backImplicit.ok());
+	CHECK_EQ(backImplicit.settings.schedule.outside, u"home"_q);
+	CHECK_EQ(backImplicit.settings.schedule.rules.size(), size_t(1));
+
+	// A table written as dotted keys has no header to insert under, and one
+	// inserted above would swallow it. So it says what to do instead.
+	const auto dotted = Purple::SetTableString(
+		u"schedule.rules = []\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"home"_q);
+	CHECK(!dotted.ok());
+	CHECK(dotted.error.contains(u"dotted keys"_q));
+
+	// An inline table is refused by name rather than by a parse failure the
+	// user cannot act on.
+	const auto inlined = Purple::SetTableString(
+		u"schedule = { enabled_p = true }\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"home"_q);
+	CHECK(!inlined.ok());
+	CHECK(inlined.error.contains(u"inline"_q));
+}
+
 // A schedule with everything the splicer has to survive: comments above a
 // block and beside a value, a `days' array over four lines, and a rule the
 // parser throws away sitting in the middle of the ones it keeps.
@@ -3754,6 +3917,7 @@ int main() {
 	TestSpliceScheduleAppend();
 	TestSpliceScheduleRemove();
 	TestSetTableBoolImplicitHeader();
+	TestSetTableString();
 	TestStateRoundTrip();
 	TestStateDefaults();
 	TestStateQuoting();
