@@ -356,7 +356,18 @@ std::optional<QString> ScheduleTarget(
 		return std::nullopt;
 	}
 	const auto rule = ScheduleRuleNow(schedule, now);
-	return rule ? rule->preset : NormalPreset();
+	return rule ? rule->preset : schedule.outside;
+}
+
+bool ScheduleApplies(
+		const Schedule &schedule,
+		const QString &target,
+		PresetSource activeSource) {
+	if (activeSource == PresetSource::Focus) {
+		return false;
+	}
+	return (target != schedule.outside)
+		|| (activeSource == PresetSource::Schedule);
 }
 
 const ScheduleRule *ScheduleRuleNow(

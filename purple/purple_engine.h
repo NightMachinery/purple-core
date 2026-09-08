@@ -244,14 +244,40 @@ struct Visibility {
 [[nodiscard]] std::optional<Resolved> FromCache(const ResolvedCache &cache);
 
 // What the schedule wants active at this local time: the preset of the first
-// rule covering the moment, or Normal when rules exist and none does.
+// rule covering the moment, or `schedule.outside' when rules exist and none
+// does.
 //
 // Nothing at all when the schedule is off or has no rules, which is a different
-// answer from wanting Normal and has to be: otherwise an empty [schedule]
-// section would quietly force Normal over every other way of choosing a preset.
+// answer from wanting the outside preset and has to be: otherwise an empty
+// [schedule] section would quietly force Normal over every other way of
+// choosing a preset.
 [[nodiscard]] std::optional<QString> ScheduleTarget(
 	const Schedule &schedule,
 	const QDateTime &now);
+
+// Whether a target the schedule has just moved to should take the running
+// preset with it, given what put that preset in place.
+//
+// The asymmetry between the two answers is the whole boundary rule. A window
+// STARTING is a positive instruction - "at nine, work mode" - and it overrides
+// a preset chosen by hand. A window ENDING only means the reason for that
+// preset has passed, which is no reason at all to undo something asked for, so
+// it lands only when the schedule is what put the running preset there.
+//
+// "Ending" is a move to `schedule.outside', not a move to Normal. Once the
+// preset outside every window is a key, five o'clock aiming at Home is a window
+// ending like any other and must not steamroll a manual choice - which is the
+// one thing a client mirroring `target != normal' would get wrong.
+//
+// Focus is left alone in both directions: it is the more immediate signal, and
+// a schedule fighting it would make both unreadable.
+//
+// It lives here rather than in each app's tick because there are two ticks, and
+// a rule this easy to get subtly wrong is worth having one copy of.
+[[nodiscard]] bool ScheduleApplies(
+	const Schedule &schedule,
+	const QString &target,
+	PresetSource activeSource);
 
 // The rule the schedule is inside right now, or null when none covers the
 // moment - which includes a schedule that is switched off or has no rules.

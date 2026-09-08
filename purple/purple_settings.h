@@ -340,6 +340,16 @@ struct ScheduleRule {
 
 struct Schedule {
 	bool enabled = true;
+
+	// The preset the schedule wants whenever no rule covers the moment. Not
+	// every life has stock Telegram at the edges of the day - someone whose
+	// default is Home wants five o'clock to put Home back, not Normal - so the
+	// fallback is a key rather than the constant it used to be.
+	//
+	// A name no preset backs is warned about and replaced with normal, the same
+	// rule a rule's own 'preset' follows.
+	QString outside = u"normal"_q;
+
 	std::vector<ScheduleRule> rules;
 };
 

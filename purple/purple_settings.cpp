@@ -890,6 +890,25 @@ void WarnUnknownLists(
 	result.enabled = ReadBool(table, "enabled_p", u"schedule"_q, warnings)
 		.value_or(true);
 
+	// Read before the rules, so a file that names an outside preset and no
+	// windows at all still gets the name checked rather than silently ignored.
+	if (const auto outside = ReadString(
+			table,
+			"outside",
+			u"schedule"_q,
+			warnings)) {
+		if (KnownPresetReference(presets, *outside)) {
+			result.outside = *outside;
+		} else {
+			// Falling back rather than skipping, because there is nothing to
+			// skip: something has to be wanted outside every window, and normal
+			// is the answer that behaves like the build before this key.
+			warnings.push_back(
+				u"[schedule] outside: preset '%1' does not exist, using "
+				"normal."_q.arg(*outside));
+		}
+	}
+
 	const auto rules = table.get("rules");
 	if (!rules) {
 		return result;
