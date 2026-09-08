@@ -2944,6 +2944,78 @@ void TestStateQuoting() {
 	CHECK_EQ(back.resolvedCache.lists[0].list, u"tab\there"_q);
 }
 
+// The two fingerprints, and the rule they exist for. Everything about the
+// ping-pong lives in ShouldAutoSend, so all of it is provable here: the app
+// around it has a network and a file watcher and proves nothing cheaply.
+void TestAutoSend() {
+	Begin("auto send");
+
+	const auto bytes = QByteArray("[sync]\nsend_after_save_p = true\n");
+	const auto other = QByteArray("[sync]\nsend_after_save_p = false\n");
+	const auto fingerprint = Purple::SettingsFingerprint(bytes);
+
+	// "<length>:<sha256hex>", which is the shape the Android watcher writes -
+	// the two halves of a sync have to be comparing the same string.
+	CHECK(fingerprint.startsWith(
+		QString::number(bytes.size()) + QChar(':')));
+	CHECK_EQ(int(fingerprint.size()),
+		QString::number(bytes.size()).size() + 1 + 64);
+	CHECK_EQ(fingerprint, Purple::SettingsFingerprint(bytes));
+	CHECK(fingerprint != Purple::SettingsFingerprint(other));
+
+	// Empty bytes still have a fingerprint, and it is not the empty string -
+	// which matters, because empty is what "never sent" is written as.
+	CHECK(!Purple::SettingsFingerprint(QByteArray()).isEmpty());
+
+	auto settings = Purple::Settings();
+	auto state = Purple::State();
+
+	// Off is off: nothing else is even asked.
+	CHECK(!Purple::ShouldAutoSend(settings, state, bytes, false));
+
+	settings.sync.sendAfterSave = true;
+	CHECK(Purple::ShouldAutoSend(settings, state, bytes, false));
+
+	// The import's own write never sends, even now, before anything has been
+	// recorded: the bytes came from the other device.
+	CHECK(!Purple::ShouldAutoSend(settings, state, bytes, true));
+
+	// Sent once, and the same file does not go again. A different one does.
+	state.lastSentFingerprint = fingerprint;
+	CHECK(!Purple::ShouldAutoSend(settings, state, bytes, false));
+	CHECK(Purple::ShouldAutoSend(settings, state, other, false));
+
+	// The ping-pong itself: what this device wrote because the other device
+	// sent it does not come back, however the save that follows was triggered.
+	state = Purple::State();
+	state.lastImportedFingerprint = fingerprint;
+	CHECK(!Purple::ShouldAutoSend(settings, state, bytes, false));
+	CHECK(Purple::ShouldAutoSend(settings, state, other, false));
+
+	// Both round trip, and an older state.toml that has neither reads as
+	// "never sent, never imported" rather than as anything else.
+	state = Purple::State();
+	state.activePreset = u"work"_q;
+	state.lastSentFingerprint = fingerprint;
+	state.lastImportedFingerprint = Purple::SettingsFingerprint(other);
+	const auto text = Purple::SerializeState(state);
+	const auto back = Purple::ParseState(text, u"state.toml"_q);
+	CHECK_EQ(back.lastSentFingerprint, fingerprint);
+	CHECK_EQ(back.lastImportedFingerprint,
+		Purple::SettingsFingerprint(other));
+	CHECK_EQ(Purple::SerializeState(back), text);
+
+	const auto older = Purple::ParseState(
+		u"active_preset = \"work\"\n"_q,
+		u"state.toml"_q);
+	CHECK(older.lastSentFingerprint.isEmpty());
+	CHECK(older.lastImportedFingerprint.isEmpty());
+
+	// Which is exactly the state that sends: an upgrade does not owe the user
+	// a suppressed first send.
+	CHECK(Purple::ShouldAutoSend(settings, older, bytes, false));
+}
+
 // A file exercising every resolution rule at once: a locked list, a chat in two
 // lists, a three-deep inheritance chain, and a child that empties its folders.
 [[nodiscard]] QString Presets() {
@@ -3790,6 +3862,82 @@ list_order = [ { list = "os" } ]
 	CHECK(older.resolvedCache.valid());
 	CHECK(older.resolvedCache.hideArchive);
 	CHECK(Purple::FromCache(older.resolvedCache)->hideArchive);
+}
+
+// The two flags that are off unless the file asks: one about a strip the server
+// fills in, one about sending the file itself somewhere. Both default to false,
+// which is what an older settings.toml with neither key says too.
+void TestSyncAndRecommended() {
+	Begin("sync and recommended channels");
+
+	const auto silent = Parse(uR"(
+[lists.os]
+members = [1]
+
+[presets.work]
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(silent.ok());
+	CHECK(silent.warnings.empty());
+	CHECK(!silent.settings.sync.sendAfterSave);
+	CHECK(!silent.settings.suggestions.recommendedChannels);
+
+	const auto on = Parse(uR"(
+[sync]
+send_after_save_p = true
+
+[suggestions]
+recommended_channels_p = true
+
+[lists.os]
+members = [1]
+
+[presets.work]
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(on.ok());
+	CHECK(on.warnings.empty());
+	CHECK(on.settings.sync.sendAfterSave);
+	CHECK(on.settings.suggestions.recommendedChannels);
+
+	// Written out as false, which has to read as false rather than as "said
+	// nothing" - the two agree here, but only by accident of the default.
+	const auto off = Parse(uR"(
+[sync]
+send_after_save_p = false
+
+[suggestions]
+recommended_channels_p = false
+)"_q);
+	CHECK(off.ok());
+	CHECK(off.warnings.empty());
+	CHECK(!off.settings.sync.sendAfterSave);
+	CHECK(!off.settings.suggestions.recommendedChannels);
+
+	// Anything that is not a boolean is a warning and the default, like every
+	// other flag in the file. Quoted is the mistake worth naming: "yes" is what
+	// the key looks like it should take, and TOML has no idea what it means.
+	const auto wrong = Parse(uR"(
+[sync]
+send_after_save_p = "yes"
+
+[suggestions]
+recommended_channels_p = "on"
+)"_q);
+	CHECK(wrong.ok());
+	CHECK(!wrong.settings.sync.sendAfterSave);
+	CHECK(!wrong.settings.suggestions.recommendedChannels);
+	CHECK(WarnsAbout(wrong, u"'send_after_save_p' should be true or false"_q));
+	CHECK(WarnsAbout(
+		wrong,
+		u"'recommended_channels_p' should be true or false"_q));
+
+	// And a [sync] that is not a table at all leaves the defaults standing,
+	// exactly as [suggestions] does.
+	const auto notATable = Parse(u"sync = 1\n"_q);
+	CHECK(notATable.ok());
+	CHECK(!notATable.settings.sync.sendAfterSave);
+	CHECK(WarnsAbout(notATable, u"'sync' should be a table"_q));
 }
 
 void TestReservedHotkeys() {
@@ -4794,6 +4942,7 @@ int main() {
 	TestStateRoundTrip();
 	TestStateDefaults();
 	TestStateQuoting();
+	TestAutoSend();
 	TestResolveBasics();
 	TestResolveViewName();
 	TestFallThrough();
@@ -4805,6 +4954,7 @@ int main() {
 	TestPresetHotkeys();
 	TestOverrides();
 	TestSuggestionsAndArchive();
+	TestSyncAndRecommended();
 	TestReservedHotkeys();
 	TestStories();
 	TestRecent();

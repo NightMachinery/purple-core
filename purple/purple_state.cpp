@@ -7,6 +7,7 @@ option) any later version.
 */
 #include "purple/purple_state.h"
 
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QStringList>
 
 #define TOML_EXCEPTIONS 0
@@ -348,6 +349,10 @@ State ParseState(const QString &text, const QString &path) {
 	}
 	result.scheduleTarget = ReadString(root, "schedule_target");
 	result.peekActive = ReadBool(root, "peek_active", false);
+	result.lastSentFingerprint = ReadString(root, "last_sent_fingerprint");
+	result.lastImportedFingerprint = ReadString(
+		root,
+		"last_imported_fingerprint");
 	result.overrides = ReadOverrides(root);
 	if (const auto deadline = root.get("peek_deadline_unix")) {
 		result.peekDeadlineUnix = deadline->value_or(int64(0));
@@ -368,6 +373,28 @@ bool ScheduleUnpauseDue(const State &state, int64 nowUnix) {
 	return state.schedulePaused
 		&& state.schedulePausedUntil
 		&& state.schedulePausedUntil <= nowUnix;
+}
+
+QString SettingsFingerprint(const QByteArray &bytes) {
+	const auto digest = QCryptographicHash::hash(
+		bytes,
+		QCryptographicHash::Sha256);
+	return u"%1:%2"_q
+		.arg(bytes.size())
+		.arg(QString::fromLatin1(digest.toHex()));
+}
+
+bool ShouldAutoSend(
+		const Settings &settings,
+		const State &state,
+		const QByteArray &bytes,
+		bool wroteFromImport) {
+	if (!settings.sync.sendAfterSave || wroteFromImport) {
+		return false;
+	}
+	const auto fingerprint = SettingsFingerprint(bytes);
+	return fingerprint != state.lastSentFingerprint
+		&& fingerprint != state.lastImportedFingerprint;
 }
 
 std::optional<OverrideKind> ParseOverrideKind(const QString &value) {
@@ -477,6 +504,16 @@ QString SerializeState(const State &state) {
 		.arg(Quoted(state.scheduleTarget));
 	result += u"peek_active           = %1\n"_q.arg(Boolean(state.peekActive));
 	result += u"peek_deadline_unix    = %1\n"_q.arg(state.peekDeadlineUnix);
+
+	// Their own little block, aligned to each other rather than to the run
+	// above: last_imported_fingerprint is longer than anything up there, and
+	// widening ten lines to fit it would say these belong with them. They do
+	// not. Everything above is about what this device is doing right now;
+	// these two are about what it has already told the other device.
+	result += u"last_sent_fingerprint     = %1\n"_q
+		.arg(Quoted(state.lastSentFingerprint));
+	result += u"last_imported_fingerprint = %1\n"_q
+		.arg(Quoted(state.lastImportedFingerprint));
 	result += SerializeOverrides(state.overrides);
 
 	const auto &cache = state.resolvedCache;

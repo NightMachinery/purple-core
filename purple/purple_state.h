@@ -10,6 +10,8 @@ option) any later version.
 #include "purple/purple_settings.h"
 #include "purple/purple_types.h"
 
+#include <QtCore/QByteArray>
+
 // state.toml, the machine-owned half of the configuration. Everything here is
 // rewritten whenever it changes and carries no comments, which is exactly why
 // it is a separate file: state churns constantly, and it must never touch the
@@ -169,8 +171,47 @@ struct State {
 	// each one is a thing you did on purpose and it expires by itself.
 	std::vector<Override> overrides;
 
+	// The settings.toml this device last sent to Saved Messages, and the one
+	// it last wrote after an import, as SettingsFingerprint() spells them.
+	// Empty means it has never done that - which is what an older state.toml
+	// says too, so the first auto-send after an upgrade happens normally.
+	//
+	// Two fingerprints rather than one because the two events are different
+	// claims. "I sent these bytes" stops this device from sending the same
+	// file twice; "I wrote these bytes because the other device sent them"
+	// stops it from sending them straight back, which is the ping-pong: A
+	// saves and sends, B imports and saves, B sends what it just received, A
+	// imports it, and the file bounces between two machines that agree.
+	QString lastSentFingerprint;
+	QString lastImportedFingerprint;
+
 	ResolvedCache resolvedCache;
 };
+
+// What a settings.toml is, as far as the auto-send rule cares: "<length>:<hex>"
+// where hex is the SHA-256 of the bytes. The same shape the Android watcher
+// writes, so the two halves of a sync can compare notes about the same file.
+//
+// The length is in there because it is free and it makes the string readable by
+// a person staring at a state.toml wondering why nothing sent - a bare hash
+// tells you two files differ, and this at least tells you how.
+[[nodiscard]] QString SettingsFingerprint(const QByteArray &bytes);
+
+// Whether saving these bytes should also send them to Saved Messages.
+//
+// Pure, and pure on purpose: this is the whole of the ping-pong rule, and the
+// app around it - which has a network, a Saved Messages history and a file
+// watcher - is exactly the place that rule is hardest to prove anything about.
+//
+// `wroteFromImport' is the caller saying the save it is asking about is the
+// import itself writing the file it just received. That never sends, even the
+// first time, before any fingerprint has been recorded: the bytes came from the
+// other device, and returning them is the thing this is here to stop.
+[[nodiscard]] bool ShouldAutoSend(
+	const Settings &settings,
+	const State &state,
+	const QByteArray &bytes,
+	bool wroteFromImport);
 
 // Whether the peek recorded in state is still running. A deadline of zero means
 // auto_off is turned off, so the peek runs until it is turned off by hand -
