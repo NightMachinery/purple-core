@@ -1544,6 +1544,12 @@ void WarnUnknownLists(
 			continue;
 		}
 		auto budget = ScreenTimeBudget();
+
+		// Counted before anything can reject the budget, so the ones the parser
+		// throws away still take up their place in the array. An index that
+		// shifted when a budget broke would make every edit made from a screen
+		// land on the wrong budget.
+		budget.sourceIndex = index - 1;
 		const auto target = ReadString(*fields, "target", where, warnings);
 		const auto perDay = ReadString(*fields, "per_day", where, warnings);
 		if (!target || !perDay) {

@@ -211,6 +211,49 @@ struct ScheduleRuleExpected {
 	const QString &key,
 	const QString &value);
 
+// Adds a budget at the end of wherever it belongs: after the last
+// [[screen_time.budgets]] block, or under [screen_time]'s own keys when there
+// are no budgets yet, or in a [screen_time] section written at the end of a
+// file that had none.
+//
+// 'mode', 'snooze' and 'snoozes_per_day' are written only when they are not
+// the defaults, because a file where every budget spells out what it would
+// have meant anyway is harder to read for no gain.
+[[nodiscard]] SpliceResult AppendBudget(
+	const QString &text,
+	const QString &path,
+	const ScreenTimeBudget &budget);
+
+// Rewrites one budget block in place, key by key, the way SetScheduleRule()
+// does: each key has its value replaced where it stands, is added at the end
+// of the block when the budget never had it, or - for the three that have
+// defaults - has its line taken out when the value is back to the default.
+// Everything else is left exactly where the user put it.
+//
+// `index' is ScreenTimeBudget::sourceIndex: the position in the RAW array,
+// counting the budgets the parser threw away, which is what stops a broken
+// budget in the middle of the file from moving the ones after it.
+//
+// `expectedTarget' is the target the screen read off the budget. The edit is
+// refused when the budget at that index says something else, so a dialog left
+// open while the file changed underneath cannot rewrite a budget other than
+// the one on it. A budget has no other identity: the target is what it is
+// about, and everything else about it is what the dialog is there to change.
+[[nodiscard]] SpliceResult SetBudget(
+	const QString &text,
+	const QString &path,
+	int index,
+	const QString &expectedTarget,
+	const ScreenTimeBudget &budget);
+
+// Takes one budget out, header through the line before the next block, leaving
+// the blank line and any comment above the block that follows.
+[[nodiscard]] SpliceResult RemoveBudget(
+	const QString &text,
+	const QString &path,
+	int index,
+	const QString &expectedTarget);
+
 // Exposed for the tests: the ids a list holds, in file order.
 [[nodiscard]] std::vector<PeerIdValue> ListMembers(
 	const QString &text,

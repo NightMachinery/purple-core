@@ -1169,6 +1169,289 @@ void InsertBlock(QStringList &lines, int at, QStringList block) {
 	return (inner == table) || (inner == TableKey(table));
 }
 
+// A duration the way a person writes one, and the counterpart of
+// ParseDuration(): the largest unit that divides the seconds exactly, because
+// "2h" is what somebody typing a two-hour budget writes and "7200s" is what a
+// machine would leave in their file for them to read.
+[[nodiscard]] QString DurationText(int seconds) {
+	if (seconds <= 0) {
+		return u"0"_q;
+	} else if (!(seconds % 3600)) {
+		return u"%1h"_q.arg(seconds / 3600);
+	} else if (!(seconds % 60)) {
+		return u"%1m"_q.arg(seconds / 60);
+	}
+	return u"%1s"_q.arg(seconds);
+}
+
+// How a budget is named in a message, which is also how the parser names it in
+// a warning, so the two can be read side by side.
+[[nodiscard]] QString BudgetWhere(int index) {
+	return u"screen_time budget %1"_q.arg(index + 1);
+}
+
+// The [screen_time] table. Inline is refused by name and by line, for the same
+// reason [schedule] is: editing lines inside `screen_time = { ... }' would mean
+// re-serialising the table.
+[[nodiscard]] const toml::table *FindScreenTimeTable(
+		const toml::table &root,
+		QString &error) {
+	const auto node = root.get("screen_time");
+	if (!node) {
+		error = u"settings.toml has no [screen_time] table."_q;
+		return nullptr;
+	}
+	const auto table = node->as_table();
+	if (!table) {
+		error = u"'screen_time' is not a table (line %1)."_q
+			.arg(int(node->source().begin.line));
+		return nullptr;
+	} else if (table->is_inline()) {
+		error = u"[screen_time] is written inline (line %1); rewrite it as a "
+			"table before editing the budgets from the app."_q
+			.arg(int(table->source().begin.line));
+		return nullptr;
+	}
+	return table;
+}
+
+[[nodiscard]] const toml::array *FindBudgets(
+		const toml::table &root,
+		QString &error) {
+	const auto table = FindScreenTimeTable(root, error);
+	if (!table) {
+		return nullptr;
+	}
+	const auto node = table->get("budgets");
+	if (!node) {
+		error = u"settings.toml has no [[screen_time.budgets]] blocks."_q;
+		return nullptr;
+	}
+	const auto array = node->as_array();
+	if (!array) {
+		error = u"'screen_time.budgets' is not an array (line %1)."_q
+			.arg(int(node->source().begin.line));
+		return nullptr;
+	}
+	return array;
+}
+
+// One budget by its raw position in the array. Walked as it is rather than
+// filtered: an element the parser threw away is still an element, and a budget
+// keeping its address while the one above it is broken is the whole point of
+// addressing budgets this way.
+[[nodiscard]] const toml::table *BudgetAt(
+		const toml::array &budgets,
+		int index,
+		QString &error) {
+	const auto where = BudgetWhere(index);
+	if (index < 0 || index >= int(budgets.size())) {
+		error = u"there is no %1 any more."_q.arg(where);
+		return nullptr;
+	}
+	const auto element = budgets.get(index);
+	const auto fields = element ? element->as_table() : nullptr;
+	if (!fields) {
+		error = u"%1 is not a table (line %2)."_q
+			.arg(where)
+			.arg(element ? int(element->source().begin.line) : 0);
+		return nullptr;
+	} else if (fields->is_inline()) {
+		error = u"%1 is written inline (line %2); rewrite it as a "
+			"[[screen_time.budgets]] table before editing it from the app."_q
+			.arg(where)
+			.arg(int(fields->source().begin.line));
+		return nullptr;
+	}
+	return fields;
+}
+
+// Everything the app owns in one budget, as one string, so an edit can be
+// checked against what it meant to write. Read straight off the file rather
+// than through the parser: a budget the parser drops still has to compare equal
+// to itself, or removing budget three could not prove it left budgets one and
+// two alone.
+[[nodiscard]] QString BudgetSignature(const toml::node &element) {
+	const auto fields = element.as_table();
+	if (!fields) {
+		return u"?"_q;
+	}
+	const auto value = [&](std::string_view key) -> QString {
+		const auto node = fields->get(key);
+		if (!node) {
+			return u"-"_q;
+		} else if (const auto text = node->value<std::string_view>()) {
+			return Text(*text);
+		} else if (const auto number = node->value<int64_t>()) {
+			return QString::number(qlonglong(*number));
+		} else if (const auto flag = node->value<bool>()) {
+			return *flag ? u"true"_q : u"false"_q;
+		}
+		return u"?"_q;
+	};
+	return QStringList{
+		value("target"),
+		value("per_day"),
+		value("mode"),
+		value("snooze"),
+		value("snoozes_per_day"),
+	}.join(u"|"_q);
+}
+
+// Every budget under [screen_time], in file order. The whole of what an edit
+// here could disturb: an op builds this from the file, applies to it exactly
+// the change it means to make, and refuses unless the file it wrote reads back
+// as that.
+[[nodiscard]] QStringList BudgetFingerprint(const toml::table &root) {
+	auto result = QStringList();
+	const auto node = root.get("screen_time");
+	const auto screen = node ? node->as_table() : nullptr;
+	const auto budgets = screen ? screen->get("budgets") : nullptr;
+	const auto array = budgets ? budgets->as_array() : nullptr;
+	if (!array) {
+		return result;
+	}
+	for (auto &&element : *array) {
+		result.push_back(BudgetSignature(element));
+	}
+	return result;
+}
+
+// One key of a budget block, as the file will hold it.
+struct BudgetValue {
+	QString key;
+
+	// The value as it will parse back - unquoted, and already tidied the way
+	// the quoting tidies. Nothing at all when the key belongs out of the file:
+	// the three keys that have defaults are written only when the budget means
+	// something other than the default.
+	std::optional<QString> text;
+
+	bool quoted = false;
+
+	// What the line says. QuotedValue() tidies, and `text' is already tidy, so
+	// asking twice cannot change the answer.
+	[[nodiscard]] QString written() const {
+		return quoted ? QuotedValue(*text) : *text;
+	}
+};
+
+// Every key the app owns in a budget, in the order a hand-written one puts them
+// in. One place, so a budget the app creates, a budget the app edits and the
+// signature an edit is checked against can never drift apart.
+[[nodiscard]] std::vector<BudgetValue> BudgetValues(
+		const ScreenTimeBudget &budget) {
+	const auto defaults = ScreenTimeBudget();
+	const auto string = [](const QString &key, QString value) {
+		return BudgetValue{ key, BasicStringText(value), true };
+	};
+	const auto only = [](BudgetValue value, bool differs) {
+		if (!differs) {
+			value.text = std::nullopt;
+		}
+		return value;
+	};
+	return {
+		string(u"target"_q, budget.target),
+		string(u"per_day"_q, DurationText(budget.perDaySeconds)),
+		only(
+			string(u"mode"_q, BudgetModeName(budget.mode)),
+			budget.mode != defaults.mode),
+		only(
+			string(u"snooze"_q, DurationText(budget.snoozeSeconds)),
+			budget.snoozeSeconds != defaults.snoozeSeconds),
+		only(
+			BudgetValue{
+				u"snoozes_per_day"_q,
+				QString::number(budget.snoozesPerDay),
+			},
+			budget.snoozesPerDay != defaults.snoozesPerDay),
+	};
+}
+
+// The same signature for a budget we are about to write, spelt the way we write
+// it - which is why the check below can be an equality rather than a parse. A
+// key we leave out reads back as missing, which is exactly what the default
+// means in the file.
+[[nodiscard]] QString WrittenBudgetSignature(const ScreenTimeBudget &budget) {
+	auto parts = QStringList();
+	for (const auto &value : BudgetValues(budget)) {
+		parts.push_back(value.text ? *value.text : u"-"_q);
+	}
+	return parts.join(u"|"_q);
+}
+
+// Whether the budget in the file is still the one the screen read. The target
+// is all there is to ask about: everything else in the block is what the screen
+// is open to change.
+[[nodiscard]] bool BudgetTargetMatches(
+		const toml::table &fields,
+		const QString &expected) {
+	const auto node = fields.get("target");
+	if (!node) {
+		return expected.trimmed().isEmpty();
+	}
+	const auto value = node->value<std::string_view>();
+	return value && (Text(*value).trimmed() == expected.trimmed());
+}
+
+// What can be told about a budget before writing it. The target's grammar is
+// not checked here - that is the parser's, and a second copy of it would be a
+// second thing to keep in step - so it is asked of the parser afterwards
+// instead, by BudgetReadsBack().
+[[nodiscard]] QString BudgetProblem(const ScreenTimeBudget &budget) {
+	if (BasicStringText(budget.target).trimmed().isEmpty()) {
+		return u"a screen time budget needs a target."_q;
+	} else if (budget.perDaySeconds < 0
+		|| budget.snoozeSeconds < 0
+		|| budget.snoozesPerDay < 0) {
+		return u"a screen time budget cannot ask for less than no time."_q;
+	}
+	return QString();
+}
+
+// Whether the budget we just wrote at `index' survives a real read of the file.
+// A budget written from a screen that got its target wrong would look saved and
+// then not be there, and the parser is the only thing that can say so without
+// this file holding its own copy of what a target may look like.
+[[nodiscard]] bool BudgetReadsBack(
+		const QString &text,
+		const QString &path,
+		int index) {
+	const auto parsed = ParseSettings(text, path);
+	for (const auto &budget : parsed.settings.screenTime.budgets) {
+		if (budget.sourceIndex == index) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Re-reads what we wrote and refuses unless every budget is what it should be:
+// the one we touched saying exactly what we asked for, and every other budget
+// still where it was, saying what it said. Signatures rather than text, so the
+// check does not depend on the spacing we happened to write.
+[[nodiscard]] QString VerifyBudgets(
+		const QString &text,
+		const QString &path,
+		const QStringList &expected) {
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return u"the edit would not parse back (%1:%2: %3)"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description()));
+	}
+	if (BudgetFingerprint(parsed.table()) != expected) {
+		return u"the edit left [screen_time] holding the wrong budgets"_q;
+	}
+	return QString();
+}
+
 // The lines half of writing a `pinned' array. Shared, because a preset's main
 // view and an extra view differ only in which table was located, what it is
 // called when something goes wrong, and whether there is a key to sit the fresh
@@ -2415,6 +2698,300 @@ SpliceResult SetRulesetString(
 	auto result = SpliceResult();
 	result.text = lines.join('\n');
 	if (auto failed = VerifySchedule(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	}
+	result.changed = true;
+	return result;
+}
+
+SpliceResult AppendBudget(
+		const QString &text,
+		const QString &path,
+		const ScreenTimeBudget &budget) {
+	if (const auto problem = BudgetProblem(budget); !problem.isEmpty()) {
+		return Refuse(text, problem);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+
+	auto lines = text.split('\n');
+	const auto crlf = std::any_of(lines.begin(), lines.end(), [](
+			const QString &line) {
+		return line.endsWith('\r');
+	});
+	const auto ending = crlf ? u"\r"_q : QString();
+
+	auto after = BudgetFingerprint(parsed.table());
+	const auto index = int(after.size());
+	auto at = lines.size();
+	auto section = false;
+	auto error = QString();
+	if (parsed.table().get("screen_time")) {
+		const auto table = FindScreenTimeTable(parsed.table(), error);
+		if (!table) {
+			return Refuse(text, error);
+		}
+		const auto node = table->get("budgets");
+		const auto budgets = node ? node->as_array() : nullptr;
+		if (node && !budgets) {
+			return Refuse(text, u"'screen_time.budgets' is not an array "
+				"(line %1)."_q.arg(int(node->source().begin.line)));
+		} else if (budgets && budgets->empty()) {
+			// `budgets = []' is an array the file wrote out in full, and TOML
+			// does not let a [[screen_time.budgets]] header extend one of
+			// those. Say so, rather than writing a file that will not parse.
+			return Refuse(text, u"'screen_time.budgets' is written as an empty "
+				"array (line %1); take that line out before adding a budget "
+				"from the app."_q.arg(int(node->source().begin.line)));
+		} else if (budgets) {
+			// After the last budget, which is before whatever header comes
+			// next - so the budgets stay together and a reader finds the new
+			// one where they were already looking.
+			const auto last = BudgetAt(*budgets, int(budgets->size()) - 1, error);
+			if (!last) {
+				return Refuse(text, error);
+			}
+			at = AfterBlock(lines, BlockLastLine(*last, lines));
+		} else {
+			// A [screen_time] with no budgets yet: the first one goes under
+			// the section's own keys, which is where somebody reading it looks.
+			// A [screen_time] the file never spelled out - dotted keys, or a
+			// deeper header that implied it - has no such place, so that one
+			// falls through to the end of the file, where a
+			// [[screen_time.budgets]] header still says where it belongs.
+			const auto line = int(table->source().begin.line);
+			if (line >= 1 && line <= lines.size()
+				&& DeclaresTable(lines[line - 1], u"screen_time"_q)) {
+				at = AfterBlock(lines, ScalarBlockLastLine(*table, lines));
+			}
+		}
+	} else {
+		// No screen time at all. The section header goes in with the budget, so
+		// the file gains one readable block rather than a budgets array under
+		// nothing.
+		section = true;
+	}
+	after.push_back(WrittenBudgetSignature(budget));
+
+	const auto values = BudgetValues(budget);
+	auto width = 0;
+	for (const auto &value : values) {
+		if (value.text) {
+			width = std::max(width, int(value.key.size()));
+		}
+	}
+	auto block = QStringList();
+	block.push_back(ending);
+	if (section) {
+		block.push_back(u"[screen_time]"_q + ending);
+	}
+	block.push_back(u"[[screen_time.budgets]]"_q + ending);
+	for (const auto &value : values) {
+		if (value.text) {
+			block.push_back(value.key.leftJustified(width)
+				+ u" = "_q
+				+ value.written()
+				+ ending);
+		}
+	}
+	InsertBlock(lines, at, block);
+
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifyBudgets(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	} else if (!BudgetReadsBack(result.text, path, index)) {
+		return Refuse(text, u"a budget for '%1' would not read back; check "
+			"its target."_q.arg(budget.target.trimmed()));
+	}
+	result.changed = true;
+	return result;
+}
+
+SpliceResult SetBudget(
+		const QString &text,
+		const QString &path,
+		int index,
+		const QString &expectedTarget,
+		const ScreenTimeBudget &budget) {
+	if (const auto problem = BudgetProblem(budget); !problem.isEmpty()) {
+		return Refuse(text, problem);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+	auto error = QString();
+	const auto budgets = FindBudgets(parsed.table(), error);
+	if (!budgets) {
+		return Refuse(text, error);
+	}
+	const auto fields = BudgetAt(*budgets, index, error);
+	if (!fields) {
+		return Refuse(text, error);
+	} else if (!BudgetTargetMatches(*fields, expectedTarget)) {
+		return Refuse(text, u"%1 is not the budget you were editing any more; "
+			"the file changed underneath."_q.arg(BudgetWhere(index)));
+	}
+	const auto before = BudgetFingerprint(parsed.table());
+	auto after = before;
+	after[index] = WrittenBudgetSignature(budget);
+	if (after == before) {
+		return Unchanged(text);
+	}
+
+	auto lines = text.split('\n');
+	const auto crlf = std::any_of(lines.begin(), lines.end(), [](
+			const QString &line) {
+		return line.endsWith('\r');
+	});
+	const auto ending = crlf ? u"\r"_q : QString();
+	const auto header = int(fields->source().begin.line);
+	if (header < 1 || header > lines.size()) {
+		return Refuse(text, u"could not locate %1."_q.arg(BudgetWhere(index)));
+	}
+
+	// A key the block already has is rewritten where it stands, or taken out
+	// when the budget is back to the default for it; one it never had joins the
+	// end of the block. The edits are applied from the bottom of the file
+	// upwards, so a line going away cannot move a line another edit is still
+	// pointing at - and the additions go in below all of them, at a line no
+	// edit points at.
+	auto indent = Indentation(lines[header - 1]);
+	auto topmost = 0;
+	for (auto &&[key, value] : *fields) {
+		const auto line = int(value.source().begin.line);
+		if (line > header && line <= lines.size()
+			&& (!topmost || line < topmost)) {
+			topmost = line;
+		}
+	}
+	if (topmost) {
+		indent = Indentation(lines[topmost - 1]);
+	}
+	auto edits = std::vector<std::pair<Position, std::optional<QString>>>();
+	auto additions = QStringList();
+	for (const auto &value : BudgetValues(budget)) {
+		const auto keyUtf8 = value.key.toUtf8();
+		const auto node = fields->get(
+			std::string_view(keyUtf8.constData(), keyUtf8.size()));
+		if (node) {
+			edits.push_back({
+				Position{
+					int(node->source().begin.line),
+					int(node->source().begin.column),
+				},
+				value.text
+					? std::make_optional(value.written())
+					: std::nullopt,
+			});
+		} else if (value.text) {
+			additions.push_back(
+				indent + value.key + u" = "_q + value.written() + ending);
+		}
+	}
+	if (!additions.isEmpty()) {
+		const auto at = AfterBlock(lines, BlockLastLine(*fields, lines));
+		for (auto i = additions.size(); i != 0;) {
+			lines.insert(at, additions[--i]);
+		}
+	}
+	std::sort(edits.begin(), edits.end(), [](
+			const std::pair<Position, std::optional<QString>> &a,
+			const std::pair<Position, std::optional<QString>> &b) {
+		return (a.first.line != b.first.line)
+			? (a.first.line > b.first.line)
+			: (a.first.column > b.first.column);
+	});
+	for (const auto &[at, value] : edits) {
+		const auto done = value
+			? ReplaceValue(lines, at, *value)
+			: RemoveValueLines(lines, at);
+		if (!done) {
+			return Refuse(text, u"could not rewrite %1 (line %2)."_q
+				.arg(BudgetWhere(index))
+				.arg(at.line));
+		}
+	}
+
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifyBudgets(result.text, path, after);
+		!failed.isEmpty()) {
+		return Refuse(text, failed);
+	} else if (!BudgetReadsBack(result.text, path, index)) {
+		return Refuse(text, u"a budget for '%1' would not read back; check "
+			"its target."_q.arg(budget.target.trimmed()));
+	}
+	result.changed = true;
+	return result;
+}
+
+SpliceResult RemoveBudget(
+		const QString &text,
+		const QString &path,
+		int index,
+		const QString &expectedTarget) {
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+	auto error = QString();
+	const auto budgets = FindBudgets(parsed.table(), error);
+	if (!budgets) {
+		return Refuse(text, error);
+	}
+	const auto fields = BudgetAt(*budgets, index, error);
+	if (!fields) {
+		return Refuse(text, error);
+	} else if (!BudgetTargetMatches(*fields, expectedTarget)) {
+		return Refuse(text, u"%1 is not the budget you were editing any more; "
+			"the file changed underneath."_q.arg(BudgetWhere(index)));
+	}
+	auto after = BudgetFingerprint(parsed.table());
+	after.removeAt(index);
+
+	auto lines = text.split('\n');
+	const auto header = int(fields->source().begin.line);
+	if (header < 1 || header > lines.size()) {
+		return Refuse(text, u"could not locate %1."_q.arg(BudgetWhere(index)));
+	}
+	const auto stop = AfterBlock(lines, BlockLastLine(*fields, lines));
+	if (stop < header) {
+		return Refuse(text, u"could not tell where %1 ends."_q
+			.arg(BudgetWhere(index)));
+	}
+	lines.erase(lines.begin() + (header - 1), lines.begin() + stop);
+	CloseSeam(lines, header - 1);
+
+	auto result = SpliceResult();
+	result.text = lines.join('\n');
+	if (auto failed = VerifyBudgets(result.text, path, after);
 		!failed.isEmpty()) {
 		return Refuse(text, failed);
 	}

@@ -696,6 +696,15 @@ struct ScreenTimeBudget {
 	// absolute by writing `snoozes_per_day = 0'.
 	int snoozeSeconds = 5 * 60;
 	int snoozesPerDay = 2;
+
+	// Where this budget sits in the raw [[screen_time.budgets]] array, counted
+	// from zero and counting the budgets the parser threw away - the same
+	// address, for the same reason, as ScheduleRule::sourceIndex. A budget has
+	// no name key either: what it is about is the target, and a screen editing
+	// one already has to say which budget it read.
+	//
+	// -1 for a budget that did not come from a file at all.
+	int sourceIndex = -1;
 };
 
 // The `[screen_time]' table. Off until switched on: it is a log of what you

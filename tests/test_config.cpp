@@ -2431,6 +2431,475 @@ hotkey = "Ctrl+Alt+K"
 	return result;
 }
 
+// Budgets with everything the splicer has to survive: a comment above a block
+// and beside a value, keys set away from their defaults, and a budget the
+// parser throws away sitting in the middle of the ones it keeps.
+[[nodiscard]] QString BudgetExample() {
+	return uR"(# my settings
+
+[presets.work]
+list_order = []
+
+[screen_time]
+# the log is on
+enabled_p = true
+
+# the noisy one
+[[screen_time.budgets]]
+target  = "chat:7"
+per_day = "30m"
+mode    = "hard"   # behind a cover
+snooze  = "10m"
+
+[[screen_time.budgets]]
+target  = "kind:bananas"
+per_day = "1h"
+
+[[screen_time.budgets]]
+target          = "preset:work"
+per_day         = "2h"
+snoozes_per_day = 0
+
+[peek]
+hotkey = "Ctrl+Alt+K"
+)"_q;
+}
+
+[[nodiscard]] Purple::ScreenTimeBudget Budget(
+		const QString &target,
+		int perDaySeconds) {
+	auto result = Purple::ScreenTimeBudget();
+	result.target = target;
+	result.perDaySeconds = perDaySeconds;
+	return result;
+}
+
+void TestBudgetIdentity() {
+	Begin("budget identity");
+
+	const auto parsed = Parse(BudgetExample());
+	CHECK(parsed.ok());
+	const auto &budgets = parsed.settings.screenTime.budgets;
+
+	// The middle budget names a kind that is not one, so the parser drops it -
+	// and the budget after it keeps the index it has in the file rather than
+	// moving up one. That is the whole reason the index is recorded: an edit
+	// made from a screen has to land on the budget the user was looking at.
+	CHECK_EQ(budgets.size(), size_t(2));
+	CHECK_EQ(budgets[0].sourceIndex, 0);
+	CHECK_EQ(budgets[1].sourceIndex, 2);
+	CHECK_EQ(budgets[1].preset, u"work"_q);
+	CHECK_EQ(budgets[0].snoozeSeconds, 10 * 60);
+	CHECK_EQ(budgets[0].snoozesPerDay, 2);
+	CHECK_EQ(budgets[1].snoozesPerDay, 0);
+
+	// A budget that came from nowhere says so.
+	CHECK_EQ(Purple::ScreenTimeBudget().sourceIndex, -1);
+}
+
+void TestSpliceBudgetAppend() {
+	Begin("splice budget append");
+
+	const auto text = BudgetExample();
+	auto added = Budget(u"kind:groups"_q, 45 * 60);
+	const auto first = Purple::AppendBudget(text, Path(), added);
+	CHECK(first.ok());
+	CHECK(first.changed);
+
+	// Everything at its default is left out of the file: a budget that spells
+	// out what it would have meant anyway is harder to read for no gain.
+	CHECK(first.text.contains(u"[[screen_time.budgets]]\n"
+		"target  = \"kind:groups\"\nper_day = \"45m\"\n"_q));
+	CHECK(!first.text.contains(u"soft"_q));
+
+	// It goes after the last budget and before whatever section came next.
+	CHECK(first.text.indexOf(u"kind:groups"_q)
+		> first.text.indexOf(u"snoozes_per_day = 0"_q));
+	CHECK(first.text.indexOf(u"[peek]"_q)
+		> first.text.indexOf(u"kind:groups"_q));
+	CHECK(first.text.contains(u"# the noisy one"_q));
+	CHECK(first.text.contains(u"# behind a cover"_q));
+	CHECK(first.text.contains(u"# the log is on"_q));
+
+	const auto back = Parse(first.text);
+	CHECK(back.ok());
+	CHECK_EQ(back.settings.screenTime.budgets.size(), size_t(3));
+	CHECK_EQ(back.settings.screenTime.budgets[2].sourceIndex, 3);
+	CHECK_EQ(back.settings.screenTime.budgets[2].perDaySeconds, 45 * 60);
+	CHECK_EQ(back.settings.screenTime.budgets[2].snoozesPerDay, 2);
+	CHECK(back.settings.screenTime.budgets[2].mode
+		== Purple::BudgetMode::Soft);
+
+	// A key away from its default is written, and the keys line up on the
+	// widest one that is actually there.
+	auto strict = Budget(u"all"_q, 2 * 60 * 60);
+	strict.mode = Purple::BudgetMode::Hard;
+	strict.snoozeSeconds = 90;
+	strict.snoozesPerDay = 0;
+	const auto full = Purple::AppendBudget(text, Path(), strict);
+	CHECK(full.ok());
+	CHECK(full.text.contains(u"[[screen_time.budgets]]\n"
+		"target          = \"all\"\nper_day         = \"2h\"\n"
+		"mode            = \"hard\"\nsnooze          = \"90s\"\n"
+		"snoozes_per_day = 0\n"_q));
+	CHECK_EQ(Parse(full.text).settings.screenTime.budgets[2].snoozeSeconds, 90);
+
+	// A [screen_time] with no budgets yet takes the first one under its own
+	// keys, which is where somebody reading it looks.
+	const auto bare = u"[presets.work]\nlist_order = []\n\n[screen_time]\n"
+		"# off for now\nenabled_p = false\n\n[peek]\nhotkey = \"Ctrl+K\"\n"_q;
+	const auto under = Purple::AppendBudget(
+		bare,
+		Path(),
+		Budget(u"all"_q, 60 * 60));
+	CHECK(under.ok());
+	CHECK(under.text.contains(u"# off for now\nenabled_p = false\n\n"
+		"[[screen_time.budgets]]"_q));
+	CHECK(under.text.contains(u"\n\n[peek]"_q));
+	CHECK_EQ(Parse(under.text).settings.screenTime.budgets.size(), size_t(1));
+
+	// No screen time at all: the section goes in with the budget.
+	const auto none = u"[presets.work]\nlist_order = []\n"_q;
+	const auto started = Purple::AppendBudget(
+		none,
+		Path(),
+		Budget(u"chat:5"_q, 15 * 60));
+	CHECK(started.ok());
+	CHECK(started.text.startsWith(none));
+	CHECK(started.text.contains(
+		u"\n[screen_time]\n[[screen_time.budgets]]\n"_q));
+	CHECK(Parse(started.text).ok());
+	CHECK_EQ(Parse(started.text).settings.screenTime.budgets.size(), size_t(1));
+	CHECK_EQ(Parse(started.text).settings.screenTime.budgets[0].chat, 5);
+
+	// An empty file gains no leading blank line.
+	const auto fresh = Purple::AppendBudget(
+		QString(),
+		Path(),
+		Budget(u"all"_q, 30 * 60));
+	CHECK(fresh.ok());
+	CHECK(fresh.text.startsWith(
+		u"[screen_time]\n[[screen_time.budgets]]\n"_q));
+	CHECK(fresh.text.endsWith(u"per_day = \"30m\"\n"_q));
+
+	// A file with Windows endings keeps them, including on the lines we write.
+	const auto crlf = u"[presets.work]\r\nlist_order = []\r\n\r\n"
+		"[screen_time]\r\nenabled_p = true\r\n"_q;
+	const auto kept = Purple::AppendBudget(
+		crlf,
+		Path(),
+		Budget(u"all"_q, 60 * 60));
+	CHECK(kept.ok());
+	CHECK(kept.text.contains(u"[[screen_time.budgets]]\r\n"
+		"target  = \"all\"\r\nper_day = \"1h\"\r\n"_q));
+	CHECK(!kept.text.contains(u"\n\n"_q));
+	CHECK_EQ(Parse(kept.text).settings.screenTime.budgets.size(), size_t(1));
+
+	// The refusals: an inline [screen_time], a budgets array the file wrote out
+	// in full, a target with nothing in it, and one the parser would drop.
+	const auto inlined = u"screen_time = { enabled_p = true }\n"_q;
+	const auto refused = Purple::AppendBudget(
+		inlined,
+		Path(),
+		Budget(u"all"_q, 60 * 60));
+	CHECK(!refused.ok());
+	CHECK(refused.error.contains(u"inline"_q));
+	CHECK(refused.error.contains(u"line 1"_q));
+	CHECK_EQ(refused.text, inlined);
+
+	const auto literal = u"[screen_time]\nbudgets = []\n"_q;
+	const auto array = Purple::AppendBudget(
+		literal,
+		Path(),
+		Budget(u"all"_q, 60 * 60));
+	CHECK(!array.ok());
+	CHECK(array.error.contains(u"empty array"_q));
+	CHECK_EQ(array.text, literal);
+
+	const auto nameless = Purple::AppendBudget(
+		text,
+		Path(),
+		Budget(u"   "_q, 60 * 60));
+	CHECK(!nameless.ok());
+	CHECK(nameless.error.contains(u"needs a target"_q));
+	CHECK_EQ(nameless.text, text);
+
+	const auto nonsense = Purple::AppendBudget(
+		text,
+		Path(),
+		Budget(u"chat:banana"_q, 60 * 60));
+	CHECK(!nonsense.ok());
+	CHECK(nonsense.error.contains(u"would not read back"_q));
+	CHECK_EQ(nonsense.text, text);
+
+	// A file mid-edit is left exactly as it is.
+	const auto broken = Purple::AppendBudget(
+		u"[screen_time\nenabled_p = true"_q,
+		Path(),
+		Budget(u"all"_q, 60 * 60));
+	CHECK(!broken.ok());
+	CHECK_EQ(broken.text, u"[screen_time\nenabled_p = true"_q);
+}
+
+void TestSpliceBudgetSet() {
+	Begin("splice budget set");
+
+	const auto text = BudgetExample();
+	auto edited = Budget(u"chat:7"_q, 20 * 60);
+	edited.mode = Purple::BudgetMode::Hard;
+	edited.snoozeSeconds = 10 * 60;
+	const auto changed = Purple::SetBudget(
+		text,
+		Path(),
+		0,
+		u"chat:7"_q,
+		edited);
+	CHECK(changed.ok());
+	CHECK(changed.changed);
+
+	// The value is rewritten where it stands, so the spacing and the comment
+	// beside one survive.
+	CHECK(changed.text.contains(u"per_day = \"20m\""_q));
+	CHECK(changed.text.contains(u"mode    = \"hard\"   # behind a cover"_q));
+	CHECK(changed.text.contains(u"# the noisy one"_q));
+	CHECK(changed.text.contains(u"[peek]"_q));
+	CHECK(changed.text.contains(u"snoozes_per_day = 0"_q));
+	CHECK_EQ(Parse(changed.text).settings.screenTime.budgets[0].perDaySeconds,
+		20 * 60);
+
+	// Writing what is already there writes nothing.
+	auto same = Budget(u"preset:work"_q, 2 * 60 * 60);
+	same.snoozesPerDay = 0;
+	const auto quiet = Purple::SetBudget(
+		text,
+		Path(),
+		2,
+		u"preset:work"_q,
+		same);
+	CHECK(quiet.ok());
+	CHECK(!quiet.changed);
+	CHECK_EQ(quiet.text, text);
+
+	// Everything back to its default takes those keys out of the file: a
+	// screen says "the default" by not writing it down.
+	const auto plain = Purple::SetBudget(
+		text,
+		Path(),
+		0,
+		u"chat:7"_q,
+		Budget(u"chat:7"_q, 30 * 60));
+	CHECK(plain.ok());
+	CHECK(plain.changed);
+	CHECK(!plain.text.contains(u"mode"_q));
+	CHECK(!plain.text.contains(u"# behind a cover"_q));
+	CHECK(!plain.text.contains(u"snooze  ="_q));
+	CHECK(plain.text.contains(u"# the noisy one\n[[screen_time.budgets]]\n"
+		"target  = \"chat:7\"\nper_day = \"30m\"\n\n"_q));
+	const auto stripped = Parse(plain.text);
+	CHECK(stripped.ok());
+	CHECK_EQ(stripped.settings.screenTime.budgets.size(), size_t(2));
+	CHECK(stripped.settings.screenTime.budgets[0].mode
+		== Purple::BudgetMode::Soft);
+	CHECK_EQ(stripped.settings.screenTime.budgets[0].snoozeSeconds, 5 * 60);
+	CHECK_EQ(stripped.settings.screenTime.budgets[0].snoozesPerDay, 2);
+
+	// And back again: a key the block no longer has joins the end of it.
+	auto restored = Budget(u"chat:7"_q, 30 * 60);
+	restored.mode = Purple::BudgetMode::Hard;
+	restored.snoozeSeconds = 60;
+	restored.snoozesPerDay = 1;
+	const auto again = Purple::SetBudget(
+		plain.text,
+		Path(),
+		0,
+		u"chat:7"_q,
+		restored);
+	CHECK(again.ok());
+	CHECK(again.text.contains(u"target  = \"chat:7\"\nper_day = \"30m\"\n"
+		"mode = \"hard\"\nsnooze = \"1m\"\nsnoozes_per_day = 1\n"_q));
+	const auto whole = Parse(again.text);
+	CHECK(whole.ok());
+	CHECK_EQ(whole.settings.screenTime.budgets.size(), size_t(2));
+	CHECK(whole.settings.screenTime.budgets[0].mode
+		== Purple::BudgetMode::Hard);
+	CHECK_EQ(whole.settings.screenTime.budgets[0].snoozeSeconds, 60);
+	CHECK_EQ(whole.settings.screenTime.budgets[0].snoozesPerDay, 1);
+
+	// The broken budget in the middle is addressable like any other, and fixing
+	// it leaves the budgets on either side of it alone.
+	const auto repaired = Purple::SetBudget(
+		text,
+		Path(),
+		1,
+		u"kind:bananas"_q,
+		Budget(u"kind:channels"_q, 60 * 60));
+	CHECK(repaired.ok());
+	CHECK(repaired.text.contains(u"target  = \"kind:channels\""_q));
+	const auto three = Parse(repaired.text);
+	CHECK(three.ok());
+	CHECK_EQ(three.settings.screenTime.budgets.size(), size_t(3));
+	CHECK_EQ(three.settings.screenTime.budgets[0].sourceIndex, 0);
+	CHECK_EQ(three.settings.screenTime.budgets[1].sourceIndex, 1);
+	CHECK_EQ(three.settings.screenTime.budgets[2].sourceIndex, 2);
+	CHECK_EQ(three.settings.screenTime.budgets[0].chat, 7);
+	CHECK_EQ(three.settings.screenTime.budgets[2].preset, u"work"_q);
+
+	// The budget the screen read is not the budget in the file any more, so the
+	// edit is refused rather than landing on whatever is there now.
+	const auto stale = Purple::SetBudget(
+		text,
+		Path(),
+		2,
+		u"chat:7"_q,
+		Budget(u"chat:7"_q, 60 * 60));
+	CHECK(!stale.ok());
+	CHECK(!stale.changed);
+	CHECK_EQ(stale.text, text);
+	CHECK(stale.error.contains(u"changed underneath"_q));
+
+	const auto gone = Purple::SetBudget(
+		text,
+		Path(),
+		9,
+		u"chat:7"_q,
+		Budget(u"chat:7"_q, 60 * 60));
+	CHECK(!gone.ok());
+	CHECK_EQ(gone.text, text);
+
+	// A budget written inline is a table the app would have to re-serialise, so
+	// it says so, with the line to go and look at.
+	const auto inlined = u"[screen_time]\nbudgets = [{ target = \"all\", "
+		"per_day = \"1h\" }]\n"_q;
+	const auto refused = Purple::SetBudget(
+		inlined,
+		Path(),
+		0,
+		u"all"_q,
+		Budget(u"all"_q, 30 * 60));
+	CHECK(!refused.ok());
+	CHECK(refused.error.contains(u"inline"_q));
+	CHECK(refused.error.contains(u"line 2"_q));
+	CHECK_EQ(refused.text, inlined);
+
+	// And a budget the parser would throw away is refused before it is written,
+	// rather than being saved into a file that then drops it.
+	const auto nonsense = Purple::SetBudget(
+		text,
+		Path(),
+		0,
+		u"chat:7"_q,
+		Budget(u"kind:bananas"_q, 30 * 60));
+	CHECK(!nonsense.ok());
+	CHECK(nonsense.error.contains(u"would not read back"_q));
+	CHECK_EQ(nonsense.text, text);
+
+	// A rewritten value keeps the carriage return that ends its line.
+	const auto crlf = u"[screen_time]\r\n[[screen_time.budgets]]\r\n"
+		"target = \"all\"\r\nper_day = \"1h\"\r\n"_q;
+	const auto windows = Purple::SetBudget(
+		crlf,
+		Path(),
+		0,
+		u"all"_q,
+		Budget(u"all"_q, 30 * 60));
+	CHECK(windows.ok());
+	CHECK(windows.text.contains(u"per_day = \"30m\"\r\n"_q));
+	CHECK(!windows.text.contains(u"\n\n"_q));
+	CHECK_EQ(
+		Parse(windows.text).settings.screenTime.budgets[0].perDaySeconds,
+		30 * 60);
+}
+
+void TestSpliceBudgetRemove() {
+	Begin("splice budget remove");
+
+	const auto text = BudgetExample();
+	const auto first = Purple::RemoveBudget(text, Path(), 0, u"chat:7"_q);
+	CHECK(first.ok());
+	CHECK(first.changed);
+	CHECK(!first.text.contains(u"chat:7"_q));
+	CHECK(!first.text.contains(u"# behind a cover"_q));
+
+	// The comment above the block it took out stays - it is the user's, and
+	// nothing here can tell whether it was about the budget or about the
+	// section. So does the blank line above the block that follows.
+	CHECK(first.text.contains(u"# the noisy one\n\n[[screen_time.budgets]]\n"
+		"target  = \"kind:bananas\""_q));
+	CHECK(first.text.contains(u"# the log is on"_q));
+	CHECK(first.text.contains(u"[peek]"_q));
+
+	const auto back = Parse(first.text);
+	CHECK(back.ok());
+	CHECK_EQ(back.settings.screenTime.budgets.size(), size_t(1));
+	CHECK_EQ(back.settings.screenTime.budgets[0].sourceIndex, 1);
+	CHECK_EQ(back.settings.screenTime.budgets[0].preset, u"work"_q);
+
+	// The broken one in the middle goes by the same address as any other, and
+	// the two it sat between keep theirs.
+	const auto middle = Purple::RemoveBudget(
+		text,
+		Path(),
+		1,
+		u"kind:bananas"_q);
+	CHECK(middle.ok());
+	CHECK(!middle.text.contains(u"bananas"_q));
+	const auto two = Parse(middle.text);
+	CHECK(two.ok());
+	CHECK_EQ(two.settings.screenTime.budgets.size(), size_t(2));
+	CHECK_EQ(two.settings.screenTime.budgets[0].sourceIndex, 0);
+	CHECK_EQ(two.settings.screenTime.budgets[1].sourceIndex, 1);
+	CHECK_EQ(two.settings.screenTime.budgets[1].preset, u"work"_q);
+
+	// The last budget leaves the section that follows it where it was.
+	const auto last = Purple::RemoveBudget(
+		text,
+		Path(),
+		2,
+		u"preset:work"_q);
+	CHECK(last.ok());
+	CHECK(last.text.contains(u"per_day = \"1h\"\n\n[peek]"_q));
+	CHECK(!last.text.contains(u"preset:work"_q));
+	CHECK_EQ(Parse(last.text).settings.screenTime.budgets.size(), size_t(1));
+
+	// The only budget there was leaves the section itself standing.
+	const auto single = u"[presets.work]\nlist_order = []\n\n[screen_time]\n"
+		"enabled_p = true\n\n[[screen_time.budgets]]\ntarget = \"all\"\n"
+		"per_day = \"1h\"\n"_q;
+	const auto emptied = Purple::RemoveBudget(single, Path(), 0, u"all"_q);
+	CHECK(emptied.ok());
+	CHECK_EQ(
+		emptied.text,
+		u"[presets.work]\nlist_order = []\n\n[screen_time]\n"
+			"enabled_p = true\n"_q);
+	CHECK(Parse(emptied.text).settings.screenTime.budgets.empty());
+	CHECK(Parse(emptied.text).settings.screenTime.enabled);
+
+	// The same refusals as the other ops.
+	const auto stale = Purple::RemoveBudget(text, Path(), 2, u"chat:7"_q);
+	CHECK(!stale.ok());
+	CHECK(stale.error.contains(u"changed underneath"_q));
+	CHECK_EQ(stale.text, text);
+
+	const auto gone = Purple::RemoveBudget(text, Path(), 9, u"chat:7"_q);
+	CHECK(!gone.ok());
+	CHECK_EQ(gone.text, text);
+
+	const auto missing = Purple::RemoveBudget(
+		u"[screen_time]\nenabled_p = true\n"_q,
+		Path(),
+		0,
+		u"all"_q);
+	CHECK(!missing.ok());
+	CHECK(missing.error.contains(u"no [[screen_time.budgets]]"_q));
+
+	const auto inlined = u"[screen_time]\nbudgets = [{ target = \"all\", "
+		"per_day = \"1h\" }]\n"_q;
+	const auto refused = Purple::RemoveBudget(inlined, Path(), 0, u"all"_q);
+	CHECK(!refused.ok());
+	CHECK(refused.error.contains(u"inline"_q));
+	CHECK_EQ(refused.text, inlined);
+}
+
 void TestSpliceRulesets() {
 	Begin("splice rulesets");
 
@@ -5820,6 +6289,10 @@ int main() {
 	TestSpliceScheduleRemove();
 	TestSpliceRulesets();
 	TestSpliceRulesetRules();
+	TestBudgetIdentity();
+	TestSpliceBudgetAppend();
+	TestSpliceBudgetSet();
+	TestSpliceBudgetRemove();
 	TestSetTableBoolImplicitHeader();
 	TestSetTableString();
 	TestStateRoundTrip();
