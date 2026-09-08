@@ -5266,6 +5266,304 @@ list_order = []
 		device).has_value());
 }
 
+// The one line every screen draws about the schedule, which was decided twice
+// and in two different shapes: the desktop drew seven cases and Android eight,
+// and the eighth - "there are rules, but none of them are this device's" - is
+// the one a phone holding the laptop's schedule sees every day.
+void TestScheduleStatus() {
+	Begin("schedule status");
+
+	// 2026-08-17 is a Monday, so dayOfWeek() runs 1..7 across that week, and
+	// weekday 8 is the Monday after it.
+	const auto at = [](int weekday, int hour, int minute) {
+		return QDateTime(
+			QDate(2026, 8, 16 + weekday),
+			QTime(hour, minute));
+	};
+	const auto seconds = [](const QDateTime &when) {
+		return int64(when.toSecsSinceEpoch());
+	};
+	using Kind = Purple::ScheduleStatusKind;
+	const auto anywhere = Purple::DeviceIdentity();
+	const auto idle = Purple::State();
+
+	// Work with lunch nested inside it, and a night window crossing midnight.
+	const auto parsed = Parse(uR"(
+[presets.work]
+list_order = []
+
+[presets.lunch]
+list_order = []
+
+[presets.home]
+list_order = []
+
+[presets.night]
+list_order = []
+
+[schedule]
+outside = "home"
+
+[[schedule.rules]]
+days   = ["mon", "tue"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+
+[[schedule.rules]]
+days   = ["mon"]
+from   = "12:00"
+to     = "13:00"
+preset = "lunch"
+
+[[schedule.rules]]
+days   = ["fri"]
+from   = "22:00"
+to     = "06:00"
+preset = "night"
+)"_q);
+	CHECK(parsed.ok());
+	const auto week = [&](const QDateTime &when) {
+		return Purple::ScheduleStatusNow(parsed.settings, idle, when, anywhere);
+	};
+
+	// Before the first window: what runs is `outside', and the next window
+	// opens later today - which is the case the bare "09:00" wording is for.
+	const auto early = week(at(1, 8, 0));
+	CHECK(early.kind == Kind::OutsideWindow);
+	CHECK_EQ(early.outside, u"home"_q);
+	CHECK_EQ(early.preset, QString());
+	CHECK_EQ(early.till, -1);
+	CHECK_EQ(early.nextStart, seconds(at(1, 9, 0)));
+	CHECK_EQ(early.nextPreset, u"work"_q);
+	CHECK_EQ(early.pausedUntil, int64(0));
+
+	// Inside one: the preset, the minute it ends and what takes over then, so
+	// the whole "work until 17:00, then home" sentence is here already. The
+	// next start is filled in too, and inside a window it can be a rule nested
+	// in the one running - lunch, at noon.
+	const auto working = week(at(1, 9, 30));
+	CHECK(working.kind == Kind::InsideWindow);
+	CHECK_EQ(working.preset, u"work"_q);
+	CHECK_EQ(working.till, 17 * 60);
+	CHECK_EQ(working.outside, u"home"_q);
+	CHECK_EQ(working.nextStart, seconds(at(1, 12, 0)));
+	CHECK_EQ(working.nextPreset, u"lunch"_q);
+
+	// The narrowest window covering the moment is the one reported, the same
+	// rule ScheduleRuleNow follows - and from inside lunch the next start is on
+	// another day, because Monday has nothing left to open.
+	const auto lunch = week(at(1, 12, 30));
+	CHECK(lunch.kind == Kind::InsideWindow);
+	CHECK_EQ(lunch.preset, u"lunch"_q);
+	CHECK_EQ(lunch.till, 13 * 60);
+	CHECK_EQ(lunch.nextStart, seconds(at(2, 9, 0)));
+	CHECK_EQ(lunch.nextPreset, u"work"_q);
+
+	// A window that crosses midnight is still the window it started in, and it
+	// ends at a `till' smaller than its `from'.
+	const auto night = week(at(5, 23, 0));
+	CHECK(night.kind == Kind::InsideWindow);
+	CHECK_EQ(night.preset, u"night"_q);
+	CHECK_EQ(night.till, 6 * 60);
+	const auto small = week(at(6, 2, 0));
+	CHECK(small.kind == Kind::InsideWindow);
+	CHECK_EQ(small.preset, u"night"_q);
+
+	// ... and the search for the next one wraps past Sunday to get back to
+	// Monday morning rather than running off the end of the week.
+	CHECK_EQ(night.nextStart, seconds(at(8, 9, 0)));
+	CHECK_EQ(night.nextPreset, u"work"_q);
+	const auto saturday = week(at(6, 7, 0));
+	CHECK(saturday.kind == Kind::OutsideWindow);
+	CHECK_EQ(saturday.nextStart, seconds(at(8, 9, 0)));
+
+	// The other way a week wraps: today's occurrence has been and gone, so the
+	// rule's turn comes round in seven days rather than not at all.
+	const auto only = Parse(uR"(
+[presets.work]
+list_order = []
+
+[[schedule.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)"_q);
+	CHECK(only.ok());
+	const auto after = Purple::ScheduleStatusNow(
+		only.settings,
+		idle,
+		at(1, 18, 0),
+		anywhere);
+	CHECK(after.kind == Kind::OutsideWindow);
+	CHECK_EQ(after.outside, Purple::NormalPreset());
+	CHECK_EQ(after.nextStart, seconds(at(8, 9, 0)));
+	CHECK_EQ(after.nextPreset, u"work"_q);
+
+	// A pause is what is true about a schedule that is held off, whatever the
+	// windows say, and the two shapes of it are told apart by the deadline.
+	auto held = Purple::State();
+	held.schedulePaused = true;
+	const auto open = Purple::ScheduleStatusNow(
+		parsed.settings,
+		held,
+		at(1, 9, 30),
+		anywhere);
+	CHECK(open.kind == Kind::Paused);
+	CHECK_EQ(open.pausedUntil, int64(0));
+
+	// The outside preset comes back under a pause as well: it is a fact about
+	// the file, not about what is running, and a row showing it must not blink
+	// out while the schedule is held.
+	CHECK_EQ(open.outside, u"home"_q);
+
+	auto until = held;
+	until.schedulePausedUntil = seconds(at(1, 14, 0));
+	const auto deadline = Purple::ScheduleStatusNow(
+		parsed.settings,
+		until,
+		at(1, 9, 30),
+		anywhere);
+	CHECK(deadline.kind == Kind::PausedUntil);
+	CHECK_EQ(deadline.pausedUntil, seconds(at(1, 14, 0)));
+
+	// A deadline that has passed is not a pause at all. The tick lifts it on
+	// its next pass; saying "paused until 14:00" at half past two in the
+	// meantime would be reading the file out rather than answering the
+	// question.
+	const auto lapsed = Purple::ScheduleStatusNow(
+		parsed.settings,
+		until,
+		at(1, 14, 30),
+		anywhere);
+	CHECK(lapsed.kind == Kind::InsideWindow);
+	CHECK_EQ(lapsed.preset, u"work"_q);
+	CHECK_EQ(lapsed.pausedUntil, int64(0));
+
+	// Switched off in the file, which outranks the windows and is outranked by
+	// a live pause.
+	const auto stopped = Parse(uR"(
+[presets.work]
+list_order = []
+
+[schedule]
+enabled_p = false
+outside   = "work"
+
+[[schedule.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)"_q);
+	CHECK(stopped.ok());
+	const auto off = Purple::ScheduleStatusNow(
+		stopped.settings,
+		idle,
+		at(1, 9, 30),
+		anywhere);
+	CHECK(off.kind == Kind::Off);
+	CHECK_EQ(off.outside, u"work"_q);
+	CHECK_EQ(off.nextStart, int64(0));
+
+	// A file that says nothing about a schedule. Deliberately not narrowed to
+	// this device's rulesets, so a ruleset being written for the phone still
+	// counts as a schedule on the laptop - see NoneHere below.
+	const auto silent = Parse(uR"(
+[presets.work]
+list_order = []
+)"_q);
+	CHECK(silent.ok());
+	CHECK(Purple::ScheduleStatusNow(
+		silent.settings,
+		idle,
+		at(1, 9, 30),
+		anywhere).kind == Kind::NotConfigured);
+
+	// A [schedule] section that only moves the outside preset says nothing
+	// about a schedule either: nothing ever runs, so there is no line to draw
+	// about it. This is the desktop's ScheduleConfigured() answer, kept.
+	const auto bare = Parse(uR"(
+[presets.home]
+list_order = []
+
+[schedule]
+outside = "home"
+)"_q);
+	CHECK(bare.ok());
+	CHECK(Purple::ScheduleStatusNow(
+		bare.settings,
+		idle,
+		at(1, 9, 30),
+		anywhere).kind == Kind::NotConfigured);
+
+	// A ruleset with nothing in it is a schedule with no rules - the file has
+	// been started rather than left unwritten.
+	const auto empty = Parse(uR"(
+[presets.work]
+list_order = []
+
+[[schedule.rulesets]]
+name = "weekdays"
+)"_q);
+	CHECK(empty.ok());
+	const auto none = Purple::ScheduleStatusNow(
+		empty.settings,
+		idle,
+		at(1, 9, 30),
+		anywhere);
+	CHECK(none.kind == Kind::NoRules);
+	CHECK_EQ(none.nextStart, int64(0));
+	CHECK_EQ(none.nextPreset, QString());
+
+	// Rules, but every one of them in a ruleset for some other device. A
+	// different thing to be told from "no rules", and the answer this laptop
+	// gives about the phone's schedule.
+	const auto elsewhere = Parse(uR"(
+[presets.work]
+list_order = []
+
+[presets.night]
+list_order = []
+
+[[schedule.rulesets]]
+name    = "phone"
+device  = "mobile"
+outside = "night"
+
+[[schedule.rulesets.rules]]
+days   = ["mon"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)"_q);
+	CHECK(elsewhere.ok());
+	const auto here = Purple::ScheduleStatusNow(
+		elsewhere.settings,
+		idle,
+		at(1, 9, 30),
+		anywhere);
+	CHECK(here.kind == Kind::NoneHere);
+	CHECK_EQ(here.nextStart, int64(0));
+
+	// The outside a ruleset this device does not run names is not this
+	// device's: the key stands, which is what the row above the line shows.
+	CHECK_EQ(here.outside, Purple::NormalPreset());
+
+	// The same file on the device it was written for, which is also where the
+	// ruleset's own `outside' overrides the key.
+	const auto phone = Purple::ScheduleStatusNow(
+		elsewhere.settings,
+		idle,
+		at(1, 9, 30),
+		Device(u"pixel-1"_q, u"android"_q, u"mobile"_q));
+	CHECK(phone.kind == Kind::InsideWindow);
+	CHECK_EQ(phone.preset, u"work"_q);
+	CHECK_EQ(phone.outside, u"night"_q);
+	CHECK_EQ(phone.nextStart, seconds(at(8, 9, 0)));
+}
+
 // The OS focus policy, which was written twice and agreed everywhere but the
 // missed-window case below - where the desktop copy simply had no such rule.
 void TestFocusStep() {
@@ -6891,6 +7189,7 @@ int main() {
 	TestDevices();
 	TestSchedulePauseUntil();
 	TestScheduleStep();
+	TestScheduleStatus();
 	TestFocusStep();
 	TestResolvedCache();
 	TestLastSeenKeys();

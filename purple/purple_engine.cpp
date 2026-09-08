@@ -833,4 +833,148 @@ std::optional<FocusTick> FocusStep(
 		: std::optional<FocusTick>(std::move(result));
 }
 
+namespace {
+
+// The next moment a window opens, with the rule that opens it.
+struct NextWindow {
+	QDateTime start;
+	const ScheduleRule *rule = nullptr;
+};
+
+// A schedule repeats weekly, so the search is bounded: each rule's start, on
+// each day it names, at its next occurrence from now, wrapping past Sunday.
+//
+// Nothing here worries about which rule would actually WIN at that moment. The
+// earliest start is the earliest moment the answer can change, which is when
+// the line asking the question is due to be rewritten anyway.
+//
+// Over real dates rather than over minutes counted from Monday midnight,
+// because the two part company in every week a clock change crosses - and
+// because a caller has to be able to say "Mon 09:00" for a window that is not
+// today, which a position in the week cannot tell it.
+[[nodiscard]] std::optional<NextWindow> ScheduleNextWindow(
+		const ScheduleForDevice &active,
+		const QDateTime &now) {
+	auto result = std::optional<NextWindow>();
+	const auto today = now.date().dayOfWeek();
+	for (const auto pointer : active.rules) {
+		const auto &rule = *pointer;
+		if (!rule.enabled) {
+			continue;
+		}
+		for (const auto day : rule.days) {
+			const auto ahead = (day - today + 7) % 7;
+			const auto midnight = now.date().addDays(ahead).startOfDay();
+			if (!midnight.isValid()) {
+				// A date whose midnight does not exist, which is a real thing
+				// in the timezones that move the clock at midnight. Skipping it
+				// costs one candidate out of seven and keeps every comparison
+				// below between two valid moments.
+				continue;
+			}
+			auto when = midnight.addSecs(rule.from * 60);
+			if (when <= now) {
+				// Today's occurrence has been and gone, so this rule's turn
+				// comes round with the week. A window opening at this very
+				// minute goes the same way: it has already opened, and saying
+				// what is open is ScheduleRuleNow's job rather than this one's.
+				when = when.addDays(7);
+			}
+			if (!result || when < result->start) {
+				result = NextWindow{ .start = when, .rule = &rule };
+			}
+		}
+	}
+	return result;
+}
+
+// Whether the file has any rule written in it anywhere, this device's or not,
+// switched on or not. It is what tells "a schedule with no rules" from "rules,
+// but none of them this device's" once the resolution has come back empty.
+//
+// A rule the user switched off counts: it is in the file, the screen lists it,
+// and "no rules" said about a file full of them would read as data loss.
+[[nodiscard]] bool ScheduleHasRules(const Schedule &schedule) {
+	return !schedule.rules.empty()
+		|| std::any_of(
+			schedule.rulesets.begin(),
+			schedule.rulesets.end(),
+			[](const ScheduleRuleset &ruleset) {
+				return !ruleset.rules.empty();
+			});
+}
+
+} // namespace
+
+ScheduleStatus ScheduleStatusNow(
+		const Settings &settings,
+		const State &state,
+		const QDateTime &now,
+		const DeviceIdentity &device) {
+	const auto &schedule = settings.schedule;
+	const auto active = ActiveSchedule(schedule, device);
+	auto result = ScheduleStatus();
+	result.outside = active.outside;
+
+	// "The file says something about a schedule at all", deliberately NOT
+	// narrowed to the rulesets this device runs. A ruleset written for the
+	// phone is a schedule the user is in the middle of editing, and a status
+	// line - or the pause row above it - that vanished from the laptop while
+	// they wrote it would read as the file having broken. That is what
+	// NoneHere below is for instead.
+	//
+	// The rulesets are the test because the parser materialises one even for a
+	// flat [[schedule.rules]] array, so a file written before rulesets existed
+	// answers exactly as it did before. The flat list is asked as well, for the
+	// Schedule nobody parsed - one assembled in a test or by a caller filling
+	// the list in - which ActiveSchedule already accommodates and which
+	// describes a schedule by any honest reading of the word.
+	if (schedule.rulesets.empty() && schedule.rules.empty()) {
+		return result;
+	}
+
+	// A pause outranks the switch, the way it does in ScheduleStep - which
+	// stops at a live pause before it ever asks whether the schedule is enabled
+	// - because while something is held off, "held off" is the true thing to
+	// say about it.
+	//
+	// A pause whose deadline has passed is not one. The next tick lifts it and
+	// then catches up on the windows it slept through; until that tick lands, a
+	// line reading "paused until 14:00" at half past two would be describing
+	// the file rather than the schedule.
+	if (state.schedulePaused
+		&& !ScheduleUnpauseDue(state, now.toSecsSinceEpoch())) {
+		result.pausedUntil = state.schedulePausedUntil;
+		result.kind = result.pausedUntil
+			? ScheduleStatusKind::PausedUntil
+			: ScheduleStatusKind::Paused;
+		return result;
+	}
+	if (!schedule.enabled) {
+		result.kind = ScheduleStatusKind::Off;
+		return result;
+	}
+	if (active.rules.empty()) {
+		// Two different things to be told, and with rulesets the second is the
+		// one a phone holding the laptop's schedule goes on seeing - it is not
+		// a file with nothing in it, it is a file with nothing in it for here.
+		result.kind = ScheduleHasRules(schedule)
+			? ScheduleStatusKind::NoneHere
+			: ScheduleStatusKind::NoRules;
+		return result;
+	}
+	if (const auto rule = ScheduleRuleNow(active, now)) {
+		result.kind = ScheduleStatusKind::InsideWindow;
+		result.preset = rule->preset;
+		result.till = rule->till;
+	} else {
+		result.kind = ScheduleStatusKind::OutsideWindow;
+	}
+	if (const auto next = ScheduleNextWindow(active, now)) {
+		result.nextStart = next->start.toSecsSinceEpoch();
+		result.nextPreset = next->rule->preset;
+	}
+	return result;
+}
+
 } // namespace Purple

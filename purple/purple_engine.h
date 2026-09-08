@@ -535,4 +535,109 @@ struct FocusTick {
 	const QDateTime &now,
 	const DeviceIdentity &device);
 
+// Which sentence the schedule's one-line status is. Eight of them, because a
+// schedule can be unwritten, held off, switched off, empty, somebody else's or
+// actually running, and a line that collapsed any two of those would be
+// describing one situation while the user was looking at another.
+enum class ScheduleStatusKind : uchar {
+	// The file says nothing about a schedule, so there is no line to draw.
+	NotConfigured,
+
+	// Held off by hand, until it is lifted the same way.
+	Paused,
+
+	// Held off until a moment - `pausedUntil'.
+	PausedUntil,
+
+	// `[schedule] enabled_p = false': written down and switched off.
+	Off,
+
+	// A schedule with no rules in it at all.
+	NoRules,
+
+	// Rules, but none in a ruleset this device runs. A different thing to be
+	// told from NoRules, and the one a phone holding the laptop's schedule
+	// goes on seeing.
+	NoneHere,
+
+	// A rule covers this moment: `preset' until `till', then `outside'.
+	InsideWindow,
+
+	// None does, so `outside' is what runs - until `nextStart', when there is
+	// one at all.
+	OutsideWindow,
+};
+
+// Everything one line about the schedule needs, with nothing left to work out.
+//
+// The WORDING stays in the apps and is not to follow the deciding in here.
+// Android's strings live in strings.xml, addressed by resource id and
+// translated through the usual pipeline; the desktop's are QStrings written
+// where they are used. There is no shape this could hold both in: it would have
+// to invent a string table the core has no business owning, and one of the two
+// apps would lose its translations on the way into it. Moving them would be a
+// change of mechanism dressed up as a cleanup - so the core says WHICH sentence
+// and hands over every part of it, and each app writes the sentence.
+struct ScheduleStatus {
+	ScheduleStatusKind kind = ScheduleStatusKind::NotConfigured;
+
+	// The preset the rule covering this moment turns on, and the minute of the
+	// local day its window closes - `till' the way a rule spells it, so a
+	// window crossing midnight ends at a small number. InsideWindow only; empty
+	// and -1 otherwise.
+	QString preset;
+	int till = -1;
+
+	// The preset the schedule wants between the windows: the ACTIVE one, which
+	// this device's chosen rulesets may have overridden the `[schedule]
+	// outside' key with. Filled in whatever the kind, because the line inside a
+	// window says it too - it is what takes over when the window ends.
+	QString outside;
+
+	// When the next window opens, as unix seconds, and the preset it will
+	// bring. Zero and empty when no rule this device runs ever opens one again,
+	// which is a schedule with no rules of this device's or one whose every
+	// rule names no day.
+	//
+	// The preset as well as the moment, because "next: work at 09:00" needs
+	// both and finding it on the far side would mean a second copy of this
+	// search, kept in step with this one by hand.
+	//
+	// Filled in inside a window too, where it is the next start after this
+	// moment - which for a rule nested in the running one can be inside the
+	// window that is running.
+	int64 nextStart = 0;
+	QString nextPreset;
+
+	// When a pause runs out, as unix seconds. Zero for a pause with no deadline
+	// - which is what tells Paused from PausedUntil - and zero when nothing is
+	// paused at all.
+	int64 pausedUntil = 0;
+};
+
+// What the schedule is doing at this moment, decided once for both apps.
+//
+// It is here for the reason the two ticks are: the shape of this line was
+// worked out twice and the two answers had already parted company. One app
+// tells "no rules" and "none of them are this device's" apart while the other
+// says "no rules for this device" to both, and each hunted for the next window
+// its own way - one over real dates, one over minutes counted from Monday
+// midnight, which is the same answer only in a week that no clock change
+// crosses. Neither could be corrected without somebody remembering to correct
+// the other, which is the state this replaces.
+//
+// The date arithmetic is the one that survived, and `nextStart' is a moment
+// rather than a time of day because of it: a bare "09:00" for a window three
+// days out reads as three hours out.
+//
+// A pause whose deadline has passed reads as lifted rather than as a pause with
+// a moment behind it. The tick lifts it on its next pass anyway - see
+// ScheduleUnpauseDue - and a line saying "paused until 14:00" at half past two
+// would be describing the file rather than the schedule.
+[[nodiscard]] ScheduleStatus ScheduleStatusNow(
+	const Settings &settings,
+	const State &state,
+	const QDateTime &now,
+	const DeviceIdentity &device);
+
 } // namespace Purple
