@@ -364,4 +364,33 @@ struct BudgetSpent {
 	int64 nowMs,
 	int retentionDays);
 
+// A span of screen time in the shortest words that stay exact: "1 d 3 h 2 m",
+// "1 d 2 m", "1 h", "59 m", "48 s", "0 s".
+//
+// Here rather than in either app because both had written it themselves and
+// the two had already drifted - one said "0" for an empty span, the other
+// "0 s" - and because neither had a day unit, so a phone left alone over a
+// weekend reported "51 h 2 m" and left the reader to divide.
+//
+// The rules, and why:
+//
+// - Days, hours, minutes. Every nonzero unit is written and every zero one is
+//   left out, so "1 d 2 m" is a whole answer rather than something that has to
+//   be padded to "1 d 0 h 2 m". Dropping a unit is never ambiguous because the
+//   unit is always spelled beside its number.
+// - Seconds only below a minute. Once there is a minute to report the seconds
+//   are noise on a number nobody compares that closely: "59 m", not
+//   "59 m 59 s".
+// - Zero, a negative span and anything under a second are all "0 s". A
+//   negative span is a clock that moved rather than a negative amount of time,
+//   and "-3 m" would only invite somebody to explain it.
+// - Never a bare number of milliseconds, which is the failure this replaces.
+//
+// The words are English and unlocalised, a deliberate exception to the rule
+// that wording stays out of the core: these are unit letters beside a number
+// in a chart, both apps already shipped exactly these letters, and handing
+// back a struct of numbers instead would only have moved the drift somewhere
+// the tests cannot see it.
+[[nodiscard]] QString FormatSpan(int64 ms);
+
 } // namespace Purple

@@ -696,4 +696,32 @@ std::vector<Event> Prune(
 	return result;
 }
 
+QString FormatSpan(int64 ms) {
+	const auto seconds = (ms > 0) ? (ms / kMsInSecond) : int64(0);
+	if (seconds < 60) {
+		// Under a minute the seconds are the only honest unit - and a span of
+		// nothing says "0 s" rather than a bare "0", so an empty bar reads as
+		// a length like every other bar beside it.
+		return u"%1 s"_q.arg(seconds);
+	}
+	const auto minutes = seconds / 60;
+	const auto days = minutes / (24 * 60);
+	const auto hours = (minutes / 60) % 24;
+	const auto rest = minutes % 60;
+
+	// Assembled rather than branched: three units, each written only when it
+	// is nonzero, is seven cases spelled out or one list joined.
+	auto parts = QStringList();
+	if (days) {
+		parts.push_back(u"%1 d"_q.arg(days));
+	}
+	if (hours) {
+		parts.push_back(u"%1 h"_q.arg(hours));
+	}
+	if (rest) {
+		parts.push_back(u"%1 m"_q.arg(rest));
+	}
+	return parts.join(QChar(' '));
+}
+
 } // namespace Purple

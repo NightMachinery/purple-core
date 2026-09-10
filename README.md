@@ -29,7 +29,9 @@ rules about data are far easier to prove outside a running app than inside one.
   time, the buckets, the heat map, the period comparison, the budget ledger and
   retention. The log is raw events and nothing else, so every threshold in
   `[screen_time]` is applied at read time and changing one re-derives the
-  history you already have.
+  history you already have. It also holds `FormatSpan()`, the one piece of
+  wording in the core: both apps had written "6 h 12 m" for themselves and the
+  two spellings had already drifted apart.
 - `purple/purple_types.h` - the two type aliases and the `_q` string literal the
   core borrowed from tdesktop's `base/basic_types.h` before extraction. It
   defers to that header when compiled inside tdesktop and defines them itself

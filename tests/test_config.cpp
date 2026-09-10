@@ -7315,6 +7315,45 @@ snoozes_per_day = 0
 	CHECK_EQ(Purple::Prune(log, now, 0).size(), size_t(3));
 }
 
+void TestFormatSpan() {
+	Begin("format span");
+
+	const auto span = [](int64 seconds) {
+		return Purple::FormatSpan(seconds * 1000);
+	};
+
+	// Nothing, less than nothing, and less than a second all read the same. A
+	// negative span is a clock that moved rather than negative time, and a
+	// bare "0" would be the one bar on a chart with no unit beside it.
+	CHECK_EQ(Purple::FormatSpan(0), u"0 s"_q);
+	CHECK_EQ(Purple::FormatSpan(-5000), u"0 s"_q);
+	CHECK_EQ(Purple::FormatSpan(999), u"0 s"_q);
+
+	// Seconds, but only below a minute.
+	CHECK_EQ(span(48), u"48 s"_q);
+	CHECK_EQ(span(59), u"59 s"_q);
+	CHECK_EQ(span(60), u"1 m"_q);
+
+	// Once there is a minute to report, the seconds are noise on a number
+	// nobody compares that closely.
+	CHECK_EQ(span(59 * 60 + 59), u"59 m"_q);
+	CHECK_EQ(span(61), u"1 m"_q);
+
+	// A unit that is zero is left out rather than padded, and the unit letter
+	// beside every number is what keeps that unambiguous.
+	CHECK_EQ(span(60 * 60), u"1 h"_q);
+	CHECK_EQ(span(60 * 60 + 18 * 60), u"1 h 18 m"_q);
+	CHECK_EQ(span(23 * 3600 + 59 * 60), u"23 h 59 m"_q);
+
+	// The day unit, which is the whole point: a phone left alone over a
+	// weekend used to report "51 h 2 m" and leave the reader to divide.
+	CHECK_EQ(span(24 * 3600), u"1 d"_q);
+	CHECK_EQ(span(97320), u"1 d 3 h 2 m"_q);
+	CHECK_EQ(span(24 * 3600 + 120), u"1 d 2 m"_q);
+	CHECK_EQ(span(48 * 3600), u"2 d"_q);
+	CHECK_EQ(span(51 * 3600 + 120), u"2 d 3 h 2 m"_q);
+}
+
 void TestNestedWindows() {
 	Begin("nested schedule windows");
 
@@ -7547,6 +7586,7 @@ int main() {
 	TestScreenTimeSessions();
 	TestScreenTimeTotals();
 	TestScreenTimeBudgets();
+	TestFormatSpan();
 	TestNestedWindows();
 
 	std::printf("%d checks, %d failures\n", Checks, Failures);
