@@ -581,23 +581,81 @@ std::optional<LastSeenTrade> RememberedTrade(
 	return std::nullopt;
 }
 
+int TradeCooldownLeft(
+		const State &state,
+		PeerIdValue peer,
+		int64 nowUnix,
+		int cooldownSeconds) {
+	if (!peer || cooldownSeconds <= 0) {
+		return 0;
+	}
+	for (const auto &trade : state.lastSeenTrades) {
+		if (trade.peer != peer) {
+			continue;
+		} else if (trade.readAtUnix > nowUnix) {
+			// A read from the future is a clock that moved backwards, and a
+			// cooldown measured off it would sit there for as long as the jump
+			// was. RememberedTrade treats the same stamp the same way.
+			return 0;
+		}
+		const auto elapsed = nowUnix - trade.readAtUnix;
+		return (elapsed >= cooldownSeconds)
+			? 0
+			: int(cooldownSeconds - elapsed);
+	}
+	return 0;
+}
+
 bool TradeAllowed(
 		const State &state,
 		PeerIdValue peer,
 		int64 nowUnix,
 		int cooldownSeconds) {
-	if (!peer) {
-		return false;
-	} else if (cooldownSeconds <= 0) {
-		return true;
+	return peer
+		&& !TradeCooldownLeft(state, peer, nowUnix, cooldownSeconds);
+}
+
+LastSeenNote LastSeenNoteNow(
+		const Settings &settings,
+		const State &state,
+		PeerIdValue peer,
+		LastSeenReason reason,
+		bool coarse,
+		int64 nowUnix) {
+	const auto &config = settings.lastSeen;
+	auto result = LastSeenNote();
+
+	// Before the line, and whatever the line turns out to be: it is the
+	// sheet's number, and the sheet is what a tap opens from any of them.
+	result.cooldownLeftSeconds = TradeCooldownLeft(
+		state,
+		peer,
+		nowUnix,
+		config.tradeCooldownSeconds);
+	if (!coarse) {
+		return result;
 	}
-	for (const auto &trade : state.lastSeenTrades) {
-		if (trade.peer == peer) {
-			return (trade.readAtUnix > nowUnix)
-				|| (nowUnix - trade.readAtUnix >= cooldownSeconds);
-		}
+	const auto trade = RememberedTrade(
+		state,
+		peer,
+		nowUnix,
+		config.tradeRememberSeconds);
+	if (trade && trade->wasOnlineUnix) {
+		// A trade that ran its hold out without an exact status arriving has
+		// nothing to say here - `wasOnlineUnix' is zero and there is no moment
+		// to show - so it falls through to the tail, still holding the
+		// cooldown that was set above.
+		result.line = LastSeenLine::Remembered;
+		result.wasOnlineUnix = trade->wasOnlineUnix;
+		result.readAtUnix = trade->readAtUnix;
+	} else if (config.reasons && reason == LastSeenReason::ByMe) {
+		result.line = LastSeenLine::ByMeTail;
 	}
-	return true;
+	result.tappable = config.trade
+		&& ((result.line == LastSeenLine::ByMeTail)
+			|| (result.line == LastSeenLine::Remembered
+				&& reason == LastSeenReason::ByMe));
+	return result;
 }
 
 bool PruneLastSeenTrades(State &state, int64 nowUnix, int rememberSeconds) {

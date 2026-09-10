@@ -6387,6 +6387,172 @@ void TestLastSeenTrades() {
 	CHECK(stale.lastSeenTrades.empty());
 }
 
+void TestTradeCooldownLeft() {
+	Begin("trade cooldown left");
+
+	auto state = Purple::State();
+	const auto now = int64(1788000000);
+	const auto left = [&](int64 when, int cooldown = 300) {
+		return Purple::TradeCooldownLeft(state, 7, when, cooldown);
+	};
+
+	// Nothing remembered, no cooldown to serve.
+	CHECK_EQ(left(now), 0);
+
+	Purple::RememberTrade(state, 7, now, now - 10);
+	CHECK_EQ(left(now), 300);
+	CHECK_EQ(left(now + 120), 180);
+	CHECK_EQ(left(now + 299), 1);
+
+	// The instant it runs out, and every instant after.
+	CHECK_EQ(left(now + 300), 0);
+	CHECK_EQ(left(now + 9000), 0);
+
+	// The yes/no and the countdown are the same answer asked twice, which is
+	// the whole reason TradeAllowed is written in terms of this.
+	for (const auto at : { now, now + 299, now + 300, now + 301 }) {
+		CHECK_EQ(Purple::TradeAllowed(state, 7, at, 300), !left(at));
+	}
+
+	// A cooldown of zero is off, an unknown person owes nothing, and peer 0 is
+	// not a person - all three the same answers TradeAllowed gives.
+	CHECK_EQ(left(now, 0), 0);
+	CHECK_EQ(Purple::TradeCooldownLeft(state, 8, now, 300), 0);
+	CHECK_EQ(Purple::TradeCooldownLeft(state, 0, now, 300), 0);
+	CHECK(!Purple::TradeAllowed(state, 0, now, 300));
+
+	// A read stamped in the future is a clock that moved backwards, not a
+	// cooldown that lasts as long as the jump did.
+	CHECK_EQ(left(now - 5000), 0);
+	CHECK(Purple::TradeAllowed(state, 7, now - 5000, 300));
+
+	// The cooldown counts attempts rather than answers: a trade whose hold ran
+	// out with no exact status still holds it open.
+	auto timedOut = Purple::State();
+	Purple::RememberTrade(timedOut, 9, now, 0);
+	CHECK_EQ(Purple::TradeCooldownLeft(timedOut, 9, now + 60, 300), 240);
+}
+
+void TestLastSeenNote() {
+	Begin("last seen note");
+
+	using Line = Purple::LastSeenLine;
+	using Reason = Purple::LastSeenReason;
+
+	auto settings = Purple::Settings();
+	auto state = Purple::State();
+	const auto now = int64(1788000000);
+	const auto note = [&](
+			Reason reason,
+			bool coarse = true,
+			int64 when = 0) {
+		return Purple::LastSeenNoteNow(
+			settings,
+			state,
+			7,
+			reason,
+			coarse,
+			when ? when : now);
+	};
+
+	// Coarse because of our own rules, with both switches on: the offer, and a
+	// tap that opens it.
+	const auto tail = note(Reason::ByMe);
+	CHECK(tail.line == Line::ByMeTail);
+	CHECK(tail.tappable);
+	CHECK_EQ(tail.wasOnlineUnix, int64(0));
+	CHECK_EQ(tail.cooldownLeftSeconds, 0);
+
+	// Coarse because of theirs, and "a long time ago": nothing true to add.
+	CHECK(note(Reason::HiddenByThem).line == Line::Plain);
+	CHECK(!note(Reason::HiddenByThem).tappable);
+	CHECK(note(Reason::None).line == Line::Plain);
+	CHECK(!note(Reason::None).tappable);
+
+	// An exact time is not coarse, so there is nothing to explain even when
+	// the reason says otherwise.
+	CHECK(note(Reason::ByMe, false).line == Line::Plain);
+	CHECK(!note(Reason::ByMe, false).tappable);
+
+	// reasons_p takes the tail away, and the tap with it - the tap belongs to
+	// a line that is no longer drawn.
+	settings.lastSeen.reasons = false;
+	CHECK(note(Reason::ByMe).line == Line::Plain);
+	CHECK(!note(Reason::ByMe).tappable);
+	settings.lastSeen.reasons = true;
+
+	// trade_p leaves the explanation standing and takes the offer away.
+	settings.lastSeen.trade = false;
+	CHECK(note(Reason::ByMe).line == Line::ByMeTail);
+	CHECK(!note(Reason::ByMe).tappable);
+	settings.lastSeen.trade = true;
+
+	// A remembered read replaces the coarse phrase outright, and carries both
+	// halves of the sentence the client writes.
+	Purple::RememberTrade(state, 7, now - 60, now - 900);
+	const auto remembered = note(Reason::ByMe);
+	CHECK(remembered.line == Line::Remembered);
+	CHECK(remembered.tappable);
+	CHECK_EQ(remembered.wasOnlineUnix, now - 900);
+	CHECK_EQ(remembered.readAtUnix, now - 60);
+
+	// The cooldown is counted from the read whatever the line says, because it
+	// is the sheet's number and the sheet is what a tap opens.
+	CHECK_EQ(remembered.cooldownLeftSeconds, 240);
+	CHECK_EQ(note(Reason::ByMe, true, now + 239).cooldownLeftSeconds, 1);
+	CHECK_EQ(note(Reason::ByMe, true, now + 240).cooldownLeftSeconds, 0);
+
+	// Not gated on reasons_p: this is not the fork explaining a status, it is
+	// the fork showing what a trade the user asked for came back with. The tap
+	// follows the line rather than the switch, which is what makes a second
+	// trade reachable at all.
+	settings.lastSeen.reasons = false;
+	CHECK(note(Reason::ByMe).line == Line::Remembered);
+	CHECK(note(Reason::ByMe).tappable);
+	settings.lastSeen.reasons = true;
+
+	// trade_p still reaches it: it is the offer itself.
+	settings.lastSeen.trade = false;
+	CHECK(note(Reason::ByMe).line == Line::Remembered);
+	CHECK(!note(Reason::ByMe).tappable);
+	settings.lastSeen.trade = true;
+
+	// Shown whatever the reason has become, since it is a moment that was
+	// really read - but tappable only while there is something left to trade
+	// for. They have changed their own privacy since.
+	CHECK(note(Reason::HiddenByThem).line == Line::Remembered);
+	CHECK(!note(Reason::HiddenByThem).tappable);
+	CHECK(note(Reason::None).line == Line::Remembered);
+	CHECK(!note(Reason::None).tappable);
+
+	// An exact status outranks the memory: the app already has the real time.
+	CHECK(note(Reason::None, false).line == Line::Plain);
+
+	// Past trade_remember the record stops being news and the line falls back
+	// to the tail, offer and all.
+	const auto later = now + settings.lastSeen.tradeRememberSeconds;
+	CHECK(note(Reason::ByMe, true, later).line == Line::ByMeTail);
+	CHECK(note(Reason::ByMe, true, later).tappable);
+	CHECK_EQ(note(Reason::ByMe, true, later).cooldownLeftSeconds, 0);
+
+	// A trade whose hold ran out with no exact status is not a moment to show,
+	// so the line is the tail again - but it is still an attempt, so the
+	// cooldown it started is still running.
+	auto timedOut = Purple::State();
+	Purple::RememberTrade(timedOut, 7, now, 0);
+	const auto after = Purple::LastSeenNoteNow(
+		settings,
+		timedOut,
+		7,
+		Reason::ByMe,
+		true,
+		now + 60);
+	CHECK(after.line == Line::ByMeTail);
+	CHECK(after.tappable);
+	CHECK_EQ(after.wasOnlineUnix, int64(0));
+	CHECK_EQ(after.cooldownLeftSeconds, 240);
+}
+
 [[nodiscard]] Purple::Event Ev(
 		int64 ms,
 		Purple::EventKind kind,
@@ -7195,6 +7361,8 @@ int main() {
 	TestLastSeenKeys();
 	TestLastSeenReasons();
 	TestLastSeenTrades();
+	TestTradeCooldownLeft();
+	TestLastSeenNote();
 	TestScreenTimeSettings();
 	TestScreenTimeLog();
 	TestScreenTimeSessions();

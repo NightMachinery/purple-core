@@ -302,15 +302,130 @@ void RememberTrade(
 	int64 nowUnix,
 	int rememberSeconds);
 
+// How long until a trade with this person would be allowed again, in seconds,
+// or 0 when one is allowed right now. What the sheet shows as "you can refresh
+// in 3:12", which is the whole reason it exists: TradeAllowed answers the
+// yes/no, a countdown needs the number behind it, and computing that number
+// twice in two apps is how the two would come to disagree about the boundary.
+//
+// It counts from the last trade's `readAtUnix' whatever that trade read, so a
+// trade whose hold ran out with no exact status still holds the cooldown open -
+// the cooldown counts attempts, not answers. A read stamped in the future is a
+// clock that moved backwards rather than a cooldown that lasts forever, so it
+// reads as zero.
+[[nodiscard]] int TradeCooldownLeft(
+	const State &state,
+	PeerIdValue peer,
+	int64 nowUnix,
+	int cooldownSeconds);
+
 // Whether a trade with this person may be offered now. False for the
 // `cooldownSeconds' after the last one: a trade is a moment of exposure chosen
 // on purpose, and one offered again every time their chat opens would turn it
 // into a standing subscription nobody agreed to.
+//
+// Exactly "TradeCooldownLeft says zero", and written in terms of it rather than
+// beside it, so the yes/no and the countdown cannot come to disagree about the
+// instant the cooldown ends.
 [[nodiscard]] bool TradeAllowed(
 	const State &state,
 	PeerIdValue peer,
 	int64 nowUnix,
 	int cooldownSeconds);
+
+// What the fork does to one person's status line. Three answers and no fourth,
+// in this order of precedence.
+//
+// Not a persisted type, unlike everything above it in this file: it is a
+// question asked OF the state rather than a part of it. It lives here anyway,
+// with the memory it reads, because the answer needs both the settings and the
+// remembered trades - and the trades are here, while purple_settings.h cannot
+// see them without the include arrow between the two files turning into a
+// cycle.
+enum class LastSeenLine : uchar {
+	// Left exactly as the app wrote it. Hidden by them, "a long time ago", an
+	// exact time, or the explanations turned off: nothing true to add.
+	Plain,
+
+	// The coarse text plus the offer, after the usual middle dot. Only ever
+	// this when the server said the coarsening is OUR privacy rules' doing,
+	// which is the one case with something to do about it.
+	ByMeTail,
+
+	// Replaced outright by what a trade actually read: "last seen 14:32 · as of
+	// 3 min ago". A real moment, read on purpose, and saying "last seen
+	// recently" over the top of it would throw away the thing the trade was
+	// for.
+	Remembered,
+};
+
+// The decision, with the numbers a client needs to write the sentence. The
+// WORDS are deliberately not here: each app has its own string catalogue - the
+// desktop's literals, Android's strings.xml - and a core that shipped English
+// would leave one of them translating around it.
+struct LastSeenNote {
+	LastSeenLine line = LastSeenLine::Plain;
+
+	// Whether tapping the line opens the trade sheet. See LastSeenNoteNow for
+	// which line a tap belongs to, and why.
+	bool tappable = false;
+
+	// Remembered only: their real `was_online', and when we read it. Both
+	// halves are needed - the time is what the trade bought, the age is what
+	// stops it reading as live.
+	int64 wasOnlineUnix = 0;
+	int64 readAtUnix = 0;
+
+	// Seconds until a fresh trade with this person would be allowed, 0 when one
+	// is allowed now. Filled in whatever the line is, because it is the sheet's
+	// countdown rather than the line's, and the sheet is reachable from a line
+	// that says nothing about it.
+	int cooldownLeftSeconds = 0;
+};
+
+// The whole three-way decision, in the core, for both apps.
+//
+// `coarse' is the caller saying the status is one of the three vague spellings
+// - recently, last week, last month - and `reason' is what ReasonFor() made of
+// it. Both come from the client because a status is a client type; everything
+// after that is a rule about data, and rules about data live here. Until now
+// the two apps each carried their own copy of the ordering below, and they had
+// already drifted on the last line of it.
+//
+// The order is precedence, and each step is its own decision:
+//
+// - Remembered wins whenever a trade is still remembered and read a real
+//   `was_online'. NOT gated on `reasons_p': this is not the fork explaining a
+//   status, it is the fork showing what a trade the user asked for came back
+//   with, and turning the explanations off should not hide the answer to a
+//   question they asked out loud.
+// - ByMeTail otherwise, when the status is coarse because of our own rules and
+//   `reasons_p' is on. That IS the fork explaining, so the switch governs it.
+// - Plain otherwise, a non-coarse status included.
+//
+// `tappable' needs `trade_p' - it is the offer, and switching the offer off is
+// the whole of what that key does - plus a line worth tapping:
+//
+// - the ByMe tail, which is drawn only when `reasons_p' is on, so its tap is
+//   gated by `reasons_p' through the line rather than by a second test;
+// - the remembered line, which is drawn REGARDLESS of `reasons_p', so its tap
+//   works regardless too. A dead tap on a line the user can plainly see would
+//   be that switch reaching somewhere it was never about.
+//
+// The remembered line being tappable at all is the fix for a real trap: the
+// tail used to be the only way into the sheet, so the first trade replaced the
+// only door and a second one was unreachable for a whole `trade_remember' - a
+// day, by default. It now opens the same sheet, which shows
+// `cooldownLeftSeconds' and offers the re-trade once that is spent. A
+// remembered line whose reason is no longer ByMe is not tappable: they have
+// changed their own privacy since, and there is nothing left to trade for.
+[[nodiscard]] LastSeenNote LastSeenNoteNow(
+	const Settings &settings,
+	const State &state,
+	PeerIdValue peer,
+	LastSeenReason reason,
+	bool coarse,
+	int64 nowUnix);
 
 // Drops the trades that have gone stale. The serialiser cannot do this on its
 // own - it has neither a clock nor the settings that say how long a read stays

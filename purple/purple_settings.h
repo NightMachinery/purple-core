@@ -567,9 +567,15 @@ struct LastSeen {
 	// with no reason is the fork withholding something it knows.
 	bool reasons = true;
 
-	// Whether the "show mine to see theirs" sheet is offered at all. The
-	// reason line above is tappable only while this is on, so turning it off
-	// leaves the explanation and takes away the offer.
+	// Whether the "show mine to see theirs" sheet is offered at all. Every way
+	// into it is gated on this and on nothing else, so turning it off leaves
+	// the explanations standing and takes away the offer.
+	//
+	// Two lines can open the sheet, and `reasons_p' reaches only one of them:
+	// the reason tail, which is drawn only when explanations are on, and the
+	// remembered line, which is drawn either way and so stays tappable either
+	// way. LastSeenNoteNow() in purple_state.h is where that is decided, for
+	// both apps at once.
 	bool trade = true;
 
 	// How long to wait for their exact `was_online' after asking, in seconds,
