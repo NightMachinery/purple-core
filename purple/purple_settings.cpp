@@ -1238,6 +1238,27 @@ void WarnUnknownLists(
 				"\"off\", keeping the default."_q);
 		}
 	}
+
+	// The two per-gesture lengths. Unparseable leaves them UNSET rather than
+	// defaulted, so a typo falls back to `auto_off' - which is what the file
+	// already says about how long a peek lasts - instead of to a number
+	// nobody wrote down anywhere.
+	const auto length = [&](
+			std::string_view key,
+			std::optional<int> &into) {
+		const auto text = ReadString(table, key, context, warnings);
+		if (!text) {
+			return;
+		} else if (const auto seconds = ParseDuration(*text)) {
+			into = *seconds;
+		} else {
+			warnings.push_back(
+				u"peek: '%1' should look like \"5m\", \"90s\" or \"off\", "
+				"falling back to 'auto_off'."_q.arg(Text(key)));
+		}
+	};
+	length("tap", result.tapSeconds);
+	length("hotkey_length", result.hotkeyLengthSeconds);
 	return result;
 }
 
@@ -1877,6 +1898,63 @@ LastSeenReason ReasonFor(bool exactKnown, bool coarse, bool byMe) {
 		return LastSeenReason::None;
 	}
 	return byMe ? LastSeenReason::ByMe : LastSeenReason::HiddenByThem;
+}
+
+int PeekTapSeconds(const Settings &settings) {
+	return settings.peek.tapSeconds.value_or(settings.peek.autoOffSeconds);
+}
+
+int PeekHotkeySeconds(const Settings &settings) {
+	return settings.peek.hotkeyLengthSeconds.value_or(
+		settings.peek.autoOffSeconds);
+}
+
+const std::vector<int> &PeekDetentsSeconds() {
+	// A minute to an hour, doubling-ish. Not a smooth scale: these are the
+	// lengths people actually name out loud, and a dial that can land on
+	// "seven minutes" is a dial that has to be aimed rather than flicked.
+	static const auto result = std::vector<int>{
+		60,
+		120,
+		300,
+		600,
+		900,
+		1800,
+		3600,
+	};
+	return result;
+}
+
+int PeekDetentIndex(int seconds) {
+	const auto &detents = PeekDetentsSeconds();
+	const auto until = int(detents.size());
+	if (seconds <= 0) {
+		// Zero is "until I stop", which sits one past the last detent. A
+		// negative number is nothing a length can be, and this is the nearest
+		// honest answer to it.
+		return until;
+	}
+	const auto distance = [&](int index) {
+		const auto value = detents[index];
+		return (value > seconds) ? (value - seconds) : (seconds - value);
+	};
+	auto best = 0;
+	for (auto i = 1; i != until; ++i) {
+		// Strictly nearer, so a length exactly between two detents keeps the
+		// shorter one it already had: rounding a peek up would reveal more
+		// than was asked for.
+		if (distance(i) < distance(best)) {
+			best = i;
+		}
+	}
+	return best;
+}
+
+int PeekDetentSecondsAt(int index) {
+	const auto &detents = PeekDetentsSeconds();
+	return (index < 0 || index >= int(detents.size()))
+		? 0
+		: detents[index];
 }
 
 std::optional<StoryPolicy> ParseStoryPolicy(const QString &value) {

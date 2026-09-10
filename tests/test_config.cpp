@@ -4080,6 +4080,183 @@ void TestPeek() {
 	CHECK(!Purple::PeekLive(state, 0));
 }
 
+void TestPeekLengths() {
+	Begin("peek lengths");
+
+	// Nothing said: one length governs both gestures, which is what the file
+	// meant before either of the newer keys existed.
+	const auto silent = Parse(u"[presets.work]\nlist_order = []\n"_q);
+	CHECK_EQ(silent.settings.peek.autoOffSeconds, 120);
+	CHECK(!silent.settings.peek.tapSeconds.has_value());
+	CHECK(!silent.settings.peek.hotkeyLengthSeconds.has_value());
+	CHECK_EQ(Purple::PeekTapSeconds(silent.settings), 120);
+	CHECK_EQ(Purple::PeekHotkeySeconds(silent.settings), 120);
+
+	// `hotkey' is still the key SEQUENCE, and `hotkey_length' is how long the
+	// peek it starts lasts - two keys because they are two things, and the
+	// older of them keeps the name it was documented under.
+	const auto both = Parse(uR"(
+[peek]
+hotkey        = "Ctrl+Alt+K"
+auto_off      = "90s"
+tap           = "5m"
+hotkey_length = "30s"
+)"_q);
+	CHECK(both.ok());
+	CHECK_EQ(both.settings.peek.hotkey, u"Ctrl+Alt+K"_q);
+	CHECK_EQ(both.settings.peek.autoOffSeconds, 90);
+	CHECK_EQ(Purple::PeekTapSeconds(both.settings), 300);
+	CHECK_EQ(Purple::PeekHotkeySeconds(both.settings), 30);
+
+	// Each falls back on its own, so a file may say one and mean `auto_off'
+	// by the other.
+	const auto tapOnly = Parse(u"[peek]\nauto_off = \"3m\"\ntap = \"10m\"\n"_q);
+	CHECK_EQ(Purple::PeekTapSeconds(tapOnly.settings), 600);
+	CHECK_EQ(Purple::PeekHotkeySeconds(tapOnly.settings), 180);
+
+	// "off" is a length of its own - a peek with no clock on it - and not an
+	// absent key falling back to `auto_off'.
+	const auto off = Parse(u"[peek]\nauto_off = \"3m\"\ntap = \"off\"\n"_q);
+	CHECK(off.settings.peek.tapSeconds.has_value());
+	CHECK_EQ(Purple::PeekTapSeconds(off.settings), 0);
+	CHECK_EQ(Purple::PeekHotkeySeconds(off.settings), 180);
+
+	// A spelling the parser cannot read warns and leaves the key unset, so it
+	// falls back to what the file already says about peek lengths rather than
+	// to a number written down nowhere.
+	const auto broken = Parse(
+		u"[peek]\nauto_off = \"3m\"\ntap = \"soon\"\nhotkey_length = \"?\"\n"_q);
+	CHECK(WarnsAbout(broken, u"peek: 'tap' should look like"_q));
+	CHECK(WarnsAbout(broken, u"peek: 'hotkey_length' should look like"_q));
+	CHECK(!broken.settings.peek.tapSeconds.has_value());
+	CHECK_EQ(Purple::PeekTapSeconds(broken.settings), 180);
+	CHECK_EQ(Purple::PeekHotkeySeconds(broken.settings), 180);
+
+	// The detents, which both apps must draw from here: the chips a sheet
+	// offers and the stops a dial snaps to are the same seven lengths.
+	const auto &detents = Purple::PeekDetentsSeconds();
+	CHECK_EQ(detents.size(), size_t(7));
+	CHECK_EQ(detents.front(), 60);
+	CHECK_EQ(detents.back(), 3600);
+	CHECK_EQ(Purple::PeekDetentIndex(60), 0);
+	CHECK_EQ(Purple::PeekDetentIndex(300), 2);
+	CHECK_EQ(Purple::PeekDetentIndex(3600), 6);
+
+	// Zero is "until I stop", one position past the last detent, so a dial is
+	// one continuous track.
+	CHECK_EQ(Purple::PeekDetentIndex(0), 7);
+	CHECK_EQ(Purple::PeekDetentIndex(-5), 7);
+	CHECK_EQ(Purple::PeekDetentSecondsAt(7), 0);
+	CHECK_EQ(Purple::PeekDetentSecondsAt(-1), 0);
+	CHECK_EQ(Purple::PeekDetentSecondsAt(99), 0);
+	CHECK_EQ(Purple::PeekDetentSecondsAt(0), 60);
+	CHECK_EQ(Purple::PeekDetentSecondsAt(6), 3600);
+
+	// A length between two detents reads as the nearer one, and a tie reads as
+	// the shorter: rounding a peek up would reveal more than was asked for.
+	CHECK_EQ(Purple::PeekDetentIndex(100), 1);
+	CHECK_EQ(Purple::PeekDetentIndex(90), 0);
+	CHECK_EQ(Purple::PeekDetentIndex(210), 1);
+	CHECK_EQ(Purple::PeekDetentIndex(200), 1);
+
+	// Past the last detent is still the last detent. Only zero means "until I
+	// stop", so a file asking for two hours has asked for a peek that ends.
+	CHECK_EQ(Purple::PeekDetentIndex(7200), 6);
+
+	// Every detent is its own index, both ways round.
+	for (auto i = 0; i != int(detents.size()); ++i) {
+		CHECK_EQ(Purple::PeekDetentIndex(Purple::PeekDetentSecondsAt(i)), i);
+	}
+}
+
+void TestPeekState() {
+	Begin("peek state");
+
+	auto state = Purple::State();
+	const auto now = int64(1788000000);
+	CHECK_EQ(Purple::PeekLeftSeconds(state, now), 0);
+	CHECK(!Purple::PeekUntilStopped(state));
+
+	// A peek with a length: the deadline is what ends it, including one that
+	// outlived the app.
+	CHECK(Purple::StartPeek(state, now, 300));
+	CHECK(state.peekActive);
+	CHECK_EQ(state.peekDeadlineUnix, now + 300);
+	CHECK_EQ(Purple::PeekLeftSeconds(state, now), 300);
+	CHECK_EQ(Purple::PeekLeftSeconds(state, now + 299), 1);
+	CHECK_EQ(Purple::PeekLeftSeconds(state, now + 300), 0);
+	CHECK(!Purple::PeekLive(state, now + 300));
+	CHECK(!Purple::PeekUntilStopped(state));
+
+	// Starting the same peek in the same second changes nothing, so a caller
+	// that writes on a change does not write.
+	CHECK(!Purple::StartPeek(state, now, 300));
+	CHECK(Purple::StartPeek(state, now + 1, 300));
+
+	// A length of zero is a peek with no clock on it. PeekLeftSeconds says
+	// zero for that too, which is why the second question exists.
+	CHECK(Purple::StartPeek(state, now, 0));
+	CHECK_EQ(state.peekDeadlineUnix, int64(0));
+	CHECK(Purple::PeekLive(state, now + 999999));
+	CHECK_EQ(Purple::PeekLeftSeconds(state, now), 0);
+	CHECK(Purple::PeekUntilStopped(state));
+	CHECK(!Purple::StartPeek(state, now, 0));
+
+	// There is nothing to add to a peek that already has no end.
+	CHECK(!Purple::ExtendPeek(state, now, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, int64(0));
+
+	Purple::StopPeek(state);
+	CHECK(!state.peekActive);
+	CHECK_EQ(state.peekDeadlineUnix, int64(0));
+	CHECK(!Purple::PeekLive(state, now));
+	CHECK(!Purple::PeekUntilStopped(state));
+
+	// Extending measures from the deadline the peek already has, not from now:
+	// pressing "+5 min" twice quickly means ten minutes, not five and a bit.
+	CHECK(Purple::StartPeek(state, now, 300));
+	CHECK(Purple::ExtendPeek(state, now + 60, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 600);
+	CHECK_EQ(Purple::PeekLeftSeconds(state, now + 60), 540);
+
+	// The remaining time is capped from now, whatever the sum comes to.
+	CHECK(Purple::ExtendPeek(state, now + 60, 7200, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 60 + 3600);
+	CHECK_EQ(Purple::PeekLeftSeconds(state, now + 60), 3600);
+
+	// And once it is capped the button does nothing rather than quietly
+	// shortening the peek it was pressed to lengthen.
+	CHECK(!Purple::ExtendPeek(state, now + 60, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 60 + 3600);
+
+	// The cap moves with the clock, so a minute later there is a minute's
+	// worth of room again.
+	CHECK(Purple::ExtendPeek(state, now + 600, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 60 + 3600 + 300);
+
+	// A cap of zero or less is no cap at all.
+	CHECK(Purple::StartPeek(state, now, 300));
+	CHECK(Purple::ExtendPeek(state, now, 7200, 0));
+	CHECK_EQ(state.peekDeadlineUnix, now + 7500);
+
+	// Nothing to extend: no peek, an expired one, or nothing to add.
+	CHECK(!Purple::ExtendPeek(state, now, 0, 3600));
+	CHECK(!Purple::ExtendPeek(state, now, -60, 3600));
+	Purple::StopPeek(state);
+	CHECK(!Purple::ExtendPeek(state, now, 300, 3600));
+
+	CHECK(Purple::StartPeek(state, now, 60));
+	CHECK(!Purple::ExtendPeek(state, now + 60, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 60);
+
+	// Starting one again is how an expired peek comes back, not extending it.
+	CHECK(Purple::StartPeek(state, now + 60, 60));
+	CHECK_EQ(Purple::PeekLeftSeconds(state, now + 60), 60);
+
+	// The cap the callers pass unless they have a reason not to.
+	CHECK_EQ(Purple::kPeekExtendCapSeconds, 3600);
+}
+
 void TestNamedExplicitly() {
 	Begin("named explicitly");
 
@@ -7339,6 +7516,8 @@ int main() {
 	TestViewMembership();
 	TestMentionGate();
 	TestPeek();
+	TestPeekLengths();
+	TestPeekState();
 	TestNamedExplicitly();
 	TestPresetHotkeys();
 	TestOverrides();

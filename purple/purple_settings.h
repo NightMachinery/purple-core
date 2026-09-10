@@ -440,10 +440,75 @@ struct FocusSync {
 	QString exitPreset;
 };
 
+// The `[peek]' table: the temporary look past the running preset, and how long
+// one lasts. Not part of a preset - it is a decision about the gesture, not
+// about what any one preset lets through.
 struct Peek {
+	// The key sequence that starts one on the desktop, "Ctrl+Shift+E" and the
+	// like. A SEQUENCE, not a length, which is why the length key beside it is
+	// spelled `hotkey_length': `hotkey' was documented and in use long before
+	// there was a second way to start a peek, and renaming a key people have
+	// in their files to make room for a new one would be a poor trade.
 	QString hotkey;
-	int autoOffSeconds = 0; // Zero disables the timer.
+
+	// How long a peek lasts when nothing more specific was said. Zero disables
+	// the timer, so the peek runs until it is turned off by hand.
+	int autoOffSeconds = 0;
+
+	// How long the two ways of starting one last, when they want to differ.
+	// Unset - which is what a file that says nothing gives - means "whatever
+	// `auto_off' says", so one key still governs both for anybody who does not
+	// care about the difference. Zero is "off": until I stop.
+	//
+	// They exist because the two gestures are not the same gesture. A tap on a
+	// phone's peek control is a look at the list you are holding, and a phone
+	// wants longer than a keyboard shortcut fired mid-sentence on a desktop
+	// does. Read through PeekTapSeconds() and PeekHotkeySeconds() rather than
+	// directly, so the fallback is written once.
+	std::optional<int> tapSeconds;
+	std::optional<int> hotkeyLengthSeconds;
 };
+
+// Declared here so the two readers below can sit with the keys they read,
+// rather than at the far end of the file away from the comment that explains
+// them. Settings itself is assembled further down, out of this and its peers.
+struct Settings;
+
+// How long a peek started by tapping the control lasts, and how long one
+// started by the desktop hotkey lasts. `[peek] tap' and `[peek] hotkey_length'
+// respectively, each falling back to `[peek] auto_off' when it is not set.
+//
+// Zero from either is a real answer - "off", a peek with no clock on it - and
+// not a missing one, which is why the fallback lives here rather than in a
+// `.value_or(0)' at each call site.
+[[nodiscard]] int PeekTapSeconds(const Settings &settings);
+[[nodiscard]] int PeekHotkeySeconds(const Settings &settings);
+
+// The lengths a peek control offers: the chips a sheet shows and the positions
+// a dial snaps to, shortest first. One minute to one hour.
+//
+// Both apps must read the row from here rather than writing their own. Two
+// hand-written lists is how a phone's chips and a desktop's dial come to offer
+// different minutes for the same feature, and the row is exactly the kind of
+// thing somebody edits on one side only.
+[[nodiscard]] const std::vector<int> &PeekDetentsSeconds();
+
+// Which detent a length is. The index into the row above, or its size() for
+// zero - "until I stop", which lives one position PAST the last detent so a
+// dial is a single continuous track of size() + 1 stops rather than a track
+// plus a checkbox somewhere else.
+//
+// A length between two detents reads as the nearer one, and a tie reads as the
+// SHORTER: a control that silently rounds a peek up is a control that reveals
+// more than was asked for. A length past the last detent reads as the last
+// detent rather than as "until I stop" - zero is the only thing that means
+// that, and a file asking for two hours has asked for a peek that ends.
+[[nodiscard]] int PeekDetentIndex(int seconds);
+
+// And back: the length at that position. Zero - "until I stop" - for size()
+// and for anything out of range, so a dial dragged past the end lands on the
+// only thing that is there.
+[[nodiscard]] int PeekDetentSecondsAt(int index);
 
 // Which chats a recently-closed grace period covers.
 enum class RecentScope : uchar {

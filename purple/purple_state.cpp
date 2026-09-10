@@ -447,6 +447,57 @@ bool PeekLive(const State &state, int64 nowUnix) {
 		&& (!state.peekDeadlineUnix || state.peekDeadlineUnix > nowUnix);
 }
 
+bool StartPeek(State &state, int64 nowUnix, int seconds) {
+	const auto deadline = (seconds > 0) ? (nowUnix + seconds) : int64(0);
+	if (state.peekActive && state.peekDeadlineUnix == deadline) {
+		// Only ever true for a peek with no deadline being started again, or
+		// for two starts inside the same second. Everything else moves the
+		// deadline, which is a change even when the length is the same one.
+		return false;
+	}
+	state.peekActive = true;
+	state.peekDeadlineUnix = deadline;
+	return true;
+}
+
+bool ExtendPeek(
+		State &state,
+		int64 nowUnix,
+		int addSeconds,
+		int capSeconds) {
+	if (addSeconds <= 0
+		|| !PeekLive(state, nowUnix)
+		|| !state.peekDeadlineUnix) {
+		return false;
+	}
+	auto deadline = state.peekDeadlineUnix + addSeconds;
+	if (capSeconds > 0 && deadline > nowUnix + capSeconds) {
+		deadline = nowUnix + capSeconds;
+	}
+	if (deadline <= state.peekDeadlineUnix) {
+		// The cap has already been reached, so the button does nothing rather
+		// than quietly shortening the peek it was pressed to lengthen.
+		return false;
+	}
+	state.peekDeadlineUnix = deadline;
+	return true;
+}
+
+void StopPeek(State &state) {
+	state.peekActive = false;
+	state.peekDeadlineUnix = 0;
+}
+
+int PeekLeftSeconds(const State &state, int64 nowUnix) {
+	return (PeekLive(state, nowUnix) && state.peekDeadlineUnix)
+		? int(state.peekDeadlineUnix - nowUnix)
+		: 0;
+}
+
+bool PeekUntilStopped(const State &state) {
+	return state.peekActive && !state.peekDeadlineUnix;
+}
+
 bool ScheduleUnpauseDue(const State &state, int64 nowUnix) {
 	return state.schedulePaused
 		&& state.schedulePausedUntil

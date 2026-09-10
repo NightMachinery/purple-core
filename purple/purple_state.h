@@ -252,6 +252,55 @@ struct State {
 // the deadline is in the past by the time anything reads it again.
 [[nodiscard]] bool PeekLive(const State &state, int64 nowUnix);
 
+// The longest a peek can be stretched to by extending it, measured from the
+// moment of the extension. An hour, which is the last detent: past that it is
+// not a peek any more, it is the preset off, and the app has a plainer way to
+// say that than tapping "+5 min" twelve times.
+inline constexpr auto kPeekExtendCapSeconds = 60 * 60;
+
+// Starts a peek of `seconds', or of no fixed length when `seconds' is zero.
+// True when something actually moved, so a caller knows whether it owes a
+// write and a rebuild.
+//
+// The two apps each carried these two lines themselves, next to their own
+// "refused under Normal" check. That check stays with them - it needs the
+// resolution, which is the engine's and not the state's - but the mutation is
+// the same on both sides and belongs where it can be proved.
+[[nodiscard]] bool StartPeek(State &state, int64 nowUnix, int seconds);
+
+// Adds `addSeconds' to a running peek, measured from the deadline it already
+// has rather than from now: the button says "+5 min" and a user pressing it
+// twice quickly means ten minutes, not five and a bit.
+//
+// The remaining time is capped at `capSeconds' from now - pass
+// kPeekExtendCapSeconds unless there is a reason not to; a cap of zero or less
+// is no cap at all. False, and nothing touched, when there is nothing to
+// extend: no peek, an expired one, a peek with no deadline (it is already
+// longer than any extension could make it), a non-positive `addSeconds', or a
+// deadline the cap has already overtaken.
+[[nodiscard]] bool ExtendPeek(
+	State &state,
+	int64 nowUnix,
+	int addSeconds,
+	int capSeconds);
+
+// Ends one. Clears the deadline with the flag, so a peek started again later
+// cannot inherit a stale one.
+void StopPeek(State &state);
+
+// How long a running peek has left, in seconds. Zero when nothing is peeking
+// AND when a peek is running with no deadline on it, which is why
+// PeekUntilStopped() exists beside this rather than a -1 in here: this number
+// is fed straight to a countdown, and a sentinel that formats as "-0:01" the
+// one time a caller forgets to check is a worse failure than a caller having
+// to ask a second question.
+[[nodiscard]] int PeekLeftSeconds(const State &state, int64 nowUnix);
+
+// Whether the running peek is one with no clock on it - `auto_off = "off"', or
+// a length of zero from any of the other keys. The other half of the answer
+// above.
+[[nodiscard]] bool PeekUntilStopped(const State &state);
+
 // Whether a pause that was given a deadline has reached it. False for a pause
 // with no deadline - 0 means "until I say otherwise" - and false when nothing
 // is paused at all.
