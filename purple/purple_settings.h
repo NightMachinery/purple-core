@@ -467,6 +467,15 @@ struct Peek {
 	// directly, so the fallback is written once.
 	std::optional<int> tapSeconds;
 	std::optional<int> hotkeyLengthSeconds;
+
+	// What a tap is worth on a phone, when the phone is to differ. Unset does
+	// NOT mean `tap' or `auto_off' here, which is the one place these keys break
+	// their own pattern: a phone has no settings.toml of its own to edit - it
+	// reads one written at a keyboard and carried over - so a fallback would hand
+	// every phone a length nobody chose for it. Absent is five minutes. Read it
+	// through PeekTapSeconds(settings, device) in purple_engine.h, where the
+	// reasoning sits with the device it is about. Zero is still "off".
+	std::optional<int> tapMobileSeconds;
 };
 
 // Declared here so the two readers below can sit with the keys they read,

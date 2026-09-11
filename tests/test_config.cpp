@@ -4132,6 +4132,67 @@ hotkey_length = "30s"
 	CHECK_EQ(Purple::PeekTapSeconds(broken.settings), 180);
 	CHECK_EQ(Purple::PeekHotkeySeconds(broken.settings), 180);
 
+	// A phone taps for its own length. `tap_mobile' is read like the rest, and
+	// the device-aware reader is the only one that looks at it.
+	const auto phone = Device(u"pixel-1"_q, u"android"_q, u"mobile"_q);
+	const auto laptop = Device(u"mac-3f9a"_q, u"macos"_q, u"desktop"_q);
+	const auto mobile = Parse(uR"(
+[peek]
+auto_off   = "90s"
+tap        = "10m"
+tap_mobile = "2m"
+)"_q);
+	CHECK(mobile.ok());
+	CHECK_EQ(mobile.settings.peek.tapMobileSeconds.value_or(-1), 120);
+	CHECK_EQ(Purple::PeekTapSeconds(mobile.settings, phone), 120);
+
+	// The desktop keys go on meaning what they meant, and a client that did not
+	// say what it is gets the same answer the one-argument reader gives.
+	CHECK_EQ(Purple::PeekTapSeconds(mobile.settings, laptop), 600);
+	CHECK_EQ(
+		Purple::PeekTapSeconds(mobile.settings, Purple::DeviceIdentity()),
+		600);
+	CHECK_EQ(Purple::PeekTapSeconds(mobile.settings), 600);
+
+	// Class is compared the way a ruleset's is: case ignored.
+	CHECK_EQ(
+		Purple::PeekTapSeconds(
+			mobile.settings,
+			Device(QString(), u"ios"_q, u"Mobile"_q)),
+		120);
+
+	// A phone whose file says nothing about it taps for five minutes, NOT for
+	// `tap' or `auto_off': those were written at a keyboard, and a phone has no
+	// file of its own to correct them in.
+	CHECK_EQ(Purple::PeekTapSeconds(tapOnly.settings, phone), 300);
+	CHECK_EQ(Purple::PeekTapSeconds(tapOnly.settings, laptop), 600);
+	CHECK_EQ(Purple::PeekTapSeconds(silent.settings, phone), 300);
+	CHECK_EQ(
+		Purple::PeekTapSeconds(silent.settings, phone),
+		Purple::kPeekTapMobileDefaultSeconds);
+
+	// "off" is a length a phone may ask for, the same as anywhere else.
+	const auto mobileOff = Parse(
+		u"[peek]\nauto_off = \"3m\"\ntap_mobile = \"off\"\n"_q);
+	CHECK(mobileOff.settings.peek.tapMobileSeconds.has_value());
+	CHECK_EQ(Purple::PeekTapSeconds(mobileOff.settings, phone), 0);
+	CHECK_EQ(Purple::PeekTapSeconds(mobileOff.settings, laptop), 180);
+
+	// A spelling it cannot read warns, leaves the key unset, and the phone
+	// lands on the five minutes rather than on the desktop's number.
+	const auto mobileBroken = Parse(
+		u"[peek]\nauto_off = \"3m\"\ntap = \"10m\"\ntap_mobile = \"soon\"\n"_q);
+	CHECK(WarnsAbout(mobileBroken, u"peek: 'tap_mobile' should look like"_q));
+	CHECK(WarnsAbout(mobileBroken, u"falling back to five minutes"_q));
+	CHECK(!mobileBroken.settings.peek.tapMobileSeconds.has_value());
+	CHECK_EQ(Purple::PeekTapSeconds(mobileBroken.settings, phone), 300);
+	CHECK_EQ(Purple::PeekTapSeconds(mobileBroken.settings, laptop), 600);
+
+	// And the older warnings still name `auto_off', which is still where those
+	// two keys fall back to.
+	CHECK(WarnsAbout(broken, u"'tap' should look like \"5m\", \"90s\" or "
+		"\"off\", falling back to 'auto_off'."_q));
+
 	// The detents, which both apps must draw from here: the chips a sheet
 	// offers and the stops a dial snaps to are the same seven lengths.
 	const auto &detents = Purple::PeekDetentsSeconds();

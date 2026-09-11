@@ -977,4 +977,19 @@ ScheduleStatus ScheduleStatusNow(
 	return result;
 }
 
+int PeekTapSeconds(const Settings &settings, const DeviceIdentity &device) {
+	// Compared the way a ruleset's `device' is - case ignored, and trimmed -
+	// because the class reaches here through the same hand-written strings.
+	const auto cls = device.cls.trimmed();
+	if (!cls.isEmpty() && !cls.compare(u"mobile"_q, Qt::CaseInsensitive)) {
+		return settings.peek.tapMobileSeconds.value_or(
+			kPeekTapMobileDefaultSeconds);
+	}
+
+	// A desktop, and a client that did not say what it is: both get the answer
+	// the file has always given, since the reason a phone is special is that it
+	// cannot edit the file, and a device we cannot name is not one.
+	return PeekTapSeconds(settings);
+}
+
 } // namespace Purple

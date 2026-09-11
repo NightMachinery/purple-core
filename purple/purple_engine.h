@@ -640,4 +640,31 @@ struct ScheduleStatus {
 	const QDateTime &now,
 	const DeviceIdentity &device);
 
+// How long a tap on the peek control lasts on a phone that says nothing about
+// it: five minutes. Named rather than written at the one place that needs it,
+// because the number is documented and both apps will want to show it.
+inline constexpr auto kPeekTapMobileDefaultSeconds = 5 * 60;
+
+// How long a peek started by tapping the control lasts on THIS device:
+// `[peek] tap_mobile' on a phone, and `[peek] tap' else `[peek] auto_off'
+// anywhere else, which is exactly what PeekTapSeconds(settings) alone answers.
+//
+// It sits here rather than beside its two siblings in purple_settings.h
+// because it is the only one that has to know what the device is, and
+// DeviceIdentity is an engine type: the file describes devices, the device
+// describes itself.
+//
+// A phone with no `tap_mobile' does NOT fall back to `tap' or `auto_off'. It
+// has no settings.toml of its own - it reads the one written at a keyboard and
+// carried over - so falling back would mean every phone tapping for a length
+// chosen for a shortcut fired mid-sentence, and a tap on the list in your hand
+// is a longer look than that. Five minutes is the answer until the file says
+// otherwise, and the desktop keys keep meaning what they have always meant.
+//
+// Zero from `tap_mobile' is a real answer - "off", a peek with no clock on it -
+// exactly as it is from `tap'.
+[[nodiscard]] int PeekTapSeconds(
+	const Settings &settings,
+	const DeviceIdentity &device);
+
 } // namespace Purple

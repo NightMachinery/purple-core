@@ -1239,13 +1239,16 @@ void WarnUnknownLists(
 		}
 	}
 
-	// The two per-gesture lengths. Unparseable leaves them UNSET rather than
-	// defaulted, so a typo falls back to `auto_off' - which is what the file
-	// already says about how long a peek lasts - instead of to a number
-	// nobody wrote down anywhere.
+	// The per-gesture lengths. Unparseable leaves them UNSET rather than
+	// defaulted, so a typo falls back to whatever the key would have fallen
+	// back to had it not been written at all, instead of to a number nobody
+	// wrote down anywhere. Where that lands differs per key, so the warning has
+	// to say which: `tap' and `hotkey_length' fall back on `auto_off', and
+	// `tap_mobile' on the five minutes a phone gets when it says nothing.
 	const auto length = [&](
 			std::string_view key,
-			std::optional<int> &into) {
+			std::optional<int> &into,
+			const QString &fallback) {
 		const auto text = ReadString(table, key, context, warnings);
 		if (!text) {
 			return;
@@ -1254,11 +1257,12 @@ void WarnUnknownLists(
 		} else {
 			warnings.push_back(
 				u"peek: '%1' should look like \"5m\", \"90s\" or \"off\", "
-				"falling back to 'auto_off'."_q.arg(Text(key)));
+				"falling back to %2."_q.arg(Text(key), fallback));
 		}
 	};
-	length("tap", result.tapSeconds);
-	length("hotkey_length", result.hotkeyLengthSeconds);
+	length("tap", result.tapSeconds, u"'auto_off'"_q);
+	length("hotkey_length", result.hotkeyLengthSeconds, u"'auto_off'"_q);
+	length("tap_mobile", result.tapMobileSeconds, u"five minutes"_q);
 	return result;
 }
 
