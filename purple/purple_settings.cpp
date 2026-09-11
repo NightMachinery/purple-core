@@ -775,6 +775,11 @@ void WarnUnknownLists(
 			"hide_archive_p",
 			context,
 			warnings);
+		preset.hideAddStory = ReadBool(
+			*table,
+			"hide_add_story_p",
+			context,
+			warnings);
 		preset.hotkey = ReadString(
 			*table,
 			"hotkey",

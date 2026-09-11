@@ -287,6 +287,23 @@ struct Preset {
 	// Only ever asked while a preset is filtering, so Normal is untouched.
 	std::optional<bool> hideArchive;
 
+	// Whether the "add a story" button - your own row at the head of the
+	// stories strip - is off the strip while this preset runs.
+	//
+	// Nothing means YES, for the same reason hide_archive_p above says yes: the
+	// button is a door to posting rather than a chat, and a preset that has
+	// already named what gets through has no reason to leave one standing on
+	// the strip. Say false to keep the button.
+	//
+	// Its own key rather than a consequence of `stories' and the lists, which
+	// is how the row used to be decided: the row is yours, so whether Saved
+	// Messages happens to be named by some list has nothing to say about it.
+	// A peek is expected to put the button back - that is the clients' rule,
+	// not this flag's, and nothing here goes soft during one.
+	//
+	// Only ever asked while a preset is filtering, so Normal is untouched.
+	std::optional<bool> hideAddStory;
+
 	// What the stories strip does while this preset runs. Unset means Follow:
 	// the strip follows the preset's decision about the person, so somebody it
 	// excludes outright loses their story and somebody it is merely holding

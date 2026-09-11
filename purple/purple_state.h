@@ -71,6 +71,10 @@ struct ResolvedCache {
 	// saying nothing asks for - so an upgrade changes nothing here.
 	bool hideArchive = true;
 
+	// Same shape and the same reason: true in a file written by an older build,
+	// which is what a preset saying nothing asks for anyway.
+	bool hideAddStory = true;
+
 	// The main view's own pinned order. Empty means the preset mirrors the
 	// account's, which is the default and what an older file restores as.
 	std::vector<PeerIdValue> pinned;

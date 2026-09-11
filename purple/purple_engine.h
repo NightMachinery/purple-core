@@ -160,6 +160,15 @@ struct Resolved {
 	// default here costs nothing.
 	bool hideArchive = true;
 
+	// Whether the "add a story" button is off the stories strip while this
+	// preset runs. True unless the preset said otherwise; see
+	// Preset::hideAddStory. Asked, like hideArchive, only while a preset is
+	// filtering, and answered on its own rather than out of `stories' and the
+	// lists - the row is the user's, not a chat the preset is judging. Putting
+	// the button back for a peek is the clients' rule, so nothing here changes
+	// while one runs.
+	bool hideAddStory = true;
+
 	// A peek is running, so the preset's hiding is suspended - but not its
 	// silencing. Set by the gate from state.toml rather than by Resolve(): a
 	// peek is transient and expires on a clock, which is also why ToCache()

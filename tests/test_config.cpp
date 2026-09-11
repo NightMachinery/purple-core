@@ -4641,6 +4641,106 @@ list_order = [ { list = "os" } ]
 	CHECK(Purple::FromCache(older.resolvedCache)->hideArchive);
 }
 
+// The preset's own say over the "add a story" button. It used to fall out of
+// the stories policy and the lists, so under follow it vanished unless a list
+// happened to name Saved Messages; it is one key of its own now, hidden unless
+// the file asks otherwise.
+void TestAddStoryButton() {
+	Begin("add a story button");
+
+	const auto silent = Parse(uR"(
+[lists.os]
+members = [1]
+
+[presets.work]
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(silent.ok());
+	CHECK(silent.warnings.empty());
+	CHECK(!silent.settings.preset(u"work"_q)->hideAddStory.has_value());
+	CHECK(Purple::Resolve(silent.settings, u"work"_q)->hideAddStory);
+
+	const auto off = Parse(uR"(
+[lists.os]
+members = [1]
+
+[presets.work]
+hide_add_story_p = false
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(off.ok());
+	CHECK(off.warnings.empty());
+	CHECK_EQ(
+		off.settings.preset(u"work"_q)->hideAddStory.value_or(true),
+		false);
+	CHECK(!Purple::Resolve(off.settings, u"work"_q)->hideAddStory);
+
+	// The two flags are neighbours in the file and strangers to each other:
+	// handing the archive back says nothing about the button, which is the
+	// whole reason this key exists separately.
+	const auto split = Parse(uR"(
+[lists.os]
+members = [1]
+
+[presets.work]
+hide_add_story_p = true
+hide_archive_p = false
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(split.ok());
+	CHECK(split.warnings.empty());
+	CHECK_EQ(
+		split.settings.preset(u"work"_q)->hideAddStory.value_or(false),
+		true);
+	CHECK(Purple::Resolve(split.settings, u"work"_q)->hideAddStory);
+	CHECK(!Purple::Resolve(split.settings, u"work"_q)->hideArchive);
+
+	// Normal never asks - the consumer keys on whether a preset is filtering at
+	// all - so it carries the default and nothing acts on it.
+	CHECK(Purple::Resolve(off.settings, u"normal"_q)->hideAddStory);
+
+	// Anything that is not a boolean is a warning and the default, like every
+	// other flag in the file.
+	const auto wrong = Parse(uR"(
+[lists.os]
+members = [1]
+
+[presets.work]
+hide_add_story_p = "no"
+list_order = [ { list = "os" } ]
+)"_q);
+	CHECK(wrong.ok());
+	CHECK(WarnsAbout(wrong, u"'hide_add_story_p' should be true or false"_q));
+	CHECK(!wrong.settings.preset(u"work"_q)->hideAddStory.has_value());
+	CHECK(Purple::Resolve(wrong.settings, u"work"_q)->hideAddStory);
+
+	// It rides in the resolved cache next to the archive flag, so a
+	// settings.toml broken mid-edit does not put the button back on the strip
+	// while the preset is still running.
+	auto state = Purple::State();
+	state.activePreset = u"work"_q;
+	state.resolvedCache = Purple::ToCache(
+		*Purple::Resolve(off.settings, u"work"_q));
+	const auto written = Purple::SerializeState(state);
+	CHECK(written.contains(u"hide_add_story = false"_q));
+	const auto read = Purple::ParseState(written, u"state.toml"_q);
+	CHECK(read.resolvedCache.valid());
+	CHECK(!read.resolvedCache.hideAddStory);
+	CHECK(!Purple::FromCache(read.resolvedCache)->hideAddStory);
+	CHECK(read.resolvedCache.hideArchive);
+	CHECK(Purple::FromCache(read.resolvedCache)->hideArchive);
+
+	// A state.toml written before the key existed restores the default rather
+	// than the false an absent boolean would otherwise read as.
+	const auto older = Purple::ParseState(
+		u"active_preset = \"work\"\n[resolved_cache]\npreset = \"work\"\n"
+		"lists = [{ list = \"os\", notify = true }]\n"_q,
+		u"state.toml"_q);
+	CHECK(older.resolvedCache.valid());
+	CHECK(older.resolvedCache.hideAddStory);
+	CHECK(Purple::FromCache(older.resolvedCache)->hideAddStory);
+}
+
 // The two flags that are off unless the file asks: one about a strip the server
 // fills in, one about sending the file itself somewhere. Both default to false,
 // which is what an older settings.toml with neither key says too.
@@ -7622,6 +7722,7 @@ int main() {
 	TestPresetHotkeys();
 	TestOverrides();
 	TestSuggestionsAndArchive();
+	TestAddStoryButton();
 	TestSyncAndRecommended();
 	TestReservedHotkeys();
 	TestStories();
