@@ -396,8 +396,9 @@ void RememberTrade(
 // see them without the include arrow between the two files turning into a
 // cycle.
 enum class LastSeenLine : uchar {
-	// Left exactly as the app wrote it. Hidden by them, "a long time ago", an
-	// exact time, or the explanations turned off: nothing true to add.
+	// Left exactly as the app wrote it. Hidden by them, an exact time, "a long
+	// time ago" with no read to put over it, or the explanations turned off:
+	// nothing true to add.
 	Plain,
 
 	// The coarse text plus the offer, after the usual middle dot. Only ever
@@ -438,23 +439,39 @@ struct LastSeenNote {
 
 // The whole three-way decision, in the core, for both apps.
 //
-// `coarse' is the caller saying the status is one of the three vague spellings
-// - recently, last week, last month - and `reason' is what ReasonFor() made of
-// it. Both come from the client because a status is a client type; everything
-// after that is a rule about data, and rules about data live here. Until now
-// the two apps each carried their own copy of the ordering below, and they had
-// already drifted on the last line of it.
+// `shape' is the caller saying which of the three kinds of status this is, and
+// `reason' is what ReasonFor() made of it. Both come from the client because a
+// status is a client type; everything after that is a rule about data, and
+// rules about data live here. Until now the two apps each carried their own
+// copy of the ordering below, and they had already drifted on the last line of
+// it.
 //
 // The order is precedence, and each step is its own decision:
 //
-// - Remembered wins whenever a trade is still remembered and read a real
+// - Plain immediately for an Exact status. The app has the real moment; a read
+//   from some hours ago put over the top of it would be older news dressed as
+//   newer, and this is the one case where the server has already answered the
+//   question the trade was asked to answer.
+// - Remembered otherwise, whenever a trade is still remembered and read a real
 //   `was_online'. NOT gated on `reasons_p': this is not the fork explaining a
 //   status, it is the fork showing what a trade the user asked for came back
 //   with, and turning the explanations off should not hide the answer to a
 //   question they asked out loud.
-// - ByMeTail otherwise, when the status is coarse because of our own rules and
+// - ByMeTail otherwise, when the status is Coarse because of our own rules and
 //   `reasons_p' is on. That IS the fork explaining, so the switch governs it.
-// - Plain otherwise, a non-coarse status included.
+// - Plain otherwise.
+//
+// What gates the remembered line is the AGE OF THE MEMORY - is it still within
+// `trade_remember' - and not the shape of the status sitting under it. A read
+// does not stop being a real moment that was really read because their status
+// has since gone to "a long time ago"; if anything that is when it is worth
+// the most, because it is now the only moment anyone has. Only an Exact status
+// takes the memory's place, and it takes it by being newer rather than by
+// being a different shape.
+//
+// "A long time ago" is still never EXPLAINED, though: it gets the remembered
+// line or nothing, never a tail. The server is not withholding a moment there,
+// so there is no coarsening for the fork to attribute to anybody.
 //
 // `tappable' needs `trade_p' - it is the offer, and switching the offer off is
 // the whole of what that key does - plus a line worth tapping:
@@ -472,12 +489,16 @@ struct LastSeenNote {
 // `cooldownLeftSeconds' and offers the re-trade once that is spent. A
 // remembered line whose reason is no longer ByMe is not tappable: they have
 // changed their own privacy since, and there is nothing left to trade for.
+// That covers a remembered line over "a long time ago" without needing a rule
+// of its own - such a status has no reason at all - and the answer is the
+// right one for it: they have gone quiet or shut us out, and neither is
+// something the other half of a trade can buy back.
 [[nodiscard]] LastSeenNote LastSeenNoteNow(
 	const Settings &settings,
 	const State &state,
 	PeerIdValue peer,
 	LastSeenReason reason,
-	bool coarse,
+	LastSeenShape shape,
 	int64 nowUnix);
 
 // Drops the trades that have gone stale. The serialiser cannot do this on its

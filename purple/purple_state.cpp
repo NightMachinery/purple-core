@@ -672,7 +672,7 @@ LastSeenNote LastSeenNoteNow(
 		const State &state,
 		PeerIdValue peer,
 		LastSeenReason reason,
-		bool coarse,
+		LastSeenShape shape,
 		int64 nowUnix) {
 	const auto &config = settings.lastSeen;
 	auto result = LastSeenNote();
@@ -684,7 +684,10 @@ LastSeenNote LastSeenNoteNow(
 		peer,
 		nowUnix,
 		config.tradeCooldownSeconds);
-	if (!coarse) {
+	if (shape == LastSeenShape::Exact) {
+		// The only shape that outranks a remembered read, and it outranks it
+		// on age rather than on kind: the server has just handed over the
+		// moment the trade went and bought, fresher than the copy we kept.
 		return result;
 	}
 	const auto trade = RememberedTrade(
@@ -693,14 +696,25 @@ LastSeenNote LastSeenNoteNow(
 		nowUnix,
 		config.tradeRememberSeconds);
 	if (trade && trade->wasOnlineUnix) {
+		// Whether the status under it is Coarse or LongAgo makes no difference:
+		// the memory's own age is the gate, and a read stays a real moment that
+		// was really read however their status has moved since.
+		//
 		// A trade that ran its hold out without an exact status arriving has
 		// nothing to say here - `wasOnlineUnix' is zero and there is no moment
-		// to show - so it falls through to the tail, still holding the
-		// cooldown that was set above.
+		// to show - so it falls through, still holding the cooldown that was
+		// set above.
 		result.line = LastSeenLine::Remembered;
 		result.wasOnlineUnix = trade->wasOnlineUnix;
 		result.readAtUnix = trade->readAtUnix;
-	} else if (config.reasons && reason == LastSeenReason::ByMe) {
+	} else if (shape == LastSeenShape::Coarse
+		&& config.reasons
+		&& reason == LastSeenReason::ByMe) {
+		// The shape is tested here as well as the reason, even though
+		// ReasonFor() never gives "a long time ago" a reason: the two arrive as
+		// separate arguments - separate ints, across JNI - and "a long time ago
+		// is never explained" is a rule worth being able to read in the one
+		// place it is applied rather than inferring from another file.
 		result.line = LastSeenLine::ByMeTail;
 	}
 	result.tappable = config.trade

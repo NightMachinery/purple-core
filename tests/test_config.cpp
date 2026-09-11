@@ -6633,24 +6633,31 @@ void TestLastSeenReasons() {
 	Begin("last seen reasons");
 
 	using Reason = Purple::LastSeenReason;
+	using Shape = Purple::LastSeenShape;
 
 	// An exact was_online explains itself, so there is nothing to append -
 	// and it stays nothing even if a by_me flag rode along, which would be the
 	// server describing a coarsening that did not happen.
-	CHECK(Purple::ReasonFor(true, false, false) == Reason::None);
-	CHECK(Purple::ReasonFor(true, true, true) == Reason::None);
+	CHECK(Purple::ReasonFor(Shape::Exact, false) == Reason::None);
+	CHECK(Purple::ReasonFor(Shape::Exact, true) == Reason::None);
 
 	// Coarse because of our own rules is the one case with something to offer.
-	CHECK(Purple::ReasonFor(false, true, true) == Reason::ByMe);
+	CHECK(Purple::ReasonFor(Shape::Coarse, true) == Reason::ByMe);
 
 	// Coarse and not by us is their setting, and nothing to say about it.
-	CHECK(Purple::ReasonFor(false, true, false) == Reason::HiddenByThem);
+	CHECK(Purple::ReasonFor(Shape::Coarse, false) == Reason::HiddenByThem);
 
 	// userStatusEmpty - "a long time ago". Inactivity and a block look
 	// identical here and the server does not say which, so the fork never
 	// infers a block from it whatever else it was handed.
-	CHECK(Purple::ReasonFor(false, false, false) == Reason::None);
-	CHECK(Purple::ReasonFor(false, false, true) == Reason::None);
+	CHECK(Purple::ReasonFor(Shape::LongAgo, false) == Reason::None);
+	CHECK(Purple::ReasonFor(Shape::LongAgo, true) == Reason::None);
+
+	// The order is the wire format: Android hands these across JNI as ints,
+	// and a tidy-up that reordered them would move every status one along.
+	CHECK_EQ(int(Shape::Exact), 0);
+	CHECK_EQ(int(Shape::Coarse), 1);
+	CHECK_EQ(int(Shape::LongAgo), 2);
 }
 
 void TestLastSeenTrades() {
@@ -6776,20 +6783,21 @@ void TestLastSeenNote() {
 
 	using Line = Purple::LastSeenLine;
 	using Reason = Purple::LastSeenReason;
+	using Shape = Purple::LastSeenShape;
 
 	auto settings = Purple::Settings();
 	auto state = Purple::State();
 	const auto now = int64(1788000000);
 	const auto note = [&](
 			Reason reason,
-			bool coarse = true,
+			Shape shape = Shape::Coarse,
 			int64 when = 0) {
 		return Purple::LastSeenNoteNow(
 			settings,
 			state,
 			7,
 			reason,
-			coarse,
+			shape,
 			when ? when : now);
 	};
 
@@ -6801,16 +6809,23 @@ void TestLastSeenNote() {
 	CHECK_EQ(tail.wasOnlineUnix, int64(0));
 	CHECK_EQ(tail.cooldownLeftSeconds, 0);
 
-	// Coarse because of theirs, and "a long time ago": nothing true to add.
+	// Coarse because of theirs, and coarse with no reason the client could
+	// name: nothing true to add either way.
 	CHECK(note(Reason::HiddenByThem).line == Line::Plain);
 	CHECK(!note(Reason::HiddenByThem).tappable);
 	CHECK(note(Reason::None).line == Line::Plain);
 	CHECK(!note(Reason::None).tappable);
 
-	// An exact time is not coarse, so there is nothing to explain even when
-	// the reason says otherwise.
-	CHECK(note(Reason::ByMe, false).line == Line::Plain);
-	CHECK(!note(Reason::ByMe, false).tappable);
+	// An exact time explains itself, so there is nothing to add even when the
+	// reason says otherwise. "A long time ago" is not explained either, and
+	// that holds even if a caller pairs it with a ByMe the mapping would never
+	// have produced: it is not a coarsening, so there is nobody to blame it on.
+	CHECK(note(Reason::ByMe, Shape::Exact).line == Line::Plain);
+	CHECK(!note(Reason::ByMe, Shape::Exact).tappable);
+	CHECK(note(Reason::None, Shape::LongAgo).line == Line::Plain);
+	CHECK(!note(Reason::None, Shape::LongAgo).tappable);
+	CHECK(note(Reason::ByMe, Shape::LongAgo).line == Line::Plain);
+	CHECK(!note(Reason::ByMe, Shape::LongAgo).tappable);
 
 	// reasons_p takes the tail away, and the tap with it - the tap belongs to
 	// a line that is no longer drawn.
@@ -6837,8 +6852,8 @@ void TestLastSeenNote() {
 	// The cooldown is counted from the read whatever the line says, because it
 	// is the sheet's number and the sheet is what a tap opens.
 	CHECK_EQ(remembered.cooldownLeftSeconds, 240);
-	CHECK_EQ(note(Reason::ByMe, true, now + 239).cooldownLeftSeconds, 1);
-	CHECK_EQ(note(Reason::ByMe, true, now + 240).cooldownLeftSeconds, 0);
+	CHECK_EQ(note(Reason::ByMe, Shape::Coarse, now + 239).cooldownLeftSeconds, 1);
+	CHECK_EQ(note(Reason::ByMe, Shape::Coarse, now + 240).cooldownLeftSeconds, 0);
 
 	// Not gated on reasons_p: this is not the fork explaining a status, it is
 	// the fork showing what a trade the user asked for came back with. The tap
@@ -6863,15 +6878,72 @@ void TestLastSeenNote() {
 	CHECK(note(Reason::None).line == Line::Remembered);
 	CHECK(!note(Reason::None).tappable);
 
-	// An exact status outranks the memory: the app already has the real time.
-	CHECK(note(Reason::None, false).line == Line::Plain);
+	// An exact status outranks the memory: the app already has the real time,
+	// and it is a fresher one than the trade brought back.
+	CHECK(note(Reason::None, Shape::Exact).line == Line::Plain);
+	CHECK(!note(Reason::None, Shape::Exact).tappable);
+	CHECK_EQ(note(Reason::None, Shape::Exact).wasOnlineUnix, int64(0));
+
+	// "A long time ago" does NOT outrank it. What gates the remembered line is
+	// the age of the memory, not the shape of the status underneath: a read is
+	// still a real moment that was really read, and their status having gone
+	// quiet since is when it is worth the most, because it is now the only
+	// moment anybody has.
+	const auto quiet = note(Reason::None, Shape::LongAgo);
+	CHECK(quiet.line == Line::Remembered);
+	CHECK_EQ(quiet.wasOnlineUnix, now - 900);
+	CHECK_EQ(quiet.readAtUnix, now - 60);
+	CHECK_EQ(quiet.cooldownLeftSeconds, 240);
+
+	// Not tappable, and trade_p being on is not enough to make it so: the
+	// reason for "a long time ago" is None, so the tap rule that already covers
+	// a reason gone from ByMe covers this too. They have gone quiet or shut us
+	// out, and neither is something the other half of a trade buys back.
+	CHECK(settings.lastSeen.trade);
+	CHECK(!quiet.tappable);
+
+	// And not gated on reasons_p either, for the same reason no remembered line
+	// is: it is the answer to a question the user asked out loud.
+	settings.lastSeen.reasons = false;
+	CHECK(note(Reason::None, Shape::LongAgo).line == Line::Remembered);
+	CHECK(!note(Reason::None, Shape::LongAgo).tappable);
+	settings.lastSeen.reasons = true;
+
+	// The memory's own age is the whole of the gate. One second inside the
+	// window it is still shown over "a long time ago"; one second outside, the
+	// line is Plain - there is no tail to fall back to, because there is
+	// nothing about "a long time ago" to explain.
+	const auto lastMoment = now - 60 + settings.lastSeen.tradeRememberSeconds;
+	CHECK(note(Reason::None, Shape::LongAgo, lastMoment - 1).line
+		== Line::Remembered);
+	CHECK(note(Reason::None, Shape::LongAgo, lastMoment).line == Line::Plain);
+
+	// No memory at all and nothing to say about the status: Plain either way
+	// the explanations are switched.
+	auto blank = Purple::State();
+	const auto nothing = [&](Shape shape) {
+		return Purple::LastSeenNoteNow(
+			settings,
+			blank,
+			7,
+			Reason::None,
+			shape,
+			now);
+	};
+	CHECK(nothing(Shape::LongAgo).line == Line::Plain);
+	CHECK(!nothing(Shape::LongAgo).tappable);
+	CHECK_EQ(nothing(Shape::LongAgo).cooldownLeftSeconds, 0);
+	settings.lastSeen.reasons = false;
+	CHECK(nothing(Shape::LongAgo).line == Line::Plain);
+	CHECK(!nothing(Shape::LongAgo).tappable);
+	settings.lastSeen.reasons = true;
 
 	// Past trade_remember the record stops being news and the line falls back
 	// to the tail, offer and all.
 	const auto later = now + settings.lastSeen.tradeRememberSeconds;
-	CHECK(note(Reason::ByMe, true, later).line == Line::ByMeTail);
-	CHECK(note(Reason::ByMe, true, later).tappable);
-	CHECK_EQ(note(Reason::ByMe, true, later).cooldownLeftSeconds, 0);
+	CHECK(note(Reason::ByMe, Shape::Coarse, later).line == Line::ByMeTail);
+	CHECK(note(Reason::ByMe, Shape::Coarse, later).tappable);
+	CHECK_EQ(note(Reason::ByMe, Shape::Coarse, later).cooldownLeftSeconds, 0);
 
 	// A trade whose hold ran out with no exact status is not a moment to show,
 	// so the line is the tail again - but it is still an attempt, so the
@@ -6883,7 +6955,7 @@ void TestLastSeenNote() {
 		timedOut,
 		7,
 		Reason::ByMe,
-		true,
+		Shape::Coarse,
 		now + 60);
 	CHECK(after.line == Line::ByMeTail);
 	CHECK(after.tappable);

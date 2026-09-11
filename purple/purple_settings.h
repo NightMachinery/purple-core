@@ -704,19 +704,51 @@ enum class LastSeenReason : uchar {
 	HiddenByThem,
 };
 
-// The mapping, given what the status carried:
+// What SHAPE a last seen has, which is the one thing about a status the core
+// cannot work out for itself: a status is a client type, and neither fork's TL
+// layer belongs in here. Each app flattens its own status object to one of
+// these three and the shared rules take it from there.
 //
-// - `exactKnown' is a status with a real `was_online' in it;
-// - `coarse' is one of userStatusRecently / LastWeek / LastMonth;
-// - `byMe' is the `by_me' flag the server sets on a coarse status when the
-//   coarsening is the consequence of our own privacy rules.
+// Three and no fourth, because the three are what the rules actually turn on -
+// and a single value rather than the pair of booleans this used to be, so that
+// "exact AND coarse" is not a state a caller can hand over and the core then
+// has to decide what to do about.
 //
-// A status that is neither exact nor coarse is userStatusEmpty or offline
-// with nothing usable, and gets None.
-[[nodiscard]] LastSeenReason ReasonFor(
-	bool exactKnown,
-	bool coarse,
-	bool byMe);
+// The numbering is load-bearing: Android passes it across JNI as a plain int,
+// so the order is part of the boundary rather than an implementation detail.
+// The static_asserts below are what stops a tidy-up from reordering it, and
+// they live here rather than in the bridge so that the guard is in the file
+// the reorder would happen in.
+enum class LastSeenShape : uchar {
+	// A real moment - a `was_online' the server actually gave us - or online
+	// now. The app already has the truth and there is nothing to add to it.
+	Exact,
+
+	// One of the three vague spellings: recently, last week, last month. The
+	// server had a moment and would not say it, which is the only shape with
+	// something to explain and the only one a trade is offered for.
+	Coarse,
+
+	// `userStatusEmpty' - "a long time ago". Not a coarsening of anything: the
+	// server is not withholding a moment, it is saying there is no recent one.
+	// Inactivity and a block look identical here.
+	LongAgo,
+};
+
+static_assert(int(LastSeenShape::Exact) == 0);
+static_assert(int(LastSeenShape::Coarse) == 1);
+static_assert(int(LastSeenShape::LongAgo) == 2);
+
+// The mapping from a shape and the server's `by_me' flag - the flag it sets on
+// a coarse status when the coarsening is the consequence of our own privacy
+// rules.
+//
+// Only a coarse status has a reason at all: an exact one has nothing to
+// explain, and "a long time ago" is the one the fork refuses to explain,
+// because inactivity and a block look the same from here and the server does
+// not say which. A `by_me' riding along on either is the server describing a
+// coarsening that did not happen, and is ignored rather than believed.
+[[nodiscard]] LastSeenReason ReasonFor(LastSeenShape shape, bool byMe);
 
 // What a stretch of screen time was spent in: one of the chat kinds, or the
 // time that was not in a chat at all - the list, search, settings - which is

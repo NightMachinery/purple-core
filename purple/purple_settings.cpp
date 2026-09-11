@@ -1893,17 +1893,13 @@ QString BudgetModeName(BudgetMode value) {
 	return QString();
 }
 
-LastSeenReason ReasonFor(bool exactKnown, bool coarse, bool byMe) {
-	// Exact first, and unconditionally: a status carrying a real moment has
-	// nothing to explain, and a `by_me' flag riding along on one would be the
-	// server describing a coarsening that did not happen.
-	if (exactKnown) {
-		return LastSeenReason::None;
-	} else if (!coarse) {
-		// userStatusEmpty - "a long time ago" - or a status with nothing
-		// usable in it. Inactivity and a block look identical here and the
-		// server does not say which, so the fork says nothing rather than
-		// guessing at the one answer it would be unforgivable to get wrong.
+LastSeenReason ReasonFor(LastSeenShape shape, bool byMe) {
+	// Only a coarse status has a reason, so `byMe' is read only there. On an
+	// exact status it would be the server describing a coarsening that did not
+	// happen; on "a long time ago" it would be the fork guessing at the one
+	// answer it would be unforgivable to get wrong, since inactivity and a
+	// block look identical from here and the server does not say which.
+	if (shape != LastSeenShape::Coarse) {
 		return LastSeenReason::None;
 	}
 	return byMe ? LastSeenReason::ByMe : LastSeenReason::HiddenByThem;
