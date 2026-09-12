@@ -73,6 +73,12 @@ enum class EventKind : uchar {
 	// preset hides, while this is the peek itself - started, very often, to
 	// look at the list rather than to open anything on it.
 	//
+	// A Peek is written when one starts AND whenever the running one's deadline
+	// moves - an extension, a chip tapped again - each carrying the deadline in
+	// `action'. That is not a second peek and does not count as one; it is the
+	// log keeping an answer to "when was this due to end" that survives the app
+	// being killed.
+	//
 	// Neither cuts a session or touches a total. A peek does not change which
 	// chat is in front of you; it changes what the list beside it is willing
 	// to show.
@@ -104,7 +110,16 @@ struct Event {
 	// file spells it, so a total can be split by preset without a lookup.
 	QString preset;
 
-	// Which action, for an Action. Empty for everything else.
+	// Which action, for an Action, and for a Peek the moment that peek is due
+	// to end - unix milliseconds, or empty for one with no clock on it. Empty
+	// for every other kind.
+	//
+	// The deadline rides along here rather than in a field of its own because
+	// a line has seven fields and a reader that has to count them is a reader
+	// two apps can disagree with. What it is for is DerivePeeks: an app killed
+	// while a peek ran leaves a peek with no end in the log, and a peek that
+	// cannot outlive its own deadline is one that cannot swallow the hours the
+	// app spent dead.
 	QString action;
 
 	// Whether the chat an Open names is one the running preset hides - which
@@ -272,8 +287,12 @@ struct PeekRun {
 // - a PeekEnd with nothing open is ignored, which is what the tail of a log
 //   whose start was pruned away looks like;
 // - a run still open at the end of the log ends at the last thing we know
-//   happened, exactly as an unfinished session does. Guessing at anything later
-//   would invent peek time, and a crash is the ordinary way to get one.
+//   happened, or at the deadline its last Peek carried if that came first. An
+//   app killed while a peek ran is the ordinary way to get a run with no end,
+//   and without the deadline it would swallow every hour between the kill and
+//   the next thing the log has to say. A peek with no clock on it has no
+//   deadline to be bounded by, which is right: that one really does run until
+//   somebody stops it.
 [[nodiscard]] std::vector<PeekRun> DerivePeeks(const std::vector<Event> &events);
 
 // How much peek there was in a window: how many and how long.

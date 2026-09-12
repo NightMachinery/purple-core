@@ -467,6 +467,7 @@ std::vector<PeekRun> DerivePeeks(const std::vector<Event> &events) {
 	});
 
 	auto open = std::optional<int64>();
+	auto deadline = int64(0);
 	auto lastMs = ordered.front().unixMs;
 	for (const auto &event : ordered) {
 		lastMs = std::max(lastMs, event.unixMs);
@@ -474,13 +475,24 @@ std::vector<PeekRun> DerivePeeks(const std::vector<Event> &events) {
 			if (!open) {
 				open = event.unixMs;
 			}
+			// Always the latest one, so an extension that moved the deadline
+			// bounds the run by where it was really going to end rather than
+			// by where the peek first said.
+			auto ok = false;
+			const auto written = event.action.trimmed().toLongLong(&ok);
+			deadline = ok ? written : int64(0);
 		} else if (event.kind == EventKind::PeekEnd && open) {
 			result.push_back({ *open, std::max(*open, event.unixMs) });
 			open.reset();
+			deadline = 0;
 		}
 	}
 	if (open) {
-		result.push_back({ *open, std::max(*open, lastMs) });
+		// Nothing ended it: the app was killed, or the log stops here. It ran
+		// until the last thing we know happened, and no longer than it was due
+		// to - a peek cannot outlive its own deadline.
+		const auto till = (deadline > 0) ? std::min(lastMs, deadline) : lastMs;
+		result.push_back({ *open, std::max(*open, till) });
 	}
 	return result;
 }

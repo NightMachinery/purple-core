@@ -7547,6 +7547,66 @@ void TestScreenTimePeeks() {
 	CHECK_EQ(peeks.size(), size_t(1));
 	CHECK_EQ(peeks[0].endMs, t0 + m(11));
 
+	// An app killed while a peek ran leaves a run with no end in the log, and
+	// the deadline the Peek carried is what stops it swallowing the hours the
+	// app spent dead.
+	const auto peekAt = [&](int64 ms, int64 deadline) {
+		auto result = Ev(ms, Kind::Peek);
+		result.action = QString::number(deadline);
+		return result;
+	};
+	events = {
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		peekAt(t0 + m(1), t0 + m(6)),
+		Ev(t0 + m(2), Kind::Background),
+		Ev(t0 + m(400), Kind::Foreground),
+	};
+	peeks = Purple::DerivePeeks(events);
+	CHECK_EQ(peeks.size(), size_t(1));
+	CHECK_EQ(peeks[0].endMs, t0 + m(6));
+
+	// A deadline the log never reached is no bound at all: the run still ends
+	// at the last thing we know happened.
+	events = {
+		peekAt(t0, t0 + m(60)),
+		Ev(t0 + m(10), Kind::Foreground),
+	};
+	peeks = Purple::DerivePeeks(events);
+	CHECK_EQ(peeks[0].endMs, t0 + m(10));
+
+	// An extension moves it, and the later deadline is the one that binds -
+	// which is why a Peek is written whenever the deadline moves and not only
+	// when a peek starts.
+	events = {
+		peekAt(t0, t0 + m(5)),
+		peekAt(t0 + m(4), t0 + m(9)),
+		Ev(t0 + m(400), Kind::Foreground),
+	};
+	peeks = Purple::DerivePeeks(events);
+	CHECK_EQ(peeks.size(), size_t(1));
+	CHECK_EQ(peeks[0].startMs, t0);
+	CHECK_EQ(peeks[0].endMs, t0 + m(9));
+
+	// A peek with no clock on it carries no deadline and is bounded by nothing,
+	// which is right: that one really does run until somebody stops it.
+	events = {
+		Ev(t0, Kind::Peek),
+		Ev(t0 + m(400), Kind::Foreground),
+	};
+	peeks = Purple::DerivePeeks(events);
+	CHECK_EQ(peeks[0].endMs, t0 + m(400));
+
+	// An end says so whatever the deadline said: a peek stopped by hand ended
+	// when it was stopped, and one extended past its deadline ran past it.
+	events = {
+		peekAt(t0, t0 + m(5)),
+		Ev(t0 + m(2), Kind::PeekEnd),
+		Ev(t0 + m(400), Kind::Foreground),
+	};
+	peeks = Purple::DerivePeeks(events);
+	CHECK_EQ(peeks.size(), size_t(1));
+	CHECK_EQ(peeks[0].endMs, t0 + m(2));
+
 	// A second Peek with no end between them is the app having been restarted
 	// while the same peek ran, so it carries on rather than counting twice.
 	events = {
