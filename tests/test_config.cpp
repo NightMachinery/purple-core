@@ -7452,6 +7452,121 @@ void TestScreenTimeSessions() {
 	CHECK(Purple::DeriveSessions({}, settings).empty());
 }
 
+void TestScreenTimePeeks() {
+	Begin("screen time peeks");
+
+	const auto t0 = int64(1788000000000);
+	const auto s = [](int seconds) { return int64(seconds) * 1000; };
+	const auto m = [&](int minutes) { return s(minutes * 60); };
+	using Kind = Purple::EventKind;
+
+	// The pair reads back off a line like every other kind, which is what lets
+	// a log written by one app be read by the other.
+	CHECK_EQ(Purple::EventKindName(Kind::Peek), u"peek"_q);
+	CHECK_EQ(Purple::EventKindName(Kind::PeekEnd), u"peek_end"_q);
+	CHECK(Purple::ParseEventKind(u"peek"_q) == Kind::Peek);
+	CHECK(Purple::ParseEventKind(u"peek_end"_q) == Kind::PeekEnd);
+	CHECK(Purple::ParseEventLine(
+		Purple::FormatEvent(Ev(t0, Kind::Peek))) == Ev(t0, Kind::Peek));
+
+	// Four peeks and twenty-three minutes, which is the line this is for.
+	auto events = std::vector<Purple::Event>{
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		Ev(t0 + m(1), Kind::Peek),
+		Ev(t0 + m(6), Kind::PeekEnd),
+		Ev(t0 + m(20), Kind::Peek),
+		Ev(t0 + m(30), Kind::PeekEnd),
+		Ev(t0 + m(40), Kind::Peek),
+		Ev(t0 + m(45), Kind::PeekEnd),
+		Ev(t0 + m(50), Kind::Peek),
+		Ev(t0 + m(53), Kind::PeekEnd),
+		Ev(t0 + m(60), Kind::Close, 5, u"work"_q),
+	};
+	auto peeks = Purple::DerivePeeks(events);
+	CHECK_EQ(peeks.size(), size_t(4));
+	CHECK_EQ(peeks[0].startMs, t0 + m(1));
+	CHECK_EQ(peeks[0].endMs, t0 + m(6));
+	auto usage = Purple::PeekUsageIn(peeks, t0, t0 + m(60));
+	CHECK_EQ(usage.count, 4);
+	CHECK_EQ(usage.totalMs, m(23));
+
+	// Peeking is not the same question as the time spent in hidden chats: the
+	// sessions are untouched by either event, because the same chat was in
+	// front of you throughout.
+	const auto sessions = Purple::DeriveSessions(events, Purple::ScreenTime());
+	CHECK_EQ(sessions.size(), size_t(1));
+	CHECK_EQ(sessions[0].totalMs(), m(60));
+
+	// A peek still running at the end of the log ends at the last thing we
+	// know happened, exactly as an unfinished session does.
+	events = {
+		Ev(t0, Kind::Open, 5, u"work"_q),
+		Ev(t0 + m(1), Kind::Peek),
+		Ev(t0 + m(11), Kind::Action, 5, u"work"_q),
+	};
+	peeks = Purple::DerivePeeks(events);
+	CHECK_EQ(peeks.size(), size_t(1));
+	CHECK_EQ(peeks[0].endMs, t0 + m(11));
+
+	// A second Peek with no end between them is the app having been restarted
+	// while the same peek ran, so it carries on rather than counting twice.
+	events = {
+		Ev(t0, Kind::Peek),
+		Ev(t0 + m(5), Kind::Peek),
+		Ev(t0 + m(10), Kind::PeekEnd),
+	};
+	peeks = Purple::DerivePeeks(events);
+	CHECK_EQ(peeks.size(), size_t(1));
+	CHECK_EQ(peeks[0].startMs, t0);
+	CHECK_EQ(peeks[0].endMs, t0 + m(10));
+
+	// An end with nothing open is what the tail of a pruned log looks like.
+	peeks = Purple::DerivePeeks({ Ev(t0, Kind::PeekEnd) });
+	CHECK(peeks.empty());
+	CHECK(Purple::DerivePeeks({}).empty());
+
+	// Out of order in the file, in order here: the log is appended to from
+	// more than one place.
+	peeks = Purple::DerivePeeks({
+		Ev(t0 + m(10), Kind::PeekEnd),
+		Ev(t0, Kind::Peek),
+	});
+	CHECK_EQ(peeks.size(), size_t(1));
+	CHECK_EQ(peeks[0].startMs, t0);
+
+	// A peek across the edge of a window counts in both, with the part that
+	// fell inside each - the way a chat left open across midnight does.
+	peeks = { Purple::PeekRun{ t0 - m(2), t0 + m(3) } };
+	usage = Purple::PeekUsageIn(peeks, t0, t0 + m(60));
+	CHECK_EQ(usage.count, 1);
+	CHECK_EQ(usage.totalMs, m(3));
+	usage = Purple::PeekUsageIn(peeks, t0 - m(60), t0);
+	CHECK_EQ(usage.count, 1);
+	CHECK_EQ(usage.totalMs, m(2));
+
+	// Half-open at both ends, so two neighbouring windows cannot both claim
+	// the moment they meet: a peek that ended exactly as the window opened is
+	// the window before's.
+	peeks = { Purple::PeekRun{ t0 - m(5), t0 } };
+	usage = Purple::PeekUsageIn(peeks, t0, t0 + m(60));
+	CHECK_EQ(usage.count, 0);
+	CHECK_EQ(usage.totalMs, int64(0));
+
+	// One with no length at all - a tap taken back inside the same
+	// millisecond - still counts as a peek, because it was one.
+	peeks = { Purple::PeekRun{ t0, t0 } };
+	usage = Purple::PeekUsageIn(peeks, t0, t0 + m(60));
+	CHECK_EQ(usage.count, 1);
+	CHECK_EQ(usage.totalMs, int64(0));
+	usage = Purple::PeekUsageIn(peeks, t0 - m(60), t0);
+	CHECK_EQ(usage.count, 0);
+
+	// An empty window is an empty answer rather than a negative one.
+	usage = Purple::PeekUsageIn(peeks, t0 + m(60), t0);
+	CHECK_EQ(usage.count, 0);
+	CHECK_EQ(usage.totalMs, int64(0));
+}
+
 void TestScreenTimeTotals() {
 	Begin("screen time totals");
 
@@ -7968,6 +8083,7 @@ int main() {
 	TestScreenTimeSettings();
 	TestScreenTimeLog();
 	TestScreenTimeSessions();
+	TestScreenTimePeeks();
 	TestScreenTimeTotals();
 	TestScreenTimeBudgets();
 	TestFormatSpan();

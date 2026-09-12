@@ -201,6 +201,10 @@ std::optional<EventKind> ParseEventKind(const QString &value) {
 		return EventKind::Foreground;
 	} else if (trimmed == u"background"_q) {
 		return EventKind::Background;
+	} else if (trimmed == u"peek"_q) {
+		return EventKind::Peek;
+	} else if (trimmed == u"peek_end"_q) {
+		return EventKind::PeekEnd;
 	}
 	return std::nullopt;
 }
@@ -215,6 +219,8 @@ QString EventKindName(EventKind value) {
 	case EventKind::Preset: return u"preset"_q;
 	case EventKind::Foreground: return u"foreground"_q;
 	case EventKind::Background: return u"background"_q;
+	case EventKind::Peek: return u"peek"_q;
+	case EventKind::PeekEnd: return u"peek_end"_q;
 	}
 	return QString();
 }
@@ -432,12 +438,78 @@ std::vector<Session> DeriveSessions(
 				idleFrom = 0;
 			}
 			break;
+
+		case EventKind::Peek:
+		case EventKind::PeekEnd:
+			// Nothing here. A peek does not cut a session and does not end
+			// one: the same chat is in front of you, for as long as it was.
+			// DerivePeeks() is where these two are read.
+			break;
 		}
 	}
 
 	// A session still open at the end of the log ran until the last thing we
 	// know happened. Guessing at anything later would invent screen time.
 	finish(lastMs);
+	return result;
+}
+
+std::vector<PeekRun> DerivePeeks(const std::vector<Event> &events) {
+	auto result = std::vector<PeekRun>();
+	if (events.empty()) {
+		return result;
+	}
+	auto ordered = events;
+	std::stable_sort(ordered.begin(), ordered.end(), [](
+			const Event &a,
+			const Event &b) {
+		return a.unixMs < b.unixMs;
+	});
+
+	auto open = std::optional<int64>();
+	auto lastMs = ordered.front().unixMs;
+	for (const auto &event : ordered) {
+		lastMs = std::max(lastMs, event.unixMs);
+		if (event.kind == EventKind::Peek) {
+			if (!open) {
+				open = event.unixMs;
+			}
+		} else if (event.kind == EventKind::PeekEnd && open) {
+			result.push_back({ *open, std::max(*open, event.unixMs) });
+			open.reset();
+		}
+	}
+	if (open) {
+		result.push_back({ *open, std::max(*open, lastMs) });
+	}
+	return result;
+}
+
+PeekUsage PeekUsageIn(
+		const std::vector<PeekRun> &peeks,
+		int64 fromMs,
+		int64 toMs) {
+	auto result = PeekUsage();
+	if (toMs <= fromMs) {
+		return result;
+	}
+	for (const auto &peek : peeks) {
+		// Half-open, like the window: a peek that ended at the moment the
+		// window opened belongs to the window before. A peek with no length at
+		// all - started and ended inside the same millisecond, which a mistaken
+		// tap is - is the one thing that has to be asked about separately,
+		// because it has no span to overlap with.
+		const auto empty = (peek.endMs <= peek.startMs);
+		const auto touches = (peek.startMs < toMs)
+			&& (empty ? (peek.startMs >= fromMs) : (peek.endMs > fromMs));
+		if (!touches) {
+			continue;
+		}
+		++result.count;
+		result.totalMs += std::max(
+			int64(0),
+			std::min(peek.endMs, toMs) - std::max(peek.startMs, fromMs));
+	}
 	return result;
 }
 

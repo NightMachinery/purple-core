@@ -66,10 +66,22 @@ enum class EventKind : uchar {
 	// screen locking, which reaches the app the same way.
 	Foreground,
 	Background,
+
+	// A peek started, and the one that was running ended. The pair is what
+	// makes "peeked 4 times, 23 min today" answerable, and it is not the same
+	// question as the `hidden' flag below: that one is time spent IN chats the
+	// preset hides, while this is the peek itself - started, very often, to
+	// look at the list rather than to open anything on it.
+	//
+	// Neither cuts a session or touches a total. A peek does not change which
+	// chat is in front of you; it changes what the list beside it is willing
+	// to show.
+	Peek,
+	PeekEnd,
 };
 
 // "open", "close", "action", "idle", "resume", "preset", "foreground",
-// "background".
+// "background", "peek", "peek_end".
 [[nodiscard]] std::optional<EventKind> ParseEventKind(const QString &value);
 [[nodiscard]] QString EventKindName(EventKind value);
 
@@ -233,6 +245,52 @@ struct Totals {
 // neighbouring ranges cannot both claim the moment they meet.
 [[nodiscard]] Totals RangeTotals(
 	const std::vector<Session> &sessions,
+	int64 fromMs,
+	int64 toMs);
+
+// One peek, from the moment it started to the moment it ended. The unit behind
+// "peeked 4 times, 23 min today", which is the number worth seeing on a screen
+// time view: peek is the way out of the preset, so how much it is used is how
+// much the preset was not being kept to.
+struct PeekRun {
+	int64 startMs = 0;
+	int64 endMs = 0;
+
+	friend bool operator==(const PeekRun &, const PeekRun &) = default;
+};
+
+// Peeks out of raw events, the way sessions are.
+//
+// A run starts at a Peek and ends at the PeekEnd that follows it. Three rules
+// cover everything else, and each of them is a real case rather than a defence:
+//
+// - a Peek while one is already open is IGNORED, and the run carries on. The
+//   recorders write these at a change and once at startup, so a second Peek
+//   with no end between them is the app having been restarted while the same
+//   peek ran - not a new one. Nothing else can produce it: restarting a peek at
+//   a new length from a chip is not a change the recorder can see;
+// - a PeekEnd with nothing open is ignored, which is what the tail of a log
+//   whose start was pruned away looks like;
+// - a run still open at the end of the log ends at the last thing we know
+//   happened, exactly as an unfinished session does. Guessing at anything later
+//   would invent peek time, and a crash is the ordinary way to get one.
+[[nodiscard]] std::vector<PeekRun> DerivePeeks(const std::vector<Event> &events);
+
+// How much peek there was in a window: how many and how long.
+struct PeekUsage {
+	int count = 0;
+	int64 totalMs = 0;
+};
+
+// [fromMs, toMs), like every window here.
+//
+// A peek that crosses the edge of the window counts in BOTH windows it touches,
+// and contributes to each the part that fell inside - the same way a chat left
+// open across midnight belongs to both days. Counting it only where it started
+// would have a peek that began at 23:58 read as "0 times, 2 min", which is a
+// line nobody would believe.
+[[nodiscard]] PeekUsage PeekUsageIn(
+	const std::vector<PeekRun> &peeks,
 	int64 fromMs,
 	int64 toMs);
 
