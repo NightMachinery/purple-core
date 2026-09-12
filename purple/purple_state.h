@@ -33,6 +33,36 @@ enum class PresetSource : uchar {
 [[nodiscard]] QString PresetSourceName(PresetSource source);
 [[nodiscard]] PresetSource PresetSourceFromName(const QString &name);
 
+// What ended the last peek. Kept in state because the thing that ends a peek
+// and the thing that can say so are not always the same moment: a peek ended by
+// the screen locking is ended by a machine nobody is looking at, and the
+// sentence belongs on the screen that comes back.
+//
+// A peek that simply ran out is not here. Nothing ends it - the deadline is in
+// the past by the time anything reads it again - so there is no moment at which
+// a reason could be written, and inventing one would mean a timer whose only
+// job was to write a word into a file.
+enum class PeekEnd : uchar {
+	// Nothing has ended a peek since the last one started, including while one
+	// is running. Starting a peek clears whatever the last one left here.
+	None,
+
+	// The user turned it off: the control, the checkbox, the hotkey - the
+	// hotkey pressed at the cap included, which is a press that means "enough".
+	Manual,
+
+	// The OS session or screen lock, and the app's own passcode lock. Only ever
+	// written where `[peek] end_on_screen_lock_p' and its two siblings say the
+	// lock ends a peek at all; see PeekEndsOnLock() in purple_engine.h.
+	ScreenLock,
+	AppLock,
+};
+
+// "manual", "screen_lock", "app_lock", and empty for None - which is how it is
+// left out of the file rather than written as a word meaning nothing.
+[[nodiscard]] QString PeekEndName(PeekEnd reason);
+[[nodiscard]] PeekEnd PeekEndFromName(const QString &name);
+
 struct ResolvedList {
 	QString list;
 
@@ -197,6 +227,10 @@ struct State {
 	bool peekActive = false;
 	int64 peekDeadlineUnix = 0;
 
+	// What ended the last peek, so the app can say so when it is next looked
+	// at. Cleared by the next peek starting.
+	PeekEnd peekEnded = PeekEnd::None;
+
 	// Live "until" decisions, in the order they were made. Small by nature -
 	// each one is a thing you did on purpose and it expires by itself.
 	std::vector<Override> overrides;
@@ -304,8 +338,13 @@ inline constexpr auto kPeekAtCapSlackSeconds = 30;
 	int capSeconds);
 
 // Ends one. Clears the deadline with the flag, so a peek started again later
-// cannot inherit a stale one.
-void StopPeek(State &state);
+// cannot inherit a stale one, and notes what ended it.
+//
+// The reason defaults to Manual because that is what every gesture that reaches
+// here is: a control, a checkbox, a hotkey. A lock goes through
+// EndPeekForLock() in purple_engine.h, which is the one place that knows
+// whether this device's file lets a lock end a peek at all.
+void StopPeek(State &state, PeekEnd reason = PeekEnd::Manual);
 
 // How long a running peek has left, in seconds. Zero when nothing is peeking
 // AND when a peek is running with no deadline on it, which is why

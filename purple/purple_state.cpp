@@ -396,6 +396,26 @@ PresetSource PresetSourceFromName(const QString &name) {
 		: PresetSource::Manual;
 }
 
+QString PeekEndName(PeekEnd reason) {
+	switch (reason) {
+	case PeekEnd::None: return QString();
+	case PeekEnd::Manual: return u"manual"_q;
+	case PeekEnd::ScreenLock: return u"screen_lock"_q;
+	case PeekEnd::AppLock: return u"app_lock"_q;
+	}
+	return QString();
+}
+
+PeekEnd PeekEndFromName(const QString &name) {
+	return (name == u"manual"_q)
+		? PeekEnd::Manual
+		: (name == u"screen_lock"_q)
+		? PeekEnd::ScreenLock
+		: (name == u"app_lock"_q)
+		? PeekEnd::AppLock
+		: PeekEnd::None;
+}
+
 // Nothing here reports errors. The file is ours, it is rewritten whenever
 // anything changes, and a state we cannot read is not worth interrupting the
 // user over - starting from stock behaviour is a safe place to begin.
@@ -427,6 +447,7 @@ State ParseState(const QString &text, const QString &path) {
 	}
 	result.scheduleTarget = ReadString(root, "schedule_target");
 	result.peekActive = ReadBool(root, "peek_active", false);
+	result.peekEnded = PeekEndFromName(ReadString(root, "peek_ended_by"));
 	result.lastSentFingerprint = ReadString(root, "last_sent_fingerprint");
 	result.lastImportedFingerprint = ReadString(
 		root,
@@ -458,6 +479,11 @@ bool StartPeek(State &state, int64 nowUnix, int seconds) {
 	}
 	state.peekActive = true;
 	state.peekDeadlineUnix = deadline;
+
+	// Whatever ended the last one is answered by there being a new one. Left
+	// standing, it would be read as the reason THIS peek ended the moment it
+	// does run out.
+	state.peekEnded = PeekEnd::None;
 	return true;
 }
 
@@ -491,9 +517,10 @@ bool ExtendPeek(
 	return true;
 }
 
-void StopPeek(State &state) {
+void StopPeek(State &state, PeekEnd reason) {
 	state.peekActive = false;
 	state.peekDeadlineUnix = 0;
+	state.peekEnded = reason;
 }
 
 int PeekLeftSeconds(const State &state, int64 nowUnix) {
@@ -801,6 +828,8 @@ QString SerializeState(const State &state) {
 		.arg(Quoted(state.scheduleTarget));
 	result += u"peek_active           = %1\n"_q.arg(Boolean(state.peekActive));
 	result += u"peek_deadline_unix    = %1\n"_q.arg(state.peekDeadlineUnix);
+	result += u"peek_ended_by         = %1\n"_q
+		.arg(Quoted(PeekEndName(state.peekEnded)));
 
 	// Their own little block, aligned to each other rather than to the run
 	// above: last_imported_fingerprint is longer than anything up there, and

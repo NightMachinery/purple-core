@@ -995,4 +995,37 @@ int PeekTapSeconds(const Settings &settings, const DeviceIdentity &device) {
 	return PeekTapSeconds(settings);
 }
 
+bool PeekEndsOnLock(
+		const Settings &settings,
+		const DeviceIdentity &device,
+		LockKind kind) {
+	// Compared the way PeekTapSeconds() compares it, and for the same reason:
+	// the class reaches both through the same hand-written strings.
+	const auto cls = device.cls.trimmed();
+	const auto mobile = !cls.isEmpty()
+		&& !cls.compare(u"mobile"_q, Qt::CaseInsensitive);
+	if (kind == LockKind::Screen) {
+		return mobile ? false : settings.peek.endOnScreenLock;
+	}
+	return mobile
+		? settings.peek.endOnAppLockMobile
+		: settings.peek.endOnAppLock;
+}
+
+bool EndPeekForLock(
+		State &state,
+		int64 nowUnix,
+		const Settings &settings,
+		const DeviceIdentity &device,
+		LockKind kind) {
+	if (!PeekLive(state, nowUnix)
+		|| !PeekEndsOnLock(settings, device, kind)) {
+		return false;
+	}
+	StopPeek(
+		state,
+		(kind == LockKind::Screen) ? PeekEnd::ScreenLock : PeekEnd::AppLock);
+	return true;
+}
+
 } // namespace Purple

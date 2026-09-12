@@ -493,6 +493,37 @@ struct Peek {
 	// through PeekTapSeconds(settings, device) in purple_engine.h, where the
 	// reasoning sits with the device it is about. Zero is still "off".
 	std::optional<int> tapMobileSeconds;
+
+	// Whether a lock ends a running peek, and which lock on which device.
+	//
+	// The point of a peek is that it ends by itself, and a lock is the other
+	// natural moment for it to: a machine nobody is sitting at should not be
+	// showing what the preset hides. What a lock MEANS, though, is not the same
+	// on the two devices, which is why this is three keys and not one:
+	//
+	// - `end_on_screen_lock_p' is the OS session or screen lock, and the
+	//   DESKTOP'S ALONE. A desktop locks because somebody got up. A phone locks
+	//   all day by itself - a timeout, a pocket, a glance away - so ending a
+	//   peek there would make the feature useless exactly where it is used
+	//   most, and there is deliberately no mobile key to turn that on. A file
+	//   carried to a phone still parses this key; it just does nothing there.
+	// - `end_on_app_lock_p' is Telegram's own passcode lock on the desktop.
+	// - `end_on_app_lock_mobile_p' is the same lock on a phone, and is the one
+	//   that defaults to OFF: a phone's passcode lock is usually on a short
+	//   timer, so on by default would end a peek every few minutes for most
+	//   people. Somebody who locks the app by hand can turn it on.
+	//
+	// Deliberately NOT a guess at whether a lock was performed or timed out.
+	// Both clients would have to tell a user's lock from an auto-lock at the
+	// call site, on two platforms, and be wrong quietly; a key says the same
+	// thing out loud and can be changed by the person it is wrong for.
+	//
+	// Read through PeekEndsOnLock() in purple_engine.h rather than directly:
+	// which of the three a device consults is a device question, and no client
+	// should be answering it twice.
+	bool endOnScreenLock = true;
+	bool endOnAppLock = true;
+	bool endOnAppLockMobile = false;
 };
 
 // Declared here so the two readers below can sit with the keys they read,

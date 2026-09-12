@@ -676,4 +676,50 @@ inline constexpr auto kPeekTapMobileDefaultSeconds = 5 * 60;
 	const Settings &settings,
 	const DeviceIdentity &device);
 
+// A lock a client can report. Two kinds and not three: the app's own passcode
+// lock is one thing on both devices, and the OS lock is the other.
+enum class LockKind : uchar {
+	// The OS session or screen lock.
+	Screen,
+
+	// Telegram's own passcode lock.
+	App,
+};
+
+// Whether a lock of this kind ends a running peek ON THIS DEVICE. The three
+// `[peek]' keys read in one place, so that a client only has to report what
+// happened and never has to decide what it means:
+//
+// - a phone's screen lock never ends a peek, and has no key to say otherwise. A
+//   phone locks all day by itself, so a peek that ended with the screen would
+//   be a peek that ended for a glance at the time;
+// - a phone's app lock is `end_on_app_lock_mobile_p', off by default, because
+//   that lock is usually on a short timer too;
+// - a desktop's are `end_on_screen_lock_p' and `end_on_app_lock_p', both on by
+//   default. A desktop locks because somebody got up, which is exactly the
+//   moment a peek should not still be showing what the preset hides.
+//
+// A client that did not say what it is gets the desktop's answers, like
+// PeekTapSeconds() above: the reason a phone is special is that it cannot edit
+// the file, and a device we cannot name is not one.
+[[nodiscard]] bool PeekEndsOnLock(
+	const Settings &settings,
+	const DeviceIdentity &device,
+	LockKind kind);
+
+// Ends a running peek because the device locked, when the file says that lock
+// ends one here. True when something actually moved, so a caller knows whether
+// it owes a write and a rebuild.
+//
+// It is the ordinary stop path with a reason on it, not a second way to end a
+// peek: no new timer, no new deadline, nothing the clock has to be asked about
+// twice. A peek that has already run out is left alone - there is nothing to
+// end, and a lock is not what ended it.
+[[nodiscard]] bool EndPeekForLock(
+	State &state,
+	int64 nowUnix,
+	const Settings &settings,
+	const DeviceIdentity &device,
+	LockKind kind);
+
 } // namespace Purple

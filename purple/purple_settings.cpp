@@ -1268,6 +1268,19 @@ void WarnUnknownLists(
 	length("tap", result.tapSeconds, u"'auto_off'"_q);
 	length("hotkey_length", result.hotkeyLengthSeconds, u"'auto_off'"_q);
 	length("tap_mobile", result.tapMobileSeconds, u"five minutes"_q);
+
+	// The three lock keys. Defaults rather than optionals: there is no third
+	// answer to "does a lock end a peek", and nothing falls back to anything
+	// else here - `end_on_app_lock_mobile_p' in particular is NOT
+	// `end_on_app_lock_p' for a phone, which is the whole reason it exists.
+	const auto flag = [&](std::string_view key, bool &into) {
+		if (const auto value = ReadBool(table, key, context, warnings)) {
+			into = *value;
+		}
+	};
+	flag("end_on_screen_lock_p", result.endOnScreenLock);
+	flag("end_on_app_lock_p", result.endOnAppLock);
+	flag("end_on_app_lock_mobile_p", result.endOnAppLockMobile);
 	return result;
 }
 

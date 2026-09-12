@@ -4230,6 +4230,124 @@ tap_mobile = "2m"
 	}
 }
 
+void TestPeekLocks() {
+	Begin("peek locks");
+
+	const auto phone = Device(u"pixel-1"_q, u"android"_q, u"mobile"_q);
+	const auto laptop = Device(u"mac-3f9a"_q, u"macos"_q, u"desktop"_q);
+	const auto screen = Purple::LockKind::Screen;
+	const auto app = Purple::LockKind::App;
+
+	// A file that says nothing: the desktop ends a peek on either lock, and the
+	// phone on neither. That is today's behaviour on the phone exactly, which
+	// is the point of the mobile key defaulting to off.
+	const auto silent = Parse(u"[presets.work]\nlist_order = []\n"_q);
+	CHECK(silent.settings.peek.endOnScreenLock);
+	CHECK(silent.settings.peek.endOnAppLock);
+	CHECK(!silent.settings.peek.endOnAppLockMobile);
+	CHECK(Purple::PeekEndsOnLock(silent.settings, laptop, screen));
+	CHECK(Purple::PeekEndsOnLock(silent.settings, laptop, app));
+	CHECK(!Purple::PeekEndsOnLock(silent.settings, phone, screen));
+	CHECK(!Purple::PeekEndsOnLock(silent.settings, phone, app));
+
+	// A client that did not say what it is answers as a desktop, like every
+	// other device question in here.
+	CHECK(Purple::PeekEndsOnLock(
+		silent.settings,
+		Purple::DeviceIdentity(),
+		screen));
+
+	// The keys, all three, read as written.
+	const auto written = Parse(uR"(
+[peek]
+end_on_screen_lock_p     = false
+end_on_app_lock_p        = false
+end_on_app_lock_mobile_p = true
+)"_q);
+	CHECK(written.ok());
+	CHECK(!Purple::PeekEndsOnLock(written.settings, laptop, screen));
+	CHECK(!Purple::PeekEndsOnLock(written.settings, laptop, app));
+	CHECK(Purple::PeekEndsOnLock(written.settings, phone, app));
+
+	// A phone's SCREEN lock ends nothing whatever the file says, because there
+	// is no key for it: a phone locks all day by itself.
+	const auto everything = Parse(
+		u"[peek]\nend_on_screen_lock_p = true\n"_q);
+	CHECK(!Purple::PeekEndsOnLock(everything.settings, phone, screen));
+
+	// Class is compared the way a ruleset's is: case ignored.
+	CHECK(Purple::PeekEndsOnLock(
+		written.settings,
+		Device(QString(), u"ios"_q, u"Mobile"_q),
+		app));
+
+	// Something that is not a boolean warns and leaves the default standing,
+	// rather than being read as a number the way toml++ would.
+	const auto broken = Parse(u"[peek]\nend_on_app_lock_p = 0\n"_q);
+	CHECK(WarnsAbout(broken, u"peek: 'end_on_app_lock_p' should be true or "
+		"false"_q));
+	CHECK(broken.settings.peek.endOnAppLock);
+
+	// Ending one: the ordinary stop path, with the reason left in state for
+	// whatever comes back to the screen afterwards.
+	const auto now = int64(1788000000);
+	auto state = Purple::State();
+	CHECK(Purple::StartPeek(state, now, 300));
+	CHECK(Purple::EndPeekForLock(state, now, silent.settings, laptop, screen));
+	CHECK(!state.peekActive);
+	CHECK_EQ(state.peekDeadlineUnix, int64(0));
+	CHECK(state.peekEnded == Purple::PeekEnd::ScreenLock);
+
+	// And it says so in the file, so the app that reads the state back knows
+	// what to say.
+	const auto reloaded = Purple::ParseState(
+		Purple::SerializeState(state),
+		Path());
+	CHECK(reloaded.peekEnded == Purple::PeekEnd::ScreenLock);
+	CHECK_EQ(Purple::PeekEndName(reloaded.peekEnded), u"screen_lock"_q);
+
+	// The next peek answers it. Left standing, the word would be read as the
+	// reason THIS peek ended the moment it runs out.
+	CHECK(Purple::StartPeek(state, now, 300));
+	CHECK(state.peekEnded == Purple::PeekEnd::None);
+	CHECK(Purple::PeekEndName(state.peekEnded).isEmpty());
+
+	// The app lock is the other kind, and it is the phone's default that keeps
+	// the phone where it was: the same lock, the same call, nothing moved.
+	CHECK(Purple::EndPeekForLock(state, now, silent.settings, laptop, app));
+	CHECK(state.peekEnded == Purple::PeekEnd::AppLock);
+	CHECK(Purple::StartPeek(state, now, 300));
+	CHECK(!Purple::EndPeekForLock(state, now, silent.settings, phone, app));
+	CHECK(!Purple::EndPeekForLock(state, now, silent.settings, phone, screen));
+	CHECK(Purple::PeekLive(state, now));
+	CHECK(state.peekEnded == Purple::PeekEnd::None);
+
+	// A peek the file says nothing should end is left running, and so is one
+	// that has already run out - nothing to end, and a lock is not what ended
+	// it.
+	CHECK(!Purple::EndPeekForLock(state, now, written.settings, laptop, app));
+	CHECK(Purple::PeekLive(state, now));
+	CHECK(!Purple::EndPeekForLock(
+		state,
+		now + 300,
+		silent.settings,
+		laptop,
+		screen));
+	CHECK(state.peekEnded == Purple::PeekEnd::None);
+
+	// Turning one off by hand is Manual, which is what every gesture that
+	// reaches StopPeek() is.
+	Purple::StopPeek(state);
+	CHECK(state.peekEnded == Purple::PeekEnd::Manual);
+	CHECK_EQ(Purple::PeekEndName(state.peekEnded), u"manual"_q);
+
+	// A word the file does not know reads as nothing at all, which is what an
+	// older state.toml with no such key says too.
+	CHECK(Purple::PeekEndFromName(u"whenever"_q) == Purple::PeekEnd::None);
+	CHECK(Purple::PeekEndFromName(QString()) == Purple::PeekEnd::None);
+	CHECK(Purple::PeekEndFromName(u"app_lock"_q) == Purple::PeekEnd::AppLock);
+}
+
 void TestPeekState() {
 	Begin("peek state");
 
@@ -7820,6 +7938,7 @@ int main() {
 	TestMentionGate();
 	TestPeek();
 	TestPeekLengths();
+	TestPeekLocks();
 	TestPeekState();
 	TestNamedExplicitly();
 	TestPresetHotkeys();
