@@ -16,7 +16,12 @@ rules about data are far easier to prove outside a running app than inside one.
 - `purple/purple_splice.{h,cpp}` - the only writes the apps ever make to
   `settings.toml`. It does not re-serialise the document: it locates the array
   it must touch through toml++'s source regions and edits the raw lines, so
-  every byte the user wrote stays where they put it, comments included.
+  every byte the user wrote stays where they put it, comments included. A key
+  it has to add joins the column the block it lands in already settled on -
+  read off the file, never recomputed - so the new line reads as part of that
+  block and the lines above it are not re-padded to suit it. A key too long for
+  that column, or a block whose own lines agree on no column, gets the one
+  space instead.
 - `purple/purple_state.{h,cpp}` - reads and writes `state.toml`, the
   machine-owned half of the configuration. Rewritten whenever it changes, which
   is why it is a separate file: it must never touch the mtime of the

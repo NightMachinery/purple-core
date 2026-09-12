@@ -1253,6 +1253,21 @@ title = "B"
 	CHECK(result.text.contains(u"title = \"A\""_q));
 	CHECK(result.text.contains(u"[lists.b]"_q));
 
+	// The array it puts back joins the column the block settled on too. The
+	// app's own blocks never reach this case, because `members' is the longest
+	// key it writes; a file padded wider by hand does.
+	const auto lined = Purple::AddListMember(
+		u"[lists.a]\ntitle      = \"A\"\n"_q,
+		Path(),
+		u"a"_q,
+		77,
+		Titles());
+	CHECK(lined.ok());
+	CHECK(lined.text.contains(u"members    = ["_q));
+	CHECK(lined.text.contains(u"title      = \"A\""_q));
+	CHECK_EQ(Purple::ListMembers(lined.text, Path(), u"a"_q),
+		(std::vector<Purple::PeerIdValue>{ 77 }));
+
 	// A list that is not in the file is refused, not created.
 	const auto missing = Purple::AddListMember(
 		text,
@@ -1795,6 +1810,20 @@ untouched = 1
 	CHECK_EQ(Parse(added.text).settings.premium.enabled, true);
 	CHECK(Parse(added.text).ok());
 
+	// Lined up with the keys already in the table, as the string op is.
+	const auto lined = Purple::SetTableBool(
+		u"[presets.home]\nlist_order = []\n\n[schedule]\n"
+			"outside     = \"home\"\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"enabled_p"_q,
+		false);
+	CHECK(lined.ok());
+	CHECK(lined.text.contains(u"[schedule]\nenabled_p   = false\n"
+		"outside     = \"home\"\n"_q));
+	CHECK(Parse(lined.text).ok());
+	CHECK(!Parse(lined.text).settings.schedule.enabled);
+
 	// A missing table is appended, and an empty file gains no leading blank.
 	const auto fresh = Purple::SetTableBool(
 		QString(),
@@ -1879,6 +1908,22 @@ untouched = 1
 	CHECK(added.text.contains(u"# a note"_q));
 	CHECK(Parse(added.text).ok());
 	CHECK_EQ(Parse(added.text).settings.schedule.outside, u"normal"_q);
+
+	// And it takes the column the table settled on, the way a key written with
+	// the table would: an `outside = "home"' under a wider `enabled_p   =' is a
+	// line that reads as belonging somewhere else.
+	const auto lined = Purple::SetTableString(
+		u"[presets.home]\nlist_order = []\n\n[schedule]\n"
+			"enabled_p   = true\nrules       = []\n"_q,
+		Path(),
+		u"schedule"_q,
+		u"outside"_q,
+		u"home"_q);
+	CHECK(lined.ok());
+	CHECK(lined.text.contains(u"[schedule]\noutside     = \"home\"\n"
+		"enabled_p   = true\n"_q));
+	CHECK(Parse(lined.text).ok());
+	CHECK_EQ(Parse(lined.text).settings.schedule.outside, u"home"_q);
 
 	// A missing table is appended, and an empty file gains no leading blank.
 	const auto fresh = Purple::SetTableString(
@@ -2163,7 +2208,12 @@ void TestSpliceScheduleSet() {
 		Rule(true, { 3 }, 10 * 60, 11 * 60, u"play"_q));
 	CHECK(repaired.ok());
 	CHECK(repaired.changed);
-	CHECK(repaired.text.contains(u"to = \"11:00\""_q));
+
+	// The three keys that block never had join the end of it in the column it
+	// settled on, and `enabled_p' - too long for that column - takes the one
+	// space rather than widening lines nobody asked to have rewritten.
+	CHECK(repaired.text.contains(u"from   = \"10:00\"\npreset = \"play\"\n"
+		"enabled_p = true\ndays   = [\"wed\"]\nto     = \"11:00\"\n"_q));
 	const auto whole = Parse(repaired.text);
 	CHECK(whole.ok());
 	CHECK_EQ(whole.settings.schedule.rules.size(), size_t(3));
@@ -2221,6 +2271,61 @@ void TestSpliceScheduleSet() {
 	CHECK(!rewritten.text.contains(u"\n\n"_q));
 	CHECK_EQ(Parse(rewritten.text).settings.schedule.rules.size(), size_t(1));
 	CHECK_EQ(Parse(rewritten.text).settings.schedule.rules[0].till, 18 * 60);
+
+	// A rule block a person wrote wide and left an `enabled_p' out of. Only a
+	// hand-written block can be missing a key at all - RuleValues writes all
+	// five whenever the app writes a rule - so the column the added line has to
+	// join is always one somebody chose by hand.
+	const auto wide = u"[presets.work]\nlist_order = []\n\n[schedule]\n"
+		"[[schedule.rules]]\ndays          = [\"mon\"]\n"
+		"from          = \"09:00\"\nto            = \"17:00\"\n"
+		"preset        = \"work\"\n"_q;
+	const auto joined = Purple::SetScheduleRule(
+		wide,
+		Path(),
+		QString(),
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(false, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(joined.ok());
+	CHECK(joined.changed);
+	CHECK(joined.text.contains(u"preset        = \"work\"\n"
+		"enabled_p     = false\n"_q));
+	CHECK(Parse(joined.text).ok());
+	CHECK(!Parse(joined.text).settings.schedule.rules[0].enabled);
+
+	// A block that agrees on no column - written with one space, which is what
+	// no padding at all looks like - gets the one space back. The alignment is
+	// the file's, not a house style imposed on it.
+	const auto plain = u"[presets.work]\nlist_order = []\n\n[schedule]\n"
+		"[[schedule.rules]]\ndays = [\"mon\"]\nfrom = \"09:00\"\n"
+		"to = \"17:00\"\npreset = \"work\"\n"_q;
+	const auto plainly = Purple::SetScheduleRule(
+		plain,
+		Path(),
+		QString(),
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(false, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(plainly.ok());
+	CHECK(plainly.text.contains(u"preset = \"work\"\nenabled_p = false\n"_q));
+
+	// And a key too long for the column the block settled on takes the one
+	// space too, leaving every line that was there exactly as it was: a splice
+	// does not reflow lines it was not asked to touch.
+	const auto narrow = u"[presets.work]\nlist_order = []\n\n[schedule]\n"
+		"[[schedule.rules]]\ndays   = [\"mon\"]\nfrom   = \"09:00\"\n"
+		"to     = \"17:00\"\npreset = \"work\"\n"_q;
+	const auto longest = Purple::SetScheduleRule(
+		narrow,
+		Path(),
+		QString(),
+		0,
+		{ 9 * 60, 17 * 60, u"work"_q },
+		Rule(false, { 1 }, 9 * 60, 17 * 60, u"work"_q));
+	CHECK(longest.ok());
+	CHECK(longest.text.contains(u"days   = [\"mon\"]\nfrom   = \"09:00\"\n"
+		"to     = \"17:00\"\npreset = \"work\"\nenabled_p = false\n"_q));
 
 	// A file mid-edit is left exactly as it is.
 	const auto broken = Purple::SetScheduleRule(
@@ -3110,6 +3215,22 @@ void TestSpliceRulesets() {
 	CHECK_EQ(
 		Parse(scoped.text).settings.schedule.rulesets[2].device,
 		u"desktop"_q);
+
+	// A key joining a ruleset lines its `=' up with the keys already in the
+	// block, the way one written with it does. The ruleset's own `rules' are
+	// blocks further down the file rather than a line of this block, so they
+	// have no column to contribute and do not stop the rest from agreeing.
+	const auto lined = Purple::SetRulesetString(
+		text,
+		Path(),
+		u"phone"_q,
+		u"mode"_q,
+		u"always"_q);
+	CHECK(lined.ok());
+	CHECK(lined.text.contains(u"outside = \"home\"\nmode    = \"always\"\n\n"
+		"[[schedule.rulesets.rules]]"_q));
+	CHECK(Parse(lined.text).settings.schedule.rulesets[1].mode
+		== Purple::RulesetMode::Always);
 
 	// An empty value takes the key out, which is how a screen says "back to the
 	// default" without writing the default down.

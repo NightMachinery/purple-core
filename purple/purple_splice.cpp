@@ -990,6 +990,63 @@ struct ValueEnd {
 	return last;
 }
 
+// The width a block pads its keys to, read off the file: the number that would
+// have been passed to leftJustified() to produce the lines that are there.
+// Nothing when the block's own lines do not agree on one, which is a block
+// typed by hand in more than one style - there is no alignment to match, so a
+// key added to it is written the plainest way.
+//
+// A block the app wrote pads its keys to the longest of them, so `target  =' is
+// what a budget with a `per_day' in it looks like, and a `mode = "hard"' added
+// underneath with one space is a line that reads as a different block. Read off
+// the file rather than recomputed, because recomputing would want to re-pad the
+// lines that were already there, and a splicer that rewrites lines it was not
+// asked to change is a splicer nobody can leave comments in.
+//
+// Array-of-tables keys are passed over for the reason ScalarBlockLastLine
+// passes over them: a ruleset's `rules' is blocks of its own further down the
+// file rather than a line of this block, and the `[[' header it begins with has
+// no `=' to read a column off.
+[[nodiscard]] std::optional<int> BlockKeyWidth(
+		const toml::table &fields,
+		const QStringList &lines) {
+	const auto header = int(fields.source().begin.line);
+	auto result = std::optional<int>();
+	for (auto &&[key, value] : fields) {
+		const auto array = value.as_array();
+		if (array && array->is_array_of_tables()) {
+			continue;
+		}
+		const auto at = int(value.source().begin.line);
+		const auto column = int(value.source().begin.column) - 1;
+		if (at <= header || at > lines.size() || column < 1) {
+			return std::nullopt;
+		}
+		const auto &line = lines[at - 1];
+		const auto indent = int(Indentation(line).size());
+		const auto equals = line.lastIndexOf('=', column - 1);
+		const auto width = equals - indent - 1;
+		if (equals < indent || width < 0 || (result && *result != width)) {
+			return std::nullopt;
+		}
+		result = width;
+	}
+	return result;
+}
+
+// A key dressed to sit in the column a block settled on, for a line joining it.
+// A key too long for that column - `snoozes_per_day' next to a `target  =' -
+// takes the one space instead, because widening the column would mean re-
+// padding the lines that are already there, and a splice does not touch lines
+// it was not asked to change.
+[[nodiscard]] QString AlignedKey(
+		const QString &key,
+		const std::optional<int> &width) {
+	return (width && *width >= int(key.size()))
+		? key.leftJustified(*width)
+		: key;
+}
+
 // The last line anything under [schedule] occupies: the section's own keys,
 // every flat rule block, every ruleset and every rule inside one. Where a new
 // ruleset goes, so the file keeps its schedule in one piece instead of growing
@@ -1381,41 +1438,6 @@ struct BudgetValue {
 	return parts.join(u"|"_q);
 }
 
-// The width a block pads its keys to, read off the file: the number that would
-// have been passed to leftJustified() to produce the lines that are there.
-// Nothing when the block's own lines do not agree on one, which is a block
-// typed by hand in more than one style - there is no alignment to match, so a
-// key added to it is written the plainest way.
-//
-// A block the app wrote pads its keys to the longest of them, so `target  =' is
-// what a budget with a `per_day' in it looks like, and a `mode = "hard"' added
-// underneath with one space is a line that reads as a different block. Read off
-// the file rather than recomputed, because recomputing would want to re-pad the
-// lines that were already there, and a splicer that rewrites lines it was not
-// asked to change is a splicer nobody can leave comments in.
-[[nodiscard]] std::optional<int> BlockKeyWidth(
-		const toml::table &fields,
-		const QStringList &lines) {
-	const auto header = int(fields.source().begin.line);
-	auto result = std::optional<int>();
-	for (auto &&[key, value] : fields) {
-		const auto at = int(value.source().begin.line);
-		const auto column = int(value.source().begin.column) - 1;
-		if (at <= header || at > lines.size() || column < 1) {
-			return std::nullopt;
-		}
-		const auto &line = lines[at - 1];
-		const auto indent = int(Indentation(line).size());
-		const auto equals = line.lastIndexOf('=', column - 1);
-		const auto width = equals - indent - 1;
-		if (equals < indent || width < 0 || (result && *result != width)) {
-			return std::nullopt;
-		}
-		result = width;
-	}
-	return result;
-}
-
 // Whether the budget in the file is still the one the screen read. The target
 // is all there is to ask about: everything else in the block is what the screen
 // is open to change.
@@ -1641,9 +1663,10 @@ struct BudgetValue {
 			return Refuse(text, u"could not locate [lists.%1]."_q.arg(list));
 		}
 		const auto indent = Indentation(lines[header - 1]);
+		const auto width = BlockKeyWidth(*table, lines);
 		const auto written = IdArrayLines(
 			indent,
-			indent + u"members = "_q,
+			indent + AlignedKey(u"members"_q, width) + u" = "_q,
 			ending,
 			expected,
 			title,
@@ -1974,7 +1997,13 @@ SpliceResult SetTableString(
 	if (done) {
 		result = lines.join('\n');
 	} else {
-		const auto assignment = u"%1 = %2"_q.arg(key, quoted);
+		// A key joining a table that is already there lines its `=' up with the
+		// keys already in it, the way one written with the table does.
+		const auto width = existing
+			? BlockKeyWidth(*existing, lines)
+			: std::optional<int>();
+		const auto assignment = u"%1 = %2"_q
+			.arg(AlignedKey(key, width), quoted);
 		if (existing && existing->is_inline()) {
 			return Refuse(text, u"[%1] is written inline; rewrite it as a table "
 				"before setting '%2' from the app."_q.arg(table, key));
@@ -2106,8 +2135,12 @@ SpliceResult SetTableBool(
 	if (done) {
 		result = lines.join('\n');
 	} else {
+		// Lined up with the keys already in the table, as the string one is.
+		const auto width = existing
+			? BlockKeyWidth(*existing, lines)
+			: std::optional<int>();
 		const auto assignment = u"%1 = %2"_q
-			.arg(key, value ? u"true"_q : u"false"_q);
+			.arg(AlignedKey(key, width), value ? u"true"_q : u"false"_q);
 		if (existing && existing->is_inline()) {
 			return Refuse(text, u"[%1] is written inline; rewrite it as a table "
 				"before setting '%2' from the app."_q.arg(table, key));
@@ -2244,6 +2277,11 @@ SpliceResult SetScheduleRule(
 	if (topmost) {
 		indent = Indentation(lines[topmost - 1]);
 	}
+	// And it lines its `=' up with the keys already there, the way one written
+	// with the block does. Only a block a person typed can be missing a key at
+	// all - RuleValues writes all five whenever the app writes a rule - so this
+	// is exactly the block whose spacing was chosen by hand.
+	const auto width = BlockKeyWidth(*fields, lines);
 	auto rewrites = std::vector<std::pair<Position, QString>>();
 	auto additions = QStringList();
 	for (const auto &[key, value] : RuleValues(rule)) {
@@ -2259,7 +2297,8 @@ SpliceResult SetScheduleRule(
 				value,
 			});
 		} else {
-			additions.push_back(indent + key + u" = "_q + value + ending);
+			additions.push_back(
+				indent + AlignedKey(key, width) + u" = "_q + value + ending);
 		}
 	}
 	if (!additions.isEmpty()) {
@@ -2731,9 +2770,11 @@ SpliceResult SetRulesetString(
 				const QString &line) {
 			return line.endsWith('\r');
 		});
+		const auto width = BlockKeyWidth(*found.fields, lines);
 		lines.insert(
 			at,
-			indent + trimmedKey + u" = "_q + QuotedValue(value)
+			indent + AlignedKey(trimmedKey, width) + u" = "_q
+				+ QuotedValue(value)
 				+ (crlf ? u"\r"_q : QString()));
 	}
 
@@ -2930,9 +2971,7 @@ SpliceResult SetBudget(
 		indent = Indentation(lines[topmost - 1]);
 	}
 	// A key joining the block lines its `=' up with the keys already there,
-	// the way one written with the block does. A key too long for that column -
-	// `snoozes_per_day' next to a `target  =' - takes the one space instead:
-	// widening it would mean re-padding the lines above, which this does not do.
+	// the way one written with the block does.
 	const auto width = BlockKeyWidth(*fields, lines);
 	auto edits = std::vector<std::pair<Position, std::optional<QString>>>();
 	auto additions = QStringList();
@@ -2951,11 +2990,11 @@ SpliceResult SetBudget(
 					: std::nullopt,
 			});
 		} else if (value.text) {
-			const auto key = (width && *width >= int(value.key.size()))
-				? value.key.leftJustified(*width)
-				: value.key;
-			additions.push_back(
-				indent + key + u" = "_q + value.written() + ending);
+			additions.push_back(indent
+				+ AlignedKey(value.key, width)
+				+ u" = "_q
+				+ value.written()
+				+ ending);
 		}
 	}
 	if (!additions.isEmpty()) {
