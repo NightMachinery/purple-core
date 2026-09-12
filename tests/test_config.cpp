@@ -2771,7 +2771,12 @@ void TestSpliceBudgetSet() {
 	CHECK_EQ(stripped.settings.screenTime.budgets[0].snoozeSeconds, 5 * 60);
 	CHECK_EQ(stripped.settings.screenTime.budgets[0].snoozesPerDay, 2);
 
-	// And back again: a key the block no longer has joins the end of it.
+	// And back again: a key the block no longer has joins the end of it, lined
+	// up with the keys that are already there rather than with one space - a
+	// `mode = "hard"' under a `target  =' reads as a different block. The key
+	// too long for that column takes the one space, because widening it would
+	// mean re-padding the lines above, which a splicer does not do to lines it
+	// was not asked to change.
 	auto restored = Budget(u"chat:7"_q, 30 * 60);
 	restored.mode = Purple::BudgetMode::Hard;
 	restored.snoozeSeconds = 60;
@@ -2784,7 +2789,41 @@ void TestSpliceBudgetSet() {
 		restored);
 	CHECK(again.ok());
 	CHECK(again.text.contains(u"target  = \"chat:7\"\nper_day = \"30m\"\n"
-		"mode = \"hard\"\nsnooze = \"1m\"\nsnoozes_per_day = 1\n"_q));
+		"mode    = \"hard\"\nsnooze  = \"1m\"\nsnoozes_per_day = 1\n"_q));
+
+	// A block written with one space everywhere gets one space back: the
+	// alignment is the file's, not a house style imposed on it.
+	const auto plainly = Purple::SetBudget(
+		u"[[screen_time.budgets]]\ntarget = \"chat:7\"\nper_day = \"30m\"\n"_q,
+		Path(),
+		0,
+		u"chat:7"_q,
+		restored);
+	CHECK(plainly.ok());
+	CHECK(plainly.text.contains(u"per_day = \"30m\"\nmode = \"hard\"\n"
+		"snooze = \"1m\"\nsnoozes_per_day = 1\n"_q));
+
+	// A block whose own lines disagree has no alignment to match, so a key
+	// added to it is written the plainest way rather than picking a side.
+	const auto mixed = Purple::SetBudget(
+		u"[[screen_time.budgets]]\ntarget  = \"chat:7\"\nper_day= \"30m\"\n"_q,
+		Path(),
+		0,
+		u"chat:7"_q,
+		restored);
+	CHECK(mixed.ok());
+	CHECK(mixed.text.contains(u"mode = \"hard\"\n"_q));
+
+	// An indented block keeps its indentation and lines up inside it.
+	const auto nested = Purple::SetBudget(
+		u"[[screen_time.budgets]]\n  target  = \"chat:7\"\n"
+		"  per_day = \"30m\"\n"_q,
+		Path(),
+		0,
+		u"chat:7"_q,
+		restored);
+	CHECK(nested.ok());
+	CHECK(nested.text.contains(u"  mode    = \"hard\"\n"_q));
 	const auto whole = Parse(again.text);
 	CHECK(whole.ok());
 	CHECK_EQ(whole.settings.screenTime.budgets.size(), size_t(2));

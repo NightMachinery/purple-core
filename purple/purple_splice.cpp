@@ -1381,6 +1381,41 @@ struct BudgetValue {
 	return parts.join(u"|"_q);
 }
 
+// The width a block pads its keys to, read off the file: the number that would
+// have been passed to leftJustified() to produce the lines that are there.
+// Nothing when the block's own lines do not agree on one, which is a block
+// typed by hand in more than one style - there is no alignment to match, so a
+// key added to it is written the plainest way.
+//
+// A block the app wrote pads its keys to the longest of them, so `target  =' is
+// what a budget with a `per_day' in it looks like, and a `mode = "hard"' added
+// underneath with one space is a line that reads as a different block. Read off
+// the file rather than recomputed, because recomputing would want to re-pad the
+// lines that were already there, and a splicer that rewrites lines it was not
+// asked to change is a splicer nobody can leave comments in.
+[[nodiscard]] std::optional<int> BlockKeyWidth(
+		const toml::table &fields,
+		const QStringList &lines) {
+	const auto header = int(fields.source().begin.line);
+	auto result = std::optional<int>();
+	for (auto &&[key, value] : fields) {
+		const auto at = int(value.source().begin.line);
+		const auto column = int(value.source().begin.column) - 1;
+		if (at <= header || at > lines.size() || column < 1) {
+			return std::nullopt;
+		}
+		const auto &line = lines[at - 1];
+		const auto indent = int(Indentation(line).size());
+		const auto equals = line.lastIndexOf('=', column - 1);
+		const auto width = equals - indent - 1;
+		if (equals < indent || width < 0 || (result && *result != width)) {
+			return std::nullopt;
+		}
+		result = width;
+	}
+	return result;
+}
+
 // Whether the budget in the file is still the one the screen read. The target
 // is all there is to ask about: everything else in the block is what the screen
 // is open to change.
@@ -2894,6 +2929,11 @@ SpliceResult SetBudget(
 	if (topmost) {
 		indent = Indentation(lines[topmost - 1]);
 	}
+	// A key joining the block lines its `=' up with the keys already there,
+	// the way one written with the block does. A key too long for that column -
+	// `snoozes_per_day' next to a `target  =' - takes the one space instead:
+	// widening it would mean re-padding the lines above, which this does not do.
+	const auto width = BlockKeyWidth(*fields, lines);
 	auto edits = std::vector<std::pair<Position, std::optional<QString>>>();
 	auto additions = QStringList();
 	for (const auto &value : BudgetValues(budget)) {
@@ -2911,8 +2951,11 @@ SpliceResult SetBudget(
 					: std::nullopt,
 			});
 		} else if (value.text) {
+			const auto key = (width && *width >= int(value.key.size()))
+				? value.key.leftJustified(*width)
+				: value.key;
 			additions.push_back(
-				indent + value.key + u" = "_q + value.written() + ending);
+				indent + key + u" = "_q + value.written() + ending);
 		}
 	}
 	if (!additions.isEmpty()) {
