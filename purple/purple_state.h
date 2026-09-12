@@ -262,6 +262,17 @@ struct State {
 // say that than tapping "+5 min" twelve times.
 inline constexpr auto kPeekExtendCapSeconds = 60 * 60;
 
+// How near the cap counts as being at it. A peek started AT the cap never reads
+// as exactly the cap again: the deadline stands still while `now' walks towards
+// it, so a peek of a full hour has an hour less a second or two left for as
+// long as it runs, and a rule waiting for the deadline to sit exactly at
+// `now + cap' would never once fire. "Already as long as a peek gets" has to
+// mean "within reach of the cap" instead, and half a minute is wide enough for
+// the hand that moved from the chip to the keyboard while staying narrower than
+// the shortest length the control offers - so no press that still had a whole
+// minute to buy is ever turned into an ending.
+inline constexpr auto kPeekAtCapSlackSeconds = 30;
+
 // Starts a peek of `seconds', or of no fixed length when `seconds' is zero.
 // True when something actually moved, so a caller knows whether it owes a
 // write and a rebuild.
@@ -281,7 +292,11 @@ inline constexpr auto kPeekExtendCapSeconds = 60 * 60;
 // is no cap at all. False, and nothing touched, when there is nothing to
 // extend: no peek, an expired one, a peek with no deadline (it is already
 // longer than any extension could make it), a non-positive `addSeconds', or a
-// deadline the cap has already overtaken.
+// peek already within kPeekAtCapSlackSeconds of the cap.
+//
+// That last one is the caller's cue to END the peek rather than to do nothing -
+// it is the documented "Peek over - it was already as long as a peek gets" -
+// which is why it is a refusal and not a clamp that quietly buys two seconds.
 [[nodiscard]] bool ExtendPeek(
 	State &state,
 	int64 nowUnix,

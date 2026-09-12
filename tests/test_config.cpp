@@ -4295,6 +4295,37 @@ void TestPeekState() {
 	CHECK(Purple::ExtendPeek(state, now + 600, 300, 3600));
 	CHECK_EQ(state.peekDeadlineUnix, now + 60 + 3600 + 300);
 
+	// A peek STARTED at the cap is what the cap was written for and what it
+	// used to miss. Its deadline stands still while `now' walks towards it, so
+	// it reads as a second or two short of `now + cap' for as long as it runs -
+	// the old clamp always found that room, and every press answered "extended
+	// to 60:00 left" while the peek ran on for ever.
+	CHECK(Purple::StartPeek(state, now, 3600));
+	CHECK(!Purple::ExtendPeek(state, now, 300, 3600));
+	CHECK(!Purple::ExtendPeek(state, now + 1, 300, 3600));
+	CHECK(!Purple::ExtendPeek(state, now + 5, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 3600);
+
+	// A second under the cap is still as long as a peek gets.
+	CHECK(Purple::StartPeek(state, now, 3599));
+	CHECK(!Purple::ExtendPeek(state, now, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 3599);
+
+	// The boundary in between: half a minute of room is the last thing that
+	// counts as being at the cap, and one second more is a press that buys
+	// something - all of the room there is, which is what the clamp is for.
+	CHECK(Purple::StartPeek(state, now, 3600 - Purple::kPeekAtCapSlackSeconds));
+	CHECK(!Purple::ExtendPeek(state, now, 300, 3600));
+	CHECK(Purple::StartPeek(state, now, 3600 - Purple::kPeekAtCapSlackSeconds - 1));
+	CHECK(Purple::ExtendPeek(state, now, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 3600);
+
+	// An ordinary peek is untouched by any of that: nowhere near the cap, so
+	// the whole extension lands.
+	CHECK(Purple::StartPeek(state, now, 300));
+	CHECK(Purple::ExtendPeek(state, now, 300, 3600));
+	CHECK_EQ(state.peekDeadlineUnix, now + 600);
+
 	// A cap of zero or less is no cap at all.
 	CHECK(Purple::StartPeek(state, now, 300));
 	CHECK(Purple::ExtendPeek(state, now, 7200, 0));

@@ -472,13 +472,20 @@ bool ExtendPeek(
 		return false;
 	}
 	auto deadline = state.peekDeadlineUnix + addSeconds;
-	if (capSeconds > 0 && deadline > nowUnix + capSeconds) {
-		deadline = nowUnix + capSeconds;
-	}
-	if (deadline <= state.peekDeadlineUnix) {
-		// The cap has already been reached, so the button does nothing rather
-		// than quietly shortening the peek it was pressed to lengthen.
-		return false;
+	if (capSeconds > 0) {
+		// What the cap still leaves, measured from the deadline the peek
+		// already has. Asking it this way round is the whole fix: the old test
+		// was whether the deadline had reached `now + cap', which a peek
+		// started at the cap never does - `now' moves and the deadline does
+		// not, so there was always a second or two of room and the refusal
+		// never fired. A peek of a full hour then answered every press with
+		// "extended to 60:00 left" and ran for ever.
+		const auto room = nowUnix + capSeconds - state.peekDeadlineUnix;
+		if (room <= kPeekAtCapSlackSeconds) {
+			return false;
+		} else if (deadline > nowUnix + capSeconds) {
+			deadline = nowUnix + capSeconds;
+		}
 	}
 	state.peekDeadlineUnix = deadline;
 	return true;
