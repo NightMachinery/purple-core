@@ -741,7 +741,8 @@ LastSeenNote LastSeenNoteNow(
 		result.line = LastSeenLine::Remembered;
 		result.wasOnlineUnix = trade->wasOnlineUnix;
 		result.readAtUnix = trade->readAtUnix;
-	} else if (shape == LastSeenShape::Coarse
+	} else if (config.trade
+		&& shape == LastSeenShape::Coarse
 		&& config.reasons
 		&& reason == LastSeenReason::ByMe) {
 		// The shape is tested here as well as the reason, even though

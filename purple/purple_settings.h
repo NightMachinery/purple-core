@@ -690,14 +690,14 @@ struct LastSeen {
 	bool reasons = true;
 
 	// Whether the "show mine to see theirs" sheet is offered at all. Every way
-	// into it is gated on this and on nothing else, so turning it off leaves
-	// the explanations standing and takes away the offer.
+	// into it is gated on this and on nothing else, so turning it off removes
+	// the Last Seen Peek tail and the offer together.
 	//
 	// Two lines can open the sheet, and `reasons_p' reaches only one of them:
 	// the reason tail, which is drawn only when explanations are on, and the
-	// remembered line, which is drawn either way and so stays tappable either
-	// way. LastSeenNoteNow() in purple_state.h is where that is decided, for
-	// both apps at once.
+	// remembered line, which remains visible after the feature is disabled but
+	// is no longer tappable. LastSeenNoteNow() in purple_state.h is where that
+	// is decided, for both apps at once.
 	bool trade = true;
 
 	// How long to wait for their exact `was_online' after asking, in seconds,

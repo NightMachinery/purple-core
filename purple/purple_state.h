@@ -512,7 +512,8 @@ struct LastSeenNote {
 //   with, and turning the explanations off should not hide the answer to a
 //   question they asked out loud.
 // - ByMeTail otherwise, when the status is Coarse because of our own rules and
-//   `reasons_p' is on. That IS the fork explaining, so the switch governs it.
+//   both `trade_p' and `reasons_p' are on. That IS the fork's Peek affordance,
+//   so both switches govern it.
 // - Plain otherwise.
 //
 // What gates the remembered line is the AGE OF THE MEMORY - is it still within
@@ -527,8 +528,7 @@ struct LastSeenNote {
 // line or nothing, never a tail. The server is not withholding a moment there,
 // so there is no coarsening for the fork to attribute to anybody.
 //
-// `tappable' needs `trade_p' - it is the offer, and switching the offer off is
-// the whole of what that key does - plus a line worth tapping:
+// `tappable' needs `trade_p' and a line worth tapping:
 //
 // - the ByMe tail, which is drawn only when `reasons_p' is on, so its tap is
 //   gated by `reasons_p' through the line rather than by a second test;

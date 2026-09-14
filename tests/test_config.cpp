@@ -7143,9 +7143,9 @@ void TestLastSeenNote() {
 	CHECK(!note(Reason::ByMe).tappable);
 	settings.lastSeen.reasons = true;
 
-	// trade_p leaves the explanation standing and takes the offer away.
+	// trade_p removes the feature's explanation and action together.
 	settings.lastSeen.trade = false;
-	CHECK(note(Reason::ByMe).line == Line::ByMeTail);
+	CHECK(note(Reason::ByMe).line == Line::Plain);
 	CHECK(!note(Reason::ByMe).tappable);
 	settings.lastSeen.trade = true;
 
@@ -7173,10 +7173,13 @@ void TestLastSeenNote() {
 	CHECK(note(Reason::ByMe).tappable);
 	settings.lastSeen.reasons = true;
 
-	// trade_p still reaches it: it is the offer itself.
+	// Disabling future peeks keeps a remembered result visible, but inert.
 	settings.lastSeen.trade = false;
-	CHECK(note(Reason::ByMe).line == Line::Remembered);
-	CHECK(!note(Reason::ByMe).tappable);
+	const auto disabled = note(Reason::ByMe);
+	CHECK(disabled.line == Line::Remembered);
+	CHECK(!disabled.tappable);
+	CHECK_EQ(disabled.wasOnlineUnix, now - 900);
+	CHECK_EQ(disabled.readAtUnix, now - 60);
 	settings.lastSeen.trade = true;
 
 	// Shown whatever the reason has become, since it is a moment that was
