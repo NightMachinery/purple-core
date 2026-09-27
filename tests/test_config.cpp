@@ -13,6 +13,7 @@ option) any later version.
 // Run with purple/test_config.sh.
 
 #include "purple/purple_engine.h"
+#include "purple/purple_passcode.h"
 #include "purple/purple_screentime.h"
 #include "purple/purple_settings.h"
 #include "purple/purple_splice.h"
@@ -8222,9 +8223,24 @@ preset = "lunch"
 	CHECK_EQ(now->from, 12 * 60);
 }
 
+void TestPersianKeyboardToEnglish() {
+	Begin("PersianKeyboardToEnglish");
+	const auto source = u"ضصثقفغعهخحجچشسیبلاتنمکگظطزرذدپو.ًٌٍَُِّْ][}{|ؤئيإأآة»«:؛كٓژٰ‌ٔء<>؟٬٫﷼٪×،)(ـ۱۲۳۴۵۶۷۸۹۰"_q;
+	const auto expected = u"qwertyuiop[]asdfghjkl;'zxcvbnm,.QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>?@#$%^&()_1234567890"_q;
+	CHECK_EQ(source.size(), 85);
+	CHECK_EQ(Purple::PersianKeyboardToEnglish(source), expected);
+	for (auto i = 0; i != source.size(); ++i) {
+		CHECK_EQ(Purple::PersianKeyboardToEnglish(source.mid(i, 1)), expected.mid(i, 1));
+	}
+	CHECK_EQ(Purple::PersianKeyboardToEnglish(u"یي کك ۰١ ‌"_q), u"dD ;Z 0١ B"_q);
+	CHECK_EQ(Purple::PersianKeyboardToEnglish(u"🙂 é 😀 \n"_q), u"🙂 é 😀 \n"_q);
+	CHECK_EQ(Purple::PersianKeyboardToEnglish(u"Pass-ضی‌۹!?42"_q), u"Pass-qdB9!?42"_q);
+}
+
 } // namespace
 
 int main() {
+	TestPersianKeyboardToEnglish();
 	TestLists();
 	TestKinds();
 	TestPresets();

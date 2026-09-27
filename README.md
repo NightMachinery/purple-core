@@ -37,6 +37,9 @@ rules about data are far easier to prove outside a running app than inside one.
   history you already have. It also holds `FormatSpan()`, the one piece of
   wording in the core: both apps had written "6 h 12 m" for themselves and the
   two spellings had already drifted apart.
+- `purple/purple_passcode.{h,cpp}` - maps a passcode candidate typed with the
+  Persian keyboard layout to its English key positions. Verification callers
+  can try the mapped candidate without changing the stored passcode.
 - `purple/purple_types.h` - the two type aliases and the `_q` string literal the
   core borrowed from tdesktop's `base/basic_types.h` before extraction. It
   defers to that header when compiled inside tdesktop and defines them itself
