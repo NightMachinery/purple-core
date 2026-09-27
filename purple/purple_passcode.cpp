@@ -7,8 +7,6 @@ option) any later version.
 */
 #include "purple/purple_passcode.h"
 
-#include <QtCore/QStringView>
-
 #include <iterator>
 
 namespace Purple {
@@ -18,7 +16,7 @@ QString PersianKeyboardToEnglish(QString candidate) {
 	constexpr char16_t kEnglish[] = u"qwertyuiop[]asdfghjkl;'zxcvbnm,.QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>?@#$%^&()_1234567890";
 	static_assert(std::size(kPersian) == std::size(kEnglish));
 
-	const auto source = QStringView(kPersian);
+	const auto source = QString::fromUtf16(kPersian);
 	for (auto i = 0; i != candidate.size(); ++i) {
 		const auto index = source.indexOf(candidate.at(i));
 		if (index >= 0) {
