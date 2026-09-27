@@ -972,6 +972,78 @@ enabled_p = true
 	CHECK(WarnsAbout(order, u"each preset writes its own"_q));
 }
 
+void TestNotificationPreviews() {
+	Begin("notification previews");
+	using Purple::ChatKind;
+	const auto allows = [](const Purple::ParseResult &result,
+			Purple::PeerIdValue id,
+			ChatKind kind) {
+		return Purple::PreviewAlways(result.settings, id, kind);
+	};
+
+	const auto defaults = Parse(QString());
+	CHECK(defaults.ok());
+	CHECK(defaults.warnings.empty());
+	CHECK(allows(defaults, 123, ChatKind::Bot));
+	CHECK(allows(defaults, 123, ChatKind::Channel));
+	CHECK(!allows(defaults, 123, ChatKind::Private));
+	CHECK(!allows(defaults, 123, ChatKind::Group));
+	CHECK(!allows(defaults, 0, ChatKind::Bot));
+	CHECK(!allows(defaults, -1, ChatKind::Channel));
+
+	const auto empty = Parse(u"[notifications]\npreview_always = []\n"_q);
+	CHECK(empty.ok());
+	CHECK(empty.warnings.empty());
+	CHECK(!allows(empty, 123, ChatKind::Bot));
+	CHECK(!allows(empty, 123, ChatKind::Channel));
+
+	const auto mixed = Parse(uR"([notifications]
+preview_always = ["MAGIC_BOTS", "MAGIC_CHANNELS", "private:123", "user:123", "private:000123", "bot:456", "group:789", "channel:321", "group:123", "MAGIC_BOTS"]
+)"_q);
+	CHECK(mixed.ok());
+	CHECK(mixed.warnings.empty());
+	CHECK_EQ(mixed.settings.notifications.previewAlways.size(), size_t(5));
+	CHECK(allows(mixed, 123, ChatKind::Private));
+	CHECK(allows(mixed, 123, ChatKind::Group));
+	CHECK(allows(mixed, 456, ChatKind::Bot));
+	CHECK(allows(mixed, 789, ChatKind::Group));
+	CHECK(allows(mixed, 321, ChatKind::Channel));
+	CHECK(allows(mixed, 999, ChatKind::Bot));
+	CHECK(allows(mixed, 999, ChatKind::Channel));
+	CHECK(!allows(mixed, 456, ChatKind::Private));
+
+	const auto typed = Parse(uR"([notifications]
+preview_always = ["private:123", "bot:456", "group:789", "channel:321"]
+)"_q);
+	CHECK(typed.ok());
+	CHECK(!allows(typed, 123, ChatKind::Bot));
+	CHECK(!allows(typed, 123, ChatKind::Channel));
+	CHECK(allows(typed, 123, ChatKind::Private));
+	CHECK(!allows(typed, 456, ChatKind::Channel));
+	CHECK(allows(typed, 456, ChatKind::Bot));
+	CHECK(!allows(typed, 999, ChatKind::Bot));
+	CHECK(!allows(typed, 999, ChatKind::Channel));
+
+	const auto invalid = Parse(uR"([notifications]
+preview_always = ["private:0", "group:-1", "bot:+3", "channel: 4", "private:5 ", "group:1a", "channel:9223372036854775808", "unknown:1", "bot:", "MAGIC_USERS", 17, "private:7"]
+)"_q);
+	CHECK(invalid.ok());
+	CHECK_EQ(invalid.warnings.size(), size_t(11));
+	CHECK_EQ(invalid.settings.notifications.previewAlways.size(), size_t(1));
+	CHECK(allows(invalid, 7, ChatKind::Private));
+	CHECK(!allows(invalid, 1, ChatKind::Group));
+	CHECK(!allows(invalid, 17, ChatKind::Bot));
+	CHECK(!allows(invalid, 8, ChatKind::Channel));
+	CHECK(WarnsAbout(invalid, u"preview_always"_q));
+
+	const auto malformed = Parse(
+		u"[notifications]\npreview_always = \"MAGIC_BOTS\"\n"_q);
+	CHECK(malformed.ok());
+	CHECK(WarnsAbout(malformed, u"should be an array"_q));
+	CHECK(allows(malformed, 123, ChatKind::Bot));
+	CHECK(allows(malformed, 123, ChatKind::Channel));
+}
+
 void TestBooleanKeysAreStrict() {
 	Begin("boolean keys are strict");
 
@@ -8253,6 +8325,7 @@ int main() {
 	TestScheduleAndFocus();
 	TestScalarParsers();
 	TestPremiumStillParses();
+	TestNotificationPreviews();
 	TestVersion();
 	TestBrokenFile();
 	TestSpliceAdd();

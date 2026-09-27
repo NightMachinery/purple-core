@@ -76,6 +76,10 @@ Both put the repository root on their include path, so
 The full schema reference lives with the desktop app, at `docs/purple/config.md`
 in the tdesktop fork.
 
+The shared notification preview exception policy is documented in
+[`docs/notifications.md`](docs/notifications.md). It is separate from Work Mode
+notification mute decisions.
+
 ## Tests
 
 `tests/test_config.cpp` compiles the core's translation units into a small

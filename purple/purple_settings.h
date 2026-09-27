@@ -49,6 +49,18 @@ enum class ChatKind : uchar {
 [[nodiscard]] std::optional<ChatKind> ParseChatKind(const QString &value);
 [[nodiscard]] QString ChatKindName(ChatKind kind);
 
+struct PreviewPeer {
+	PeerIdValue id = 0;
+	ChatKind kind = ChatKind::Private;
+	bool operator==(const PreviewPeer &) const = default;
+};
+
+struct Notifications {
+	bool magicBots = true;
+	bool magicChannels = true;
+	std::vector<PreviewPeer> previewAlways;
+};
+
 // How much of a folder a preset pulls into its own view, whatever the lists
 // decided - the escape hatch for "hide everything except what is in here".
 //
@@ -914,6 +926,7 @@ struct Settings {
 	int version = kSettingsVersion;
 
 	Premium premium;
+	Notifications notifications;
 
 	// Definitions only, in file order. Priority is a preset's business.
 	std::vector<List> lists;
@@ -956,6 +969,11 @@ struct ParseResult {
 [[nodiscard]] ParseResult ParseSettings(
 	const QString &text,
 	const QString &path);
+
+[[nodiscard]] bool PreviewAlways(
+	const Settings &settings,
+	PeerIdValue id,
+	ChatKind kind);
 
 // The name the parser will not accept for a preset, because the engine uses it
 // for the stock-behaviour bypass.

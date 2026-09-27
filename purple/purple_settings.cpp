@@ -213,6 +213,79 @@ void WarnRetired(
 	return result;
 }
 
+[[nodiscard]] Notifications ReadNotifications(
+		const toml::table &root,
+		std::vector<QString> &warnings) {
+	auto result = Notifications();
+	const auto node = root.get("notifications");
+	if (!node) {
+		return result;
+	}
+	const auto table = node->as_table();
+	if (!table) {
+		warnings.push_back(u"'notifications' should be a table (%1)."_q
+			.arg(At(*node)));
+		return result;
+	}
+	const auto preview = table->get("preview_always");
+	if (!preview) {
+		return result;
+	}
+	const auto array = preview->as_array();
+	if (!array) {
+		warnings.push_back(
+			u"notifications: 'preview_always' should be an array (%1), "
+			"keeping the default."_q.arg(At(*preview)));
+		return result;
+	}
+	result.magicBots = false;
+	result.magicChannels = false;
+	for (auto &&element : *array) {
+		const auto raw = element.value<std::string_view>();
+		const auto value = raw ? Text(*raw) : QString();
+		if (value == u"MAGIC_BOTS"_q) {
+			result.magicBots = true;
+			continue;
+		} else if (value == u"MAGIC_CHANNELS"_q) {
+			result.magicChannels = true;
+			continue;
+		}
+		const auto colon = value.indexOf(':');
+		const auto type = value.left(colon);
+		const auto digits = value.mid(colon + 1);
+		auto kind = std::optional<ChatKind>();
+		if (type == u"private"_q || type == u"user"_q) {
+			kind = ChatKind::Private;
+		} else if (type == u"bot"_q) {
+			kind = ChatKind::Bot;
+		} else if (type == u"group"_q) {
+			kind = ChatKind::Group;
+		} else if (type == u"channel"_q) {
+			kind = ChatKind::Channel;
+		}
+		auto validDigits = !digits.isEmpty();
+		for (const auto digit : digits) {
+			validDigits = validDigits && digit >= '0' && digit <= '9';
+		}
+		auto ok = false;
+		const auto id = validDigits ? digits.toLongLong(&ok) : 0;
+		if (!kind || !ok || id <= 0) {
+			warnings.push_back(
+				u"notifications: 'preview_always' entry '%1' should be "
+				"MAGIC_BOTS, MAGIC_CHANNELS, or a typed positive decimal "
+				"peer id (%2), ignoring it."_q
+					.arg(raw ? value : u"?"_q, At(element)));
+			continue;
+		}
+		const auto peer = PreviewPeer{ id, *kind };
+		if (std::find(result.previewAlways.begin(), result.previewAlways.end(), peer)
+			== result.previewAlways.end()) {
+			result.previewAlways.push_back(peer);
+		}
+	}
+	return result;
+}
+
 [[nodiscard]] std::vector<ChatKind> ReadKinds(
 		const toml::table &table,
 		const QString &context,
@@ -2256,6 +2329,24 @@ const DeviceLabel *Settings::device(const QString &id) const {
 	return (i == devices.end()) ? nullptr : &*i;
 }
 
+bool PreviewAlways(
+		const Settings &settings,
+		PeerIdValue id,
+		ChatKind kind) {
+	if (id <= 0) {
+		return false;
+	}
+	const auto &notifications = settings.notifications;
+	if ((kind == ChatKind::Bot && notifications.magicBots)
+		|| (kind == ChatKind::Channel && notifications.magicChannels)) {
+		return true;
+	}
+	return std::find(
+		notifications.previewAlways.begin(),
+		notifications.previewAlways.end(),
+		PreviewPeer{ id, kind }) != notifications.previewAlways.end();
+}
+
 ParseResult ParseSettings(const QString &text, const QString &path) {
 	auto result = ParseResult();
 	const auto utf8 = text.toUtf8();
@@ -2273,6 +2364,7 @@ ParseResult ParseSettings(const QString &text, const QString &path) {
 	const auto root = std::move(parsed).table();
 
 	result.settings.version = ReadVersion(root, result.warnings);
+	result.settings.notifications = ReadNotifications(root, result.warnings);
 
 	if (const auto premium = root.get("premium")) {
 		if (const auto table = premium->as_table()) {
