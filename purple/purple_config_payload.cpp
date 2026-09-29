@@ -51,7 +51,7 @@ ConfigPayloadInspection InspectConfigPayload(
 		return result;
 	}
 	const auto payload = document.value(u"payload"_q).toObject();
-	for (const auto field : {
+	for (const auto &field : {
 		u"schema"_q,
 		u"key"_q,
 		u"parents"_q,
