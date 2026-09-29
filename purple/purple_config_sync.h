@@ -96,12 +96,15 @@ struct ConfigSyncPlan {
 	ConfigClassification classification;
 	std::vector<ConfigHead> offered;
 	std::vector<ConfigHead> same;
+	std::optional<ConfigHead> ownHead;
+	bool ownStale = false;
 };
 
 [[nodiscard]] ConfigSyncPlan PlanConfigSync(
 	const QString &localFp,
 	const ConfigSyncState &state,
-	const std::vector<ConfigHead> &remoteHeads);
+	const std::vector<ConfigHead> &remoteHeads,
+	const std::optional<ConfigHead> &ownHead = std::nullopt);
 
 [[nodiscard]] std::optional<ConfigSyncState> AdoptConfigHeads(
 	const ConfigSyncState &state,

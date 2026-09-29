@@ -13,13 +13,37 @@ Terms used below:
 - **Ordering** is the one deterministic order used whenever the core picks a
   representative head or lists heads: generation descending, then sequence
   descending, then install id ascending, then key ascending.
+- **Own head** is this install's newest config record in the selected space,
+  taken from the same inventory as the remote heads.
+- **Known** keys of a state are its base, its base lineage and its equivalent
+  keys.
 
 ## PlanConfigSync
 
-`PlanConfigSync(localFp, state, remoteHeads)` classifies the heads with
-`ClassifyConfig` and returns one verdict, the classification, the heads it
-offers for a choice or an update (`offered`), and every head whose content
-equals the local file (`same`).
+`PlanConfigSync(localFp, state, remoteHeads, ownHead)` classifies the heads
+with `ClassifyConfig` and returns one verdict, the classification, the heads it
+offers for a choice or an update (`offered`), every head whose content equals
+the local file (`same`), the own head it was given (`ownHead`) and whether that
+own head is stale (`ownStale`). `ownHead` is optional; a caller that omits it
+gets exactly the behavior the planner had before own heads existed.
+
+A device's own newest record can stop describing it. When a device adopts a
+version that does not descend from its own record, every other device still
+sees that old record, finds it among its own known keys, and calls it `Stale`,
+while this device has already seen their records. Both sides then report
+UpToDate with different settings. For example, A and B both start at R, A
+publishes V and B publishes W concurrently, A picks W and B picks V: without
+the own head both end up UpToDate, A holding W and B holding V. The own head
+lets the planner notice that its record no longer matches its state.
+
+The own head is **stale** when the base is set and its key is not known. One
+exception keeps long histories quiet: lineages hold at most 64 ancestors, so
+when the base lineage is full and the own head's generation is not above the
+oldest generation the lineage still guarantees (the smallest generation after
+its first two entries), the own head may simply have been trimmed from the
+lineage and counts as not stale. Without that exception a device that only
+ever applies updates would report LocalChanges again after every 64 remote
+versions.
 
 An **unjoined preview** is a state whose install is empty, whose space is set,
 and whose base, base lineage, equivalent keys, pending key and seen sequences
@@ -31,7 +55,12 @@ install's own. Any other state with an empty install is invalid, and
 The first matching verdict wins:
 
 1. **Invalid**: the state or local fingerprint is invalid, or some head is
-   `Invalid`. Nothing is offered and `same` is empty.
+   `Invalid`, or an own head was given that does not belong here: it is in
+   another space, it is not this install's (an unjoined preview has no own
+   head), its sequence is 0, its key or lineage is invalid, or the base is
+   empty while no send is pending (an install that has posted has a base once
+   its read-back is confirmed). Nothing is offered, `same` is empty and
+   `ownStale` is false.
 2. **Pending**: this install has a staged, unconfirmed own record. Only
    finishing that send is allowed.
 3. **Conflict**: some head is `Concurrent`, or the heads split. A split counts
@@ -47,8 +76,13 @@ The first matching verdict wins:
 7. **Empty**: the base is empty and no other install has any head in the
    space, whether or not its sequence was already seen. This is the only
    verdict that may publish a version without parents.
-8. **LocalChanges**: the local file differs from the base content.
+8. **LocalChanges**: the base is set and either the local file differs from
+   the base content or the own head is stale.
 9. **UpToDate**.
+
+An own head whose record is still pending (the base is empty or older, and a
+send is in flight) reaches Pending rather than Invalid, so Finish sending stays
+available after a crash between the post and its read-back.
 
 For UpdateReady, `offered` is exactly the first `Ahead` head. For Conflict and
 Choose, it holds one representative per distinct content among the `Ahead`,
@@ -108,14 +142,29 @@ lineage }` built from a head, or from the base and base lineage.
   nothing). Write that head, then adopt every head that is not `Stale` and
   carries its content. Nothing is published.
 - **Adopt**: no key. Adopt `plan.same`. Nothing is written or published.
-- **LocalChanges**: no key. Publish with the base as the only parent.
+- **LocalChanges**: no key. Publish with the base as a parent, and the own
+  head as the second parent when it is stale, so the other devices see this
+  device's current settings supersede its old record.
 - **Empty**: no key. Publish with no parents.
 - **Choose or Conflict, remote key R** (one of the offered heads): write R and
-  adopt every head that is not `Stale` and carries R's content. When another
-  offered content remains, also publish, with R and the first offered head of
-  another content as parents, so the other devices see an ordinary update
-  instead of a lasting conflict. When R was the only offered content, nothing
-  is published.
+  adopt every head that is not `Stale` and carries R's content. Whether to
+  publish, and with which parents, is exactly what a fresh check would propose
+  right after that write and adoption. The core works this out by applying the
+  adoption and planning again on the same heads and own head.
+  - One other offered content remains: the fresh check is Choose or Conflict,
+    and keeping local there publishes with R and that content as parents. The
+    other devices then see an ordinary update instead of a lasting conflict.
+  - Two or more other contents remain: the fresh check is a Conflict among
+    them, so the parents are the first two of them. Every other device then
+    sees an update, and the devices holding R's content see Same.
+  - R was the only offered content: the fresh check is LocalChanges when the
+    own head is stale after the adoption, and the parents are R and the own
+    head. Otherwise it is UpToDate and nothing is published.
+  - If the fresh check is anything else, nothing is published. The one known
+    case: the local file was edited, R has the base's content, and another
+    offered head descends from the base. That head then returns as an update.
+
+  When R is among the parents it comes first.
 - **Choose or Conflict, keep local**: adopt `plan.same` (possibly none), then
   publish with the first two offered heads as parents. When only one head is
   offered, the base fills the second slot, unless the base is empty, is that
@@ -126,6 +175,19 @@ A choice that does not fit the verdict returns nothing, and so does any
 parent set that `MakeConfigVersion` would reject (for example a parent at the
 largest generation), so the client never stages a record the core cannot
 build.
+
+This gives the client a check it can rely on. After it writes R and adopts
+`adopt`, a fresh `PlanConfigSync` on the same inventory and own head returns
+LocalChanges, Choose or Conflict whenever the choice promised a publish. The
+fresh plan's `PlanConfigChoice(..., std::nullopt)` then publishes with the
+same set of parents, and when no publish was promised, it proposes none. A
+client that re-plans on the click before posting therefore posts exactly what
+the review promised, unless the inventory changed in between.
+
+Applying an update (UpdateReady) never publishes. When the own head was
+already stale, or the applied version descends an equivalent key rather than
+the base and so not the own record, the next check reports LocalChanges with
+the own head as the second parent.
 
 ## DiffConfigText
 

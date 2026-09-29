@@ -9079,7 +9079,7 @@ void TestConfigChoice() {
 		three,
 		stranger.key);
 	CHECK(parentKeys(*takeStranger) == std::vector<QString>({
-		stranger.key, c.key }));
+		c.key, b.key }));
 
 	const auto choose = Purple::PlanConfigSync(fpA, state, {
 		head(stranger, u"pc"_q), head(elsewhereA, u"tv"_q, 3) });
@@ -9134,6 +9134,464 @@ void TestConfigChoice() {
 	const auto limitLocal = Purple::PlanConfigSync(fpA, limitState, {});
 	CHECK(limitLocal.verdict == Verdict::LocalChanges);
 	CHECK(!Purple::PlanConfigChoice(limitState, limitLocal, std::nullopt));
+}
+
+void TestConfigOwnHead() {
+	Begin("config own head");
+	using Verdict = Purple::ConfigSyncVerdict;
+	const auto fp = [](const char *text) {
+		return Purple::SettingsFingerprint(text);
+	};
+	const auto head = [](const Purple::ConfigVersion &version,
+			const QString &writer, uint64_t seq) {
+		return Purple::ConfigHead{
+			u"space"_q, writer, seq, version.key, version.lineage };
+	};
+	const auto at = [](const QString &install,
+			const Purple::ConfigVersion &base) {
+		auto result = Purple::ConfigSyncState();
+		result.space = u"space"_q;
+		result.install = install;
+		result.base = base.key;
+		result.baseLineage = base.lineage;
+		return result;
+	};
+	const auto confirm = [](Purple::ConfigSyncState state,
+			const Purple::ConfigVersion &version) {
+		state.base = version.key;
+		state.baseLineage = version.lineage;
+		return state;
+	};
+	const auto ordered = [](const std::vector<Purple::ConfigVersion> &list) {
+		auto result = std::vector<QString>();
+		for (const auto &version : list) {
+			result.push_back(version.key);
+		}
+		return result;
+	};
+	const auto sorted = [&](const std::vector<Purple::ConfigVersion> &list) {
+		auto result = ordered(list);
+		std::sort(result.begin(), result.end());
+		return result;
+	};
+	const auto written = [](const Purple::ConfigChoicePlan &choice) {
+		return Purple::ParseConfigVersionKey(choice.write.key)->fingerprint;
+	};
+	const auto promiseHolds = [&](
+			const Purple::ConfigSyncState &state,
+			const QString &localFp,
+			const std::vector<Purple::ConfigHead> &inventory,
+			const Purple::ConfigHead &own,
+			const QString &remote,
+			Verdict expected) {
+		const auto plan = Purple::PlanConfigSync(
+			localFp,
+			state,
+			inventory,
+			own);
+		const auto choice = Purple::PlanConfigChoice(state, plan, remote);
+		if (!choice || !choice->writeRemote || !choice->publish) {
+			return false;
+		}
+		const auto next = Purple::AdoptConfigHeads(
+			state,
+			written(*choice),
+			choice->adopt);
+		if (!next) {
+			return false;
+		}
+		const auto fresh = Purple::PlanConfigSync(
+			written(*choice),
+			*next,
+			inventory,
+			own);
+		const auto proposal = Purple::PlanConfigChoice(
+			*next,
+			fresh,
+			std::nullopt);
+		return (fresh.verdict == expected)
+			&& proposal
+			&& proposal->publish
+			&& (sorted(proposal->parents) == sorted(choice->parents));
+	};
+	const auto installA = u"in-a"_q;
+	const auto installB = u"in-b"_q;
+	const auto r = *Purple::MakeConfigVersion("R", {});
+	const auto v = *Purple::MakeConfigVersion("V", { r });
+	const auto w = *Purple::MakeConfigVersion("W", { r });
+	auto stateA = at(installA, v);
+	auto stateB = at(installB, w);
+	stateB.seenSeq[installA] = 1;
+	const auto headV = head(v, installA, 2);
+	const auto headW = head(w, installB, 1);
+	const auto start = std::vector<Purple::ConfigHead>{ headV, headW };
+
+	const auto blindA = Purple::PlanConfigSync(fp("V"), stateA, start);
+	CHECK(blindA.verdict == Verdict::Choose);
+	CHECK(!blindA.ownHead);
+	CHECK(!blindA.ownStale);
+	const auto blindPickA = Purple::PlanConfigChoice(stateA, blindA, w.key);
+	CHECK(!blindPickA->publish);
+	const auto blindB = Purple::PlanConfigSync(fp("W"), stateB, start);
+	const auto blindPickB = Purple::PlanConfigChoice(stateB, blindB, v.key);
+	CHECK(!blindPickB->publish);
+	const auto divergedA = Purple::AdoptConfigHeads(
+		stateA,
+		fp("W"),
+		blindPickA->adopt);
+	const auto divergedB = Purple::AdoptConfigHeads(
+		stateB,
+		fp("V"),
+		blindPickB->adopt);
+	CHECK(Purple::PlanConfigSync(fp("W"), *divergedA, start).verdict
+		== Verdict::UpToDate);
+	CHECK(Purple::PlanConfigSync(fp("V"), *divergedB, start).verdict
+		== Verdict::UpToDate);
+	CHECK(Purple::PlanConfigSync(fp("W"), *divergedA, start, headV).verdict
+		== Verdict::LocalChanges);
+	CHECK(Purple::PlanConfigSync(fp("V"), *divergedB, start, headW).verdict
+		== Verdict::LocalChanges);
+
+	const auto planA = Purple::PlanConfigSync(fp("V"), stateA, start, headV);
+	CHECK(planA.verdict == Verdict::Choose);
+	CHECK(planA.ownHead.has_value());
+	CHECK_EQ(planA.ownHead->key, v.key);
+	CHECK(!planA.ownStale);
+	CHECK(HeadKeys(planA.offered) == std::vector<QString>({ w.key }));
+	const auto pickA = Purple::PlanConfigChoice(stateA, planA, w.key);
+	CHECK(pickA.has_value());
+	CHECK(pickA->writeRemote);
+	CHECK(pickA->publish);
+	CHECK(ordered(pickA->parents) == std::vector<QString>({ w.key, v.key }));
+	CHECK(promiseHolds(
+		stateA,
+		fp("V"),
+		start,
+		headV,
+		w.key,
+		Verdict::LocalChanges));
+	const auto adoptedA = *Purple::AdoptConfigHeads(
+		stateA,
+		fp("W"),
+		pickA->adopt);
+	const auto freshA = Purple::PlanConfigSync(
+		fp("W"),
+		adoptedA,
+		start,
+		headV);
+	CHECK(freshA.verdict == Verdict::LocalChanges);
+	CHECK(freshA.ownStale);
+	const auto resolvedA = *Purple::MakeConfigVersion("W", pickA->parents);
+	const auto headA2 = head(resolvedA, installA, 3);
+	const auto stateA2 = confirm(adoptedA, resolvedA);
+	const auto sequential = std::vector<Purple::ConfigHead>{ headA2, headW };
+	CHECK(Purple::PlanConfigSync(fp("W"), stateA2, sequential, headA2)
+		.verdict == Verdict::UpToDate);
+	const auto planB = Purple::PlanConfigSync(
+		fp("W"),
+		stateB,
+		sequential,
+		headW);
+	CHECK(planB.verdict == Verdict::Adopt);
+	CHECK(HeadKeys(planB.same) == std::vector<QString>({ resolvedA.key }));
+	const auto adoptB = Purple::PlanConfigChoice(stateB, planB, std::nullopt);
+	const auto adoptedB = Purple::AdoptConfigHeads(
+		stateB,
+		fp("W"),
+		adoptB->adopt);
+	CHECK(adoptedB.has_value());
+	const auto settledB = Purple::PlanConfigSync(
+		fp("W"),
+		*adoptedB,
+		sequential,
+		headW);
+	CHECK(settledB.verdict == Verdict::UpToDate);
+	CHECK(!settledB.ownStale);
+
+	const auto planB0 = Purple::PlanConfigSync(fp("W"), stateB, start, headW);
+	CHECK(planB0.verdict == Verdict::Choose);
+	const auto pickB = Purple::PlanConfigChoice(stateB, planB0, v.key);
+	CHECK(ordered(pickB->parents) == std::vector<QString>({ v.key, w.key }));
+	CHECK(promiseHolds(
+		stateB,
+		fp("W"),
+		start,
+		headW,
+		v.key,
+		Verdict::LocalChanges));
+	const auto resolvedB = *Purple::MakeConfigVersion("V", pickB->parents);
+	const auto headB2 = head(resolvedB, installB, 2);
+	const auto stateB2 = confirm(
+		*Purple::AdoptConfigHeads(stateB, fp("V"), pickB->adopt),
+		resolvedB);
+	const auto crossed = std::vector<Purple::ConfigHead>{ headA2, headB2 };
+	const auto checkA = Purple::PlanConfigSync(
+		fp("W"),
+		stateA2,
+		crossed,
+		headA2);
+	const auto checkB = Purple::PlanConfigSync(
+		fp("V"),
+		stateB2,
+		crossed,
+		headB2);
+	CHECK(checkA.verdict == Verdict::Choose);
+	CHECK(HeadKeys(checkA.offered) == std::vector<QString>({ resolvedB.key }));
+	CHECK(checkB.verdict == Verdict::Choose);
+	CHECK(HeadKeys(checkB.offered) == std::vector<QString>({ resolvedA.key }));
+	const auto keepA = Purple::PlanConfigChoice(stateA2, checkA, std::nullopt);
+	CHECK(ordered(keepA->parents) == std::vector<QString>({
+		resolvedB.key, resolvedA.key }));
+	const auto finalA = *Purple::MakeConfigVersion("W", keepA->parents);
+	const auto headA3 = head(finalA, installA, 4);
+	const auto stateA3 = confirm(stateA2, finalA);
+	const auto settled = std::vector<Purple::ConfigHead>{ headA3, headB2 };
+	CHECK(Purple::PlanConfigSync(fp("W"), stateA3, settled, headA3).verdict
+		== Verdict::UpToDate);
+	const auto updateB = Purple::PlanConfigSync(
+		fp("V"),
+		stateB2,
+		settled,
+		headB2);
+	CHECK(updateB.verdict == Verdict::UpdateReady);
+	const auto applyB = Purple::PlanConfigChoice(stateB2, updateB, finalA.key);
+	CHECK(!applyB->publish);
+	const auto stateB3 = Purple::AdoptConfigHeads(
+		stateB2,
+		fp("W"),
+		applyB->adopt);
+	const auto doneB = Purple::PlanConfigSync(
+		fp("W"),
+		*stateB3,
+		settled,
+		headB2);
+	CHECK(doneB.verdict == Verdict::UpToDate);
+	CHECK(!doneB.ownStale);
+
+	const auto x = *Purple::MakeConfigVersion("X", { r });
+	const auto y = *Purple::MakeConfigVersion("Y", { r });
+	const auto two = std::vector<Purple::ConfigHead>{
+		headV, headW, head(x, u"in-c"_q, 1) };
+	const auto conflict = Purple::PlanConfigSync(fp("V"), stateA, two, headV);
+	CHECK(conflict.verdict == Verdict::Conflict);
+	const auto pickTwo = Purple::PlanConfigChoice(stateA, conflict, w.key);
+	CHECK(ordered(pickTwo->parents) == std::vector<QString>({ w.key, x.key }));
+	CHECK(promiseHolds(stateA, fp("V"), two, headV, w.key, Verdict::Choose));
+	auto three = two;
+	three.push_back(head(y, u"in-d"_q, 1));
+	const auto pickThree = Purple::PlanConfigChoice(
+		stateA,
+		Purple::PlanConfigSync(fp("V"), stateA, three, headV),
+		w.key);
+	CHECK(ordered(pickThree->parents) == std::vector<QString>({
+		x.key, y.key }));
+	CHECK(promiseHolds(
+		stateA,
+		fp("V"),
+		three,
+		headV,
+		w.key,
+		Verdict::Conflict));
+
+	const auto dirtySame = *Purple::MakeConfigVersion("D", {});
+	const auto dirtyHeads = std::vector<Purple::ConfigHead>{
+		headV, head(dirtySame, u"in-c"_q, 1) };
+	const auto sameWhileDirty = Purple::PlanConfigSync(
+		fp("D"),
+		stateA,
+		dirtyHeads,
+		headV);
+	CHECK(sameWhileDirty.verdict == Verdict::Adopt);
+	CHECK(!sameWhileDirty.ownStale);
+	const auto adoptedDirty = *Purple::AdoptConfigHeads(
+		stateA,
+		fp("D"),
+		sameWhileDirty.same);
+	const auto staleAfterAdopt = Purple::PlanConfigSync(
+		fp("D"),
+		adoptedDirty,
+		dirtyHeads,
+		headV);
+	CHECK(staleAfterAdopt.verdict == Verdict::LocalChanges);
+	CHECK(staleAfterAdopt.ownStale);
+	const auto mergeOwn = Purple::PlanConfigChoice(
+		adoptedDirty,
+		staleAfterAdopt,
+		std::nullopt);
+	CHECK(ordered(mergeOwn->parents) == std::vector<QString>({
+		dirtySame.key, v.key }));
+	CHECK(Purple::MakeConfigVersion("D", mergeOwn->parents).has_value());
+	CHECK(Purple::PlanConfigSync(fp("D"), adoptedDirty, dirtyHeads).verdict
+		== Verdict::UpToDate);
+	const auto dirtyDescendant = *Purple::MakeConfigVersion("D", { v });
+	const auto descendantHeads = std::vector<Purple::ConfigHead>{
+		headV, head(dirtyDescendant, u"in-c"_q, 1) };
+	const auto adoptedDescendant = *Purple::AdoptConfigHeads(
+		stateA,
+		fp("D"),
+		Purple::PlanConfigSync(fp("D"), stateA, descendantHeads, headV).same);
+	const auto keptDescendant = Purple::PlanConfigSync(
+		fp("D"),
+		adoptedDescendant,
+		descendantHeads,
+		headV);
+	CHECK(keptDescendant.verdict == Verdict::UpToDate);
+	CHECK(!keptDescendant.ownStale);
+
+	const auto u = *Purple::MakeConfigVersion("U", { v });
+	const auto updateHeads = std::vector<Purple::ConfigHead>{
+		headV, head(u, installB, 1) };
+	const auto update = Purple::PlanConfigSync(
+		fp("V"),
+		stateA,
+		updateHeads,
+		headV);
+	CHECK(update.verdict == Verdict::UpdateReady);
+	CHECK(!update.ownStale);
+	const auto applied = *Purple::AdoptConfigHeads(
+		stateA,
+		fp("U"),
+		Purple::PlanConfigChoice(stateA, update, u.key)->adopt);
+	const auto afterUpdate = Purple::PlanConfigSync(
+		fp("U"),
+		applied,
+		updateHeads,
+		headV);
+	CHECK(afterUpdate.verdict == Verdict::UpToDate);
+	CHECK(!afterUpdate.ownStale);
+	CHECK(Purple::PlanConfigSync(fp("V edited"), stateA, {}, headV).verdict
+		== Verdict::LocalChanges);
+	const auto ownLocal = Purple::PlanConfigChoice(
+		stateA,
+		Purple::PlanConfigSync(fp("V edited"), stateA, {}, headV),
+		std::nullopt);
+	CHECK(ordered(ownLocal->parents) == std::vector<QString>({ v.key }));
+
+	auto link = v;
+	auto chain = std::vector<Purple::ConfigVersion>();
+	for (auto index = 0; index != 70; ++index) {
+		link = *Purple::MakeConfigVersion(
+			"n" + QByteArray::number(index),
+			{ link });
+		chain.push_back(link);
+	}
+	CHECK_EQ(link.lineage.size(), 64);
+	CHECK(std::find(link.lineage.begin(), link.lineage.end(), v.key)
+		== link.lineage.end());
+	const auto consumer = at(installA, link);
+	const auto window = Purple::PlanConfigSync(
+		fp("n69"),
+		consumer,
+		{},
+		headV);
+	CHECK(window.verdict == Verdict::UpToDate);
+	CHECK(!window.ownStale);
+	const auto branch = *Purple::MakeConfigVersion("B", { chain[60] });
+	const auto divergent = Purple::PlanConfigSync(
+		fp("n69"),
+		consumer,
+		{},
+		head(branch, installA, 9));
+	CHECK(divergent.verdict == Verdict::LocalChanges);
+	CHECK(divergent.ownStale);
+
+	const auto keptBase = *Purple::MakeConfigVersion("K", {});
+	const auto sameContent = *Purple::MakeConfigVersion("K", { keptBase });
+	const auto concurrent = *Purple::MakeConfigVersion("O", { keptBase });
+	const auto keptState = at(installA, keptBase);
+	const auto ownKept = head(keptBase, installA, 1);
+	const auto keptHeads = std::vector<Purple::ConfigHead>{
+		ownKept,
+		head(sameContent, u"in-c"_q, 1),
+		head(concurrent, u"in-d"_q, 1),
+	};
+	const auto keptConflict = Purple::PlanConfigSync(
+		fp("K edited"),
+		keptState,
+		keptHeads,
+		ownKept);
+	CHECK(keptConflict.verdict == Verdict::Conflict);
+	const auto pickKept = Purple::PlanConfigChoice(
+		keptState,
+		keptConflict,
+		sameContent.key);
+	CHECK(pickKept->writeRemote);
+	CHECK(!pickKept->publish);
+	const auto keptNext = *Purple::AdoptConfigHeads(
+		keptState,
+		fp("K"),
+		pickKept->adopt);
+	CHECK_EQ(keptNext.base, sameContent.key);
+	CHECK(keptNext.equiv == std::vector<QString>({ keptBase.key }));
+	CHECK(Purple::PlanConfigSync(fp("K"), keptNext, keptHeads, ownKept)
+		.verdict == Verdict::UpdateReady);
+
+	const auto invalid = [&](const Purple::ConfigSyncState &state,
+			const Purple::ConfigHead &own) {
+		const auto plan = Purple::PlanConfigSync(fp("V"), state, start, own);
+		return plan.verdict == Verdict::Invalid
+			&& plan.same.empty()
+			&& plan.offered.empty()
+			&& !plan.ownStale;
+	};
+	auto foreign = headV;
+	foreign.space = u"other"_q;
+	CHECK(invalid(stateA, foreign));
+	CHECK(invalid(stateA, head(v, installB, 2)));
+	CHECK(invalid(stateA, head(v, installA, 0)));
+	auto badKey = headV;
+	badKey.key = u"2.bad"_q;
+	CHECK(invalid(stateA, badKey));
+	auto badLineage = headV;
+	badLineage.lineage = { v.key };
+	CHECK(invalid(stateA, badLineage));
+	auto preview = Purple::ConfigSyncState();
+	preview.space = u"space"_q;
+	CHECK(Purple::PlanConfigSync(fp("V"), preview, start).verdict
+		== Verdict::Choose);
+	CHECK(invalid(preview, head(v, QString(), 2)));
+	auto unposted = stateA;
+	unposted.base.clear();
+	unposted.baseLineage.clear();
+	CHECK(invalid(unposted, headV));
+	unposted.pending = v.key;
+	const auto sending = Purple::PlanConfigSync(
+		fp("V"),
+		unposted,
+		start,
+		headV);
+	CHECK(sending.verdict == Verdict::Pending);
+	CHECK(!sending.ownStale);
+	CHECK(!Purple::PlanConfigChoice(unposted, sending, std::nullopt));
+
+	const auto same = [](const Purple::ConfigSyncPlan &a,
+			const Purple::ConfigSyncPlan &b) {
+		return a.verdict == b.verdict
+			&& HeadKeys(a.offered) == HeadKeys(b.offered)
+			&& HeadKeys(a.same) == HeadKeys(b.same)
+			&& a.classification.split == b.classification.split
+			&& a.classification.heads.size() == b.classification.heads.size()
+			&& !b.ownHead
+			&& !b.ownStale;
+	};
+	const auto cases = std::vector<std::tuple<
+		QString,
+		Purple::ConfigSyncState,
+		std::vector<Purple::ConfigHead>>>{
+		{ fp("V"), stateA, start },
+		{ fp("W"), *divergedA, start },
+		{ fp("D"), adoptedDirty, dirtyHeads },
+		{ fp("V edited"), stateA, {} },
+		{ fp("V"), stateA, three },
+		{ fp("V"), preview, start },
+		{ fp("V"), unposted, start },
+		{ fp("n69"), consumer, {} },
+	};
+	for (const auto &[localFp, state, heads] : cases) {
+		CHECK(same(
+			Purple::PlanConfigSync(localFp, state, heads),
+			Purple::PlanConfigSync(localFp, state, heads, std::nullopt)));
+	}
 }
 
 [[nodiscard]] QString Unified(const Purple::ConfigTextDiff &diff) {
@@ -11981,6 +12439,7 @@ int main() {
 	TestConfigSyncPlanner();
 	TestConfigAdoption();
 	TestConfigChoice();
+	TestConfigOwnHead();
 	TestConfigDiff();
 	TestConfigChangeSummary();
 	TestPersianKeyboardToEnglish();

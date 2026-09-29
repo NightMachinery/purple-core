@@ -39,12 +39,17 @@ rules about data are far easier to prove outside a running app than inside one.
   Empty, LocalChanges or UpToDate) with the heads to offer and the heads that
   already match the file. A device that has not joined plans with an empty
   install and empty config data, so joining and daily use share one decision.
+  Given this install's own newest record, the planner also notices when that
+  record no longer describes the device (after it adopted a version that does
+  not descend from it) and reports LocalChanges, so two devices that picked
+  each other's settings cannot both settle silently on different files.
   `AdoptConfigHeads` records heads whose content equals the local file: the
   newest same-content version becomes the base, the lineages merge, the others
   become equivalent keys, and the seen sequences rise. `PlanConfigChoice` maps
   the user's choice for a verdict (apply the update, pick a remote version or
   keep this device's text) to the file write, the heads to adopt and the
-  parents of any version to publish. See
+  parents of any version to publish; after picking a remote version it
+  publishes exactly what a fresh check would then propose. See
   [`docs/config-sync.md`](docs/config-sync.md) for the precedence, the head
   ordering, the parent rules and every refusal.
 - `purple/purple_config_diff.{h,cpp}` - compares two `settings.toml` texts
