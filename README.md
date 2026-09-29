@@ -88,7 +88,11 @@ rules about data are far easier to prove outside a running app than inside one.
   changed device ID, an observed own sequence ahead of local state, or a
   different hash at the same sequence. They require the caller to supply a
   validated own record or an authoritative absence result; unresolved discovery
-  leaves the publish gate closed.
+  leaves the publish gate closed. `ConfirmConfigReadBack` also advances the
+  config base and lineage to the validated staged version after exact read-back,
+  clears its pending key, and retains equivalent keys only when content is
+  unchanged. The platform must persist that returned state before deleting the
+  staged record.
 
 The platform publisher must build the complete envelope for the reserved
 sequence, atomically stage its bytes at
