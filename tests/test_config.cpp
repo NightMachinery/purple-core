@@ -13,6 +13,7 @@ option) any later version.
 // Run with purple/test_config.sh.
 
 #include "purple/purple_engine.h"
+#include "purple/purple_config_sync.h"
 #include "purple/purple_passcode.h"
 #include "purple/purple_screentime.h"
 #include "purple/purple_settings.h"
@@ -24,6 +25,7 @@ option) any later version.
 #include <QtCore/QTimeZone>
 
 #include <cstdio>
+#include <algorithm>
 #include <type_traits>
 
 namespace {
@@ -8309,9 +8311,180 @@ void TestPersianKeyboardToEnglish() {
 	CHECK_EQ(Purple::PersianKeyboardToEnglish(u"Pass-ضی‌۹!?42"_q), u"Pass-qdB9!?42"_q);
 }
 
+[[nodiscard]] Purple::ConfigHeadKind ConfigKind(
+		const Purple::ConfigClassification &result,
+		const QString &key) {
+	for (const auto &outcome : result.heads) {
+		if (outcome.head.key == key) {
+			return outcome.kind;
+		}
+	}
+	return Purple::ConfigHeadKind::Invalid;
+}
+
+void TestConfigVersions() {
+	Begin("config versions");
+	const auto a = Purple::MakeConfigVersion("A", {});
+	CHECK(a.has_value());
+	CHECK_EQ(a->key, u"1."_q + Purple::SettingsFingerprint("A"));
+	CHECK(a->parents.empty());
+	CHECK(a->lineage.empty());
+	CHECK(Purple::IsConfigVersionKey(a->key));
+	CHECK(!Purple::IsConfigVersionKey(u"01."_q
+		+ Purple::SettingsFingerprint("A")));
+	CHECK(!Purple::IsConfigVersionKey(u"1.01:abc"_q));
+	CHECK(!Purple::IsConfigVersionKey(a->key.toUpper()));
+
+	const auto b = Purple::MakeConfigVersion("B", { *a });
+	const auto reverted = Purple::MakeConfigVersion("A", { *b });
+	CHECK(b.has_value());
+	CHECK(reverted.has_value());
+	CHECK_EQ(reverted->key, u"3."_q + Purple::SettingsFingerprint("A"));
+	CHECK(reverted->key != a->key);
+	CHECK(reverted->lineage == std::vector<QString>({ b->key, a->key }));
+	const auto other = Purple::MakeConfigVersion("C", { *a });
+	const auto merged = Purple::MakeConfigVersion("D", { *b, *other });
+	CHECK(merged.has_value());
+	CHECK(merged->parents == std::vector<QString>({ b->key, other->key }));
+	CHECK(merged->lineage == std::vector<QString>({ b->key, other->key, a->key }));
+	const auto deduped = Purple::MakeConfigVersion("D", { *b, *b });
+	CHECK(deduped->parents == std::vector<QString>({ b->key }));
+	CHECK(Purple::MakeConfigVersion("D", { *b, *b, *b }).has_value());
+	CHECK(!Purple::MakeConfigVersion("D", { *a, *b, *other }));
+	const auto malformed = Purple::ConfigVersion{ u"1.bad"_q, {}, {} };
+	CHECK(!Purple::MakeConfigVersion("D", { malformed }));
+
+	auto chain = *a;
+	for (auto index = 0; index != 70; ++index) {
+		const auto next = Purple::MakeConfigVersion(
+			QByteArray::number(index), { chain });
+		CHECK(next.has_value());
+		CHECK_EQ(next->lineage.front(), chain.key);
+		CHECK(next->lineage.size() <= 64);
+		chain = *next;
+	}
+	CHECK_EQ(chain.lineage.size(), 64);
+	CHECK(std::find(chain.lineage.begin(), chain.lineage.end(), a->key)
+		== chain.lineage.end());
+	const auto distant = Purple::MakeConfigVersion("D", { chain, *other });
+	CHECK(distant.has_value());
+	CHECK_EQ(distant->lineage.size(), 64);
+	CHECK(std::find(distant->lineage.begin(), distant->lineage.end(),
+		other->key) != distant->lineage.end());
+	const auto reversed = Purple::MakeConfigVersion("D", { *other, chain });
+	CHECK_EQ(reversed->lineage.front(), chain.key);
+}
+
+void TestConfigClassification() {
+	Begin("config classification");
+	const auto a = *Purple::MakeConfigVersion("A", {});
+	const auto b = *Purple::MakeConfigVersion("B", { a });
+	const auto c = *Purple::MakeConfigVersion("C", { a });
+	const auto revert = *Purple::MakeConfigVersion("A", { b });
+	const auto stranger = *Purple::MakeConfigVersion("X", {});
+	const auto sameUnrelated = *Purple::MakeConfigVersion("B", {});
+	const auto afterEquivalent = *Purple::MakeConfigVersion(
+		"Y", { sameUnrelated });
+	const auto fpA = Purple::SettingsFingerprint("A");
+	const auto fpB = Purple::SettingsFingerprint("B");
+	auto state = Purple::ConfigSyncState();
+	state.space = u"space"_q;
+	state.install = u"mine"_q;
+	state.base = a.key;
+	state.baseLineage = a.lineage;
+	const auto head = [&](const Purple::ConfigVersion &version,
+			const QString &writer, uint64_t seq = 1) {
+		return Purple::ConfigHead{
+			u"space"_q, writer, seq, version.key, version.lineage };
+	};
+	const auto classify = [&](const QString &fp,
+			std::vector<Purple::ConfigHead> heads) {
+		return Purple::ClassifyConfig(fp, state, heads);
+	};
+	CHECK(ConfigKind(classify(fpA, { head(a, u"other"_q) }), a.key)
+		== Purple::ConfigHeadKind::Stale);
+	CHECK(ConfigKind(classify(fpA, { head(b, u"other"_q) }), b.key)
+		== Purple::ConfigHeadKind::Ahead);
+	CHECK(ConfigKind(classify(fpA, { head(stranger, u"other"_q) }),
+		stranger.key) == Purple::ConfigHeadKind::Unrelated);
+	state.base = b.key;
+	state.baseLineage = b.lineage;
+	CHECK(ConfigKind(classify(fpB, { head(a, u"other"_q) }), a.key)
+		== Purple::ConfigHeadKind::Stale);
+	CHECK(ConfigKind(classify(fpB, { head(revert, u"other"_q) }),
+		revert.key) == Purple::ConfigHeadKind::Ahead);
+	state.base = a.key;
+	state.baseLineage = a.lineage;
+	CHECK(ConfigKind(classify(fpB, { head(c, u"other"_q) }), c.key)
+		== Purple::ConfigHeadKind::Concurrent);
+	state.pending = b.key;
+	CHECK(ConfigKind(classify(fpB, { head(revert, u"other"_q) }),
+		revert.key) == Purple::ConfigHeadKind::Ahead);
+	state.pending.clear();
+	CHECK(ConfigKind(classify(fpB, { head(b, u"other"_q) }), b.key)
+		== Purple::ConfigHeadKind::Same);
+	CHECK(ConfigKind(classify(fpB, { head(stranger, u"other"_q) }),
+		stranger.key) == Purple::ConfigHeadKind::Unrelated);
+	CHECK(ConfigKind(classify(fpB, { head(sameUnrelated, u"other"_q) }),
+		sameUnrelated.key) == Purple::ConfigHeadKind::Same);
+	state.equiv.push_back(sameUnrelated.key);
+	CHECK(ConfigKind(classify(fpA, { head(sameUnrelated, u"other"_q) }),
+		sameUnrelated.key) == Purple::ConfigHeadKind::Stale);
+	CHECK(ConfigKind(classify(fpA, { head(afterEquivalent, u"other"_q) }),
+		afterEquivalent.key) == Purple::ConfigHeadKind::Ahead);
+	state.equiv.clear();
+
+	const auto split = classify(fpA, {
+		head(b, u"first"_q), head(c, u"second"_q) });
+	CHECK(split.split);
+	CHECK_EQ(split.heads.size(), 2);
+	const auto localMatch = classify(fpB, {
+		head(b, u"first"_q), head(c, u"second"_q) });
+	CHECK(!localMatch.split);
+	CHECK(ConfigKind(localMatch, b.key) == Purple::ConfigHeadKind::Same);
+	CHECK(ConfigKind(localMatch, c.key) == Purple::ConfigHeadKind::Concurrent);
+	CHECK_EQ(localMatch.heads.size(), 2);
+	const auto dominated = classify(fpA, {
+		head(a, u"first"_q), head(b, u"second"_q) });
+	CHECK(!dominated.split);
+	CHECK(ConfigKind(dominated, a.key) == Purple::ConfigHeadKind::Stale);
+	CHECK(ConfigKind(dominated, b.key) == Purple::ConfigHeadKind::Ahead);
+	state.seenSeq[u"second"_q] = 1;
+	CHECK_EQ(classify(fpA, { head(b, u"second"_q) }).heads.size(), 0);
+	state.seenSeq.clear();
+	CHECK_EQ(classify(fpA, { head(b, u"mine"_q) }).heads.size(), 0);
+	auto foreign = head(b, u"other"_q);
+	foreign.space = u"different"_q;
+	CHECK_EQ(classify(fpA, { foreign }).heads.size(), 0);
+	auto invalid = head(b, u"other"_q);
+	invalid.lineage = { u"garbage"_q };
+	CHECK(ConfigKind(classify(fpA, { invalid }), b.key)
+		== Purple::ConfigHeadKind::Invalid);
+	const auto higherInvalid = classify(fpA, {
+		head(b, u"other"_q, 4),
+		Purple::ConfigHead{ u"space"_q, u"other"_q, 5,
+			u"broken"_q, {} } });
+	CHECK_EQ(higherInvalid.heads.size(), 1);
+	CHECK(higherInvalid.heads.front().kind == Purple::ConfigHeadKind::Invalid);
+	CHECK_EQ(higherInvalid.heads.front().head.seq, 5);
+	const auto forkedSeq = classify(fpA, {
+		head(b, u"other"_q, 5), head(c, u"other"_q, 5) });
+	CHECK_EQ(forkedSeq.heads.size(), 1);
+	CHECK(forkedSeq.heads.front().kind == Purple::ConfigHeadKind::Invalid);
+	CHECK(!forkedSeq.split);
+	CHECK(!classify(u"bad"_q, { head(b, u"other"_q) }).inputValid);
+	state.base = u"bad"_q;
+	CHECK(!classify(fpA, { head(b, u"other"_q) }).inputValid);
+	state.base = a.key;
+	state.equiv.push_back(u"bad"_q);
+	CHECK(!classify(fpA, { head(b, u"other"_q) }).inputValid);
+}
+
 } // namespace
 
 int main() {
+	TestConfigVersions();
+	TestConfigClassification();
 	TestPersianKeyboardToEnglish();
 	TestLists();
 	TestKinds();

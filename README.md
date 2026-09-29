@@ -26,6 +26,14 @@ rules about data are far easier to prove outside a running app than inside one.
   machine-owned half of the configuration. Rewritten whenever it changes, which
   is why it is a separate file: it must never touch the mtime of the
   `settings.toml` you are editing by hand.
+- `purple/purple_config_sync.{h,cpp}` - constructs content fingerprints with
+  generation keys and bounded ancestry for account-backed config versions,
+  then classifies remote heads as stale, same, ahead, concurrent, or unrelated.
+  It reports a split when distinct maximal remote contents all differ from the
+  local file. The caller handles any resulting state change and commits each
+  head's sequence watermark only after its outcome is durably handled. When a
+  lineage is truncated, both direct parents stay, newest first, followed by
+  the newest remaining ancestors.
 - `purple/purple_engine.{h,cpp}` - resolves a preset into a flat table of "for
   this list, show and notify are these", and answers what that means for one
   chat. Resolution runs once per config or preset change, never per repaint.
@@ -72,6 +80,19 @@ Both put the repository root on their include path, so
   moves only when a key changes *meaning*, because that is the only change an
   older build gets wrong rather than merely misses. It is not a build number and
   not a date.
+- Config sync is a pure decision layer. Its `localFp` argument must be a valid
+  `SettingsFingerprint()` result for the current file bytes. Malformed local
+  fingerprints or persisted base, lineage, pending, or equivalent keys make
+  `inputValid` false and produce no head decisions. The highest sequence per
+  remote writer is selected before validation; a malformed highest record or
+  two different records with the same highest sequence receive `Invalid` and
+  suppress that writer's older record. No watermark is changed.
+  The classifier rejects more than 16 equivalent base keys. The caller
+  validates the full payload, including text and envelope, before considering
+  a head for application.
+  A `Same` result applies to that head alone: when several maximal heads remain,
+  callers must inspect every outcome before clearing local Dirty state or
+  choosing an update. The returned head sequence is an advisory watermark.
 
 The full schema reference lives with the desktop app, at `docs/purple/config.md`
 in the tdesktop fork.
