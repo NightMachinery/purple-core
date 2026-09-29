@@ -8684,6 +8684,10 @@ void TestSyncEnvelope() {
 	CHECK(valid.canonical.startsWith('{'));
 	const auto parsed = Purple::ParseSyncEnvelope(valid.canonical);
 	CHECK(bool(parsed));
+	CHECK(parsed.header.has_value());
+	CHECK(parsed.header->space == space);
+	CHECK(parsed.header->writerInstall == install);
+	CHECK(parsed.header->seq == 9007199254740991ULL);
 	CHECK(parsed.envelope.document.value(u"envelope_extra"_q).toString()
 		== u"preserved"_q);
 	CHECK(parsed.envelope.document.value(u"writer"_q).toObject()
@@ -8762,12 +8766,80 @@ void TestSyncEnvelope() {
 	const auto newer = QJsonDocument(changed).toJson(QJsonDocument::Compact);
 	received(newer, Purple::SyncEnvelopeStatus::NewerMajor,
 		Purple::SyncEnvelopeError::None);
-	changed = document;
+	changed = QJsonDocument::fromJson(ordered.canonical).object();
 	changed.insert(u"encoding"_q, u"gzip+base64"_q);
 	CHECK(write(changed).status == Purple::SyncEnvelopeStatus::UnsupportedEncoding);
+	const auto encoded = Purple::ParseSyncEnvelope(
+		QJsonDocument(changed).toJson(QJsonDocument::Compact));
+	CHECK(!encoded);
+	CHECK(encoded.status == Purple::SyncEnvelopeStatus::UnsupportedEncoding);
+	CHECK(encoded.header.has_value());
+	CHECK(encoded.header->space == space);
+	CHECK(encoded.header->writerInstall == install);
+	CHECK(encoded.header->writerDevice == u"phone");
+	CHECK(encoded.header->writerPlatform == u"android");
+	CHECK(encoded.header->writerApp == u"Purple");
+	CHECK(encoded.header->seq == 9007199254740991ULL);
+	CHECK(encoded.header->at == 9007199254740991ULL);
+	CHECK(encoded.envelope.document.isEmpty());
+	changed.insert(u"payload"_q, u"encoded bytes"_q);
 	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
 		Purple::SyncEnvelopeStatus::UnsupportedEncoding,
 		Purple::SyncEnvelopeError::None);
+	changed.insert(u"stream"_q, u"library.0"_q);
+	CHECK(write(changed).status == Purple::SyncEnvelopeStatus::UnsupportedStream);
+	const auto future = Purple::ParseSyncEnvelope(
+		QJsonDocument(changed).toJson(QJsonDocument::Compact));
+	CHECK(!future);
+	CHECK(future.status == Purple::SyncEnvelopeStatus::UnsupportedStream);
+	CHECK(future.header.has_value());
+	CHECK(future.header->stream == u"library.0");
+	CHECK(future.header->space == space);
+	CHECK(future.header->writerInstall == install);
+	CHECK(future.envelope.document.isEmpty());
+	changed.remove(u"encoding"_q);
+	changed.insert(u"payload"_q, u"future payload"_q);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::UnsupportedStream,
+		Purple::SyncEnvelopeError::None);
+	changed.remove(u"payload"_q);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::MissingField);
+	changed.insert(u"payload"_q, u"future payload"_q);
+	changed.remove(u"payload_sha256"_q);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::MissingField);
+	changed.insert(u"payload_sha256"_q, u"bad"_q);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::InvalidHash);
+	changed.insert(u"payload_sha256"_q, QString(64, u'0'));
+	changed.insert(u"space"_q, u"bad"_q);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::InvalidId);
+	changed.insert(u"space"_q, space);
+	changed.insert(u"writer"_q, QJsonObject());
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::MissingField);
+	changed.insert(u"writer"_q, writer);
+	changed.insert(u"seq"_q, 0);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::FieldType);
+	changed.insert(u"seq"_q, 1);
+	changed.insert(u"stream"_q, u"/bad"_q);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::InvalidValue);
+	changed.insert(u"stream"_q, QString(65, u'a'));
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::InvalidValue);
+	changed = QJsonDocument::fromJson(ordered.canonical).object();
 	changed.insert(u"encoding"_q, u"identity"_q);
 	const auto identity = write(changed);
 	CHECK(bool(identity));
@@ -8807,7 +8879,7 @@ void TestSyncEnvelope() {
 	rejected(changed, Purple::SyncEnvelopeError::FieldType);
 	changed = document;
 	changed.insert(u"stream"_q, u"other"_q);
-	rejected(changed, Purple::SyncEnvelopeError::InvalidValue);
+	CHECK(write(changed).status == Purple::SyncEnvelopeStatus::UnsupportedStream);
 	changed = document;
 	changed.insert(u"payload_sha256"_q, QString(64, u'0'));
 	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
@@ -8826,6 +8898,11 @@ void TestSyncEnvelope() {
 		Purple::SyncEnvelopeError::SizeLimit);
 	changed.insert(u"stream"_q, u"library"_q);
 	CHECK(bool(write(changed)));
+	changed.insert(u"stream"_q, u"library.0"_q);
+	changed.insert(u"padding"_q, QString(4 * 1024 * 1024, u'a'));
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::SizeLimit);
 	received(QByteArray(4 * 1024 * 1024 + 1, ' '),
 		Purple::SyncEnvelopeStatus::Invalid,
 		Purple::SyncEnvelopeError::SizeLimit);

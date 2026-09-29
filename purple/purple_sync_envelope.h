@@ -19,6 +19,7 @@ namespace Purple {
 enum class SyncEnvelopeStatus {
 	Valid,
 	NewerMajor,
+	UnsupportedStream,
 	UnsupportedEncoding,
 	Invalid,
 };
@@ -39,10 +40,22 @@ struct SyncEnvelope {
 	QJsonObject document;
 };
 
+struct SyncEnvelopeHeader {
+	QString space;
+	QString stream;
+	QString writerInstall;
+	QString writerDevice;
+	QString writerPlatform;
+	QString writerApp;
+	uint64_t seq = 0;
+	uint64_t at = 0;
+};
+
 struct SyncEnvelopeParseResult {
 	SyncEnvelopeStatus status = SyncEnvelopeStatus::Invalid;
 	SyncEnvelopeError error = SyncEnvelopeError::None;
 	SyncEnvelope envelope;
+	std::optional<SyncEnvelopeHeader> header;
 
 	[[nodiscard]] explicit operator bool() const {
 		return status == SyncEnvelopeStatus::Valid;

@@ -56,9 +56,15 @@ rules about data are far easier to prove outside a running app than inside one.
   tail, while `FormatSyncSpaceId` keeps formatting any 16 bytes. Valid space
   IDs can be compared by decoded bytes with `CompareSyncSpaceIds`. Writing
   recomputes the payload hash and emits canonical JSON.
-  Invalid records report a reason, while a higher major or unsupported encoding
-  has a separate outcome. Config records are capped at 256 KiB and library
-  records at 4 MiB, including the full document bytes. The caller must
+  Invalid records report a reason. Unknown stream names and unsupported
+  encodings return separate non-valid outcomes with a typed, validated major-1
+  header (space, stream, writer, sequence, timestamp); their payload is not
+  exposed as a valid envelope. Such records must contain a payload and a
+  lowercase SHA-256-shaped hash, but the parser does not interpret the payload
+  or check its hash. Stream names are bounded safe ASCII identifiers, including
+  future names such as `library.0`. A higher major remains opaque. Config
+  records are capped at 256 KiB; library and unknown-stream records are capped
+  at 4 MiB, including the full document bytes. The caller must
   separately verify the Telegram peer, document name, and forwarding metadata.
   A newer major that uses JSON numbers outside version 1's safe-integer subset
   is unreadable by this parser rather than receiving the higher-major outcome.

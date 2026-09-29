@@ -25,11 +25,13 @@ constexpr auto kMaximumSafeInteger = 9007199254740991.0;
 constexpr auto kConfigBytes = 256 * 1024;
 constexpr auto kLibraryBytes = 4 * 1024 * 1024;
 constexpr auto kMetadataBytes = 256;
+constexpr auto kStreamBytes = 64;
 constexpr auto kMaximumDepth = 128;
 
 struct Validation {
 	SyncEnvelopeStatus status = SyncEnvelopeStatus::Valid;
 	SyncEnvelopeError error = SyncEnvelopeError::None;
+	std::optional<SyncEnvelopeHeader> header;
 };
 
 [[nodiscard]] Validation Invalid(SyncEnvelopeError error) {
@@ -188,6 +190,24 @@ struct Validation {
 	return true;
 }
 
+[[nodiscard]] bool ValidStreamName(const QString &value) {
+	const auto bytes = value.toLatin1();
+	if (value.isEmpty() || value.size() > kStreamBytes
+		|| bytes.size() != value.size()
+		|| bytes[0] < 'a' || bytes[0] > 'z') {
+		return false;
+	}
+	for (const auto character : bytes) {
+		if (!((character >= 'a' && character <= 'z')
+			|| (character >= '0' && character <= '9')
+			|| character == '.' || character == '_'
+			|| character == '-')) {
+			return false;
+		}
+	}
+	return true;
+}
+
 [[nodiscard]] QByteArray CanonicalPayload(const QJsonObject &payload) {
 	const auto serialized = QJsonDocument(payload).toJson(QJsonDocument::Compact);
 	const auto result = CanonicalizeSyncJson(serialized);
@@ -216,12 +236,11 @@ struct Validation {
 		return Invalid(SyncEnvelopeError::FieldType);
 	}
 	const auto streamName = stream.toString();
-	const auto limit = (streamName == u"config")
-		? kConfigBytes : (streamName == u"library")
-		? kLibraryBytes : 0;
-	if (!limit) {
+	if (!ValidStreamName(streamName)) {
 		return Invalid(SyncEnvelopeError::InvalidValue);
 	}
+	const auto limit = (streamName == u"config")
+		? kConfigBytes : kLibraryBytes;
 	if (sourceBytes > limit) {
 		return Invalid(SyncEnvelopeError::SizeLimit);
 	}
@@ -229,9 +248,6 @@ struct Validation {
 	if (!encoding.isUndefined()) {
 		if (!encoding.isString()) {
 			return Invalid(SyncEnvelopeError::FieldType);
-		}
-		if (encoding.toString() != u"identity") {
-			return { SyncEnvelopeStatus::UnsupportedEncoding };
 		}
 	}
 	const auto space = document.value(u"space"_q);
@@ -283,15 +299,22 @@ struct Validation {
 			return Invalid(SyncEnvelopeError::FieldType);
 		}
 	}
+	const auto header = SyncEnvelopeHeader{
+		space.toString(),
+		streamName,
+		install.toString(),
+		writerObject.value(u"device"_q).toString(),
+		writerObject.value(u"platform"_q).toString(),
+		writerObject.value(u"app"_q).toString(),
+		uint64_t(document.value(u"seq"_q).toDouble()),
+		uint64_t(document.value(u"at"_q).toDouble()),
+	};
 	const auto payload = document.value(u"payload"_q);
 	if (payload.isUndefined()) {
 		return Invalid(SyncEnvelopeError::MissingField);
 	}
-	if (!payload.isObject()) {
-		return Invalid(SyncEnvelopeError::FieldType);
-	}
+	const auto hash = document.value(u"payload_sha256"_q);
 	if (checkHash) {
-		const auto hash = document.value(u"payload_sha256"_q);
 		if (hash.isUndefined()) {
 			return Invalid(SyncEnvelopeError::MissingField);
 		}
@@ -301,6 +324,19 @@ struct Validation {
 		if (!ValidHash(hash.toString())) {
 			return Invalid(SyncEnvelopeError::InvalidHash);
 		}
+	}
+	if (streamName != u"config" && streamName != u"library") {
+		return { SyncEnvelopeStatus::UnsupportedStream,
+			SyncEnvelopeError::None, header };
+	}
+	if (!encoding.isUndefined() && encoding.toString() != u"identity") {
+		return { SyncEnvelopeStatus::UnsupportedEncoding,
+			SyncEnvelopeError::None, header };
+	}
+	if (!payload.isObject()) {
+		return Invalid(SyncEnvelopeError::FieldType);
+	}
+	if (checkHash) {
 		const auto canonical = CanonicalPayload(payload.toObject());
 		if (canonical.isEmpty()) {
 			return Invalid(SyncEnvelopeError::InvalidJson);
@@ -312,7 +348,7 @@ struct Validation {
 			return Invalid(SyncEnvelopeError::HashMismatch);
 		}
 	}
-	return {};
+	return { SyncEnvelopeStatus::Valid, SyncEnvelopeError::None, header };
 }
 
 } // namespace
@@ -384,12 +420,13 @@ SyncEnvelopeParseResult ParseSyncEnvelope(const QByteArray &json) {
 	const auto document = parsed.object();
 	const auto validation = Validate(document, json.size(), true);
 	if (validation.status != SyncEnvelopeStatus::Valid) {
-		return { validation.status, validation.error };
+		return { validation.status, validation.error, {}, validation.header };
 	}
 	return {
 		SyncEnvelopeStatus::Valid,
 		SyncEnvelopeError::None,
 		SyncEnvelope{ document },
+		validation.header,
 	};
 }
 
