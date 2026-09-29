@@ -209,7 +209,7 @@ struct Validation {
 	if (!IsSyncInstallId(install.toString())) {
 		return Invalid(SyncEnvelopeError::InvalidId);
 	}
-	for (const auto field : { u"device"_q, u"platform"_q, u"app"_q }) {
+	for (const auto &field : { u"device"_q, u"platform"_q, u"app"_q }) {
 		const auto value = writerObject.value(field);
 		if (value.isUndefined()) {
 			return Invalid(SyncEnvelopeError::MissingField);
@@ -221,7 +221,7 @@ struct Validation {
 			return Invalid(SyncEnvelopeError::InvalidValue);
 		}
 	}
-	for (const auto field : { u"seq"_q, u"at"_q }) {
+	for (const auto &field : { u"seq"_q, u"at"_q }) {
 		const auto value = document.value(field);
 		if (value.isUndefined()) {
 			return Invalid(SyncEnvelopeError::MissingField);
