@@ -429,4 +429,34 @@ SyncConfirmation ConfirmSyncReadBack(
 	return result;
 }
 
+SyncConfirmation ConfirmConfigReadBack(
+		const SyncLocalState &state,
+		const QString &currentDevice,
+		const OwnRecordObservation &observation,
+		const ConfigVersion &stagedVersion) {
+	if (!state.createdDevice.isEmpty() && currentDevice.isEmpty()) {
+		return { state, SyncCloneVerdict::DeviceMismatch, false };
+	}
+	auto result = ConfirmSyncReadBack(
+		state, currentDevice, SyncLocalStream::Config, observation);
+	if (!result.changed) {
+		return result;
+	}
+	const auto staged = ParseConfigVersionKey(stagedVersion.key);
+	if (!staged || state.configData.pending != stagedVersion.key) {
+		return { state, SyncCloneVerdict::InvalidObservation, false };
+	}
+	const auto oldBase = ParseConfigVersionKey(state.configData.base);
+	if (!oldBase || oldBase->fingerprint != staged->fingerprint) {
+		result.state.configData.equiv.clear();
+	}
+	result.state.configData.base = stagedVersion.key;
+	result.state.configData.baseLineage = stagedVersion.lineage;
+	result.state.configData.pending.clear();
+	if (!SerializeSyncLocalState(result.state)) {
+		return { state, SyncCloneVerdict::InvalidObservation, false };
+	}
+	return result;
+}
+
 } // namespace Purple

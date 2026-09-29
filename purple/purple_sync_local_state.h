@@ -17,6 +17,8 @@ option) any later version.
 
 namespace Purple {
 
+struct ConfigVersion;
+
 enum class SyncLocalStream {
 	Config,
 	Library,
@@ -130,6 +132,12 @@ struct SyncConfirmation {
 	SyncCloneVerdict verdict = SyncCloneVerdict::PendingReconcile;
 	bool changed = false;
 };
+
+[[nodiscard]] SyncConfirmation ConfirmConfigReadBack(
+	const SyncLocalState &state,
+	const QString &currentDevice,
+	const OwnRecordObservation &observation,
+	const ConfigVersion &stagedVersion);
 
 [[nodiscard]] SyncLocalParseResult ParseSyncLocalState(
 	const QByteArray &json);

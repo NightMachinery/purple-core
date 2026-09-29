@@ -9375,6 +9375,61 @@ void TestSyncLocalState() {
 		== Purple::SyncLocalError::SizeLimit);
 }
 
+void TestConfigConfirmationTransition() {
+	Begin("config confirmation transition");
+	auto state = Purple::SyncLocalState();
+	state.install = u"in-"_q + QString(26, u'a');
+	state.space = u"sp-"_q + QString(26, u'a');
+	state.createdDevice = u"device-a"_q;
+	const auto first = Purple::MakeConfigVersion("version = 1\n", {});
+	const auto changed = Purple::MakeConfigVersion(
+		"version = 1\nname = 'changed'\n", { *first });
+	const auto same = Purple::MakeConfigVersion(
+		"version = 1\nname = 'changed'\n", { *changed });
+	CHECK(first.has_value());
+	CHECK(changed.has_value());
+	CHECK(same.has_value());
+	state.configData.base = first->key;
+	state.configData.equiv = { first->key };
+	const auto other = u"in-"_q + QString(25, u'b') + u'a';
+	state.configData.seenSeq[other] = 8;
+	const auto hash = QString(64, u'a');
+	const auto reserved = Purple::ReserveSyncSeq(
+		state, Purple::SyncLocalStream::Config, hash);
+	CHECK(bool(reserved));
+	auto pending = reserved.state;
+	pending.configData.pending = changed->key;
+	const auto readBack = Purple::OwnRecordObservation{
+		Purple::OwnRecordObservationKind::Present, 1, hash };
+	const auto unknownDevice = Purple::ConfirmConfigReadBack(pending,
+		QString(), readBack, *changed);
+	CHECK(!unknownDevice.changed);
+	CHECK(unknownDevice.verdict == Purple::SyncCloneVerdict::DeviceMismatch);
+	const auto mismatched = Purple::ConfirmConfigReadBack(pending,
+		u"device-a"_q, readBack, *same);
+	CHECK(!mismatched.changed);
+	CHECK(mismatched.verdict == Purple::SyncCloneVerdict::InvalidObservation);
+	const auto confirmed = Purple::ConfirmConfigReadBack(pending,
+		u"device-a"_q, readBack, *changed);
+	CHECK(confirmed.changed);
+	CHECK(confirmed.state.configData.base == changed->key);
+	CHECK(confirmed.state.configData.baseLineage == changed->lineage);
+	CHECK(confirmed.state.configData.equiv.empty());
+	CHECK(confirmed.state.configData.pending.isEmpty());
+	CHECK(confirmed.state.configData.seenSeq == state.configData.seenSeq);
+	const auto next = Purple::ReserveSyncSeq(confirmed.state,
+		Purple::SyncLocalStream::Config, hash);
+	CHECK(bool(next));
+	auto samePending = next.state;
+	samePending.configData.pending = changed->key;
+	samePending.configData.equiv = { same->key };
+	const auto sameConfirmed = Purple::ConfirmConfigReadBack(samePending,
+		u"device-a"_q, {
+			Purple::OwnRecordObservationKind::Present, 2, hash }, *changed);
+	CHECK(sameConfirmed.changed);
+	CHECK(sameConfirmed.state.configData.equiv == samePending.configData.equiv);
+}
+
 void TestSyncSimulation() {
 	Begin("sync simulation");
 	const auto space = u"sp-"_q + QString(26, u'a');
@@ -9694,6 +9749,7 @@ int main() {
 	TestConfigPayload();
 	TestConfigRecordBuilder();
 	TestSyncLocalState();
+	TestConfigConfirmationTransition();
 	TestSyncSimulation();
 	TestConfigVersions();
 	TestConfigClassification();
