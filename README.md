@@ -73,7 +73,11 @@ rules about data are far easier to prove outside a running app than inside one.
   record by inspecting its own output, and leaves newer settings schemas
   read-only for older clients. Size, identity, metadata and number failures
   carry the underlying envelope error. It does not reserve or persist a
-  sequence.
+  sequence. To acknowledge an applied remote record, pass its inspected
+  `ConfigVersion` in `ConfigRecordBuildInput::version` with `parents` empty.
+  The builder keeps the exact key, direct parents and lineage while changing
+  the writer metadata and sequence. Supplying both modes, mismatched file
+  bytes, or malformed ancestry fails without emitting a record.
 - `purple/purple_sync_local_state.{h,cpp}` - validates and writes versioned,
   device-local `sync/state.json` data: install, creation-device and space IDs;
   per-stream issue, pending and confirmation counters and the hash for the

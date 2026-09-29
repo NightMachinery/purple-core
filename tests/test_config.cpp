@@ -9028,6 +9028,69 @@ void TestConfigRecordBuilder() {
 	CHECK_EQ(Purple::ParseConfigVersionKey(merged.version.key)->generation,
 		uint64_t(3));
 	CHECK_EQ(merged.version.parents.size(), size_t(2));
+	auto acknowledgement = input;
+	acknowledgement.parents.clear();
+	acknowledgement.version = child.version;
+	acknowledgement.install = u"in-"_q + QString(25, u'a') + u'e';
+	acknowledgement.device = u"desktop"_q;
+	acknowledgement.platform = u"macos"_q;
+	acknowledgement.seq = 2;
+	const auto acknowledged = Purple::BuildConfigRecord(acknowledgement);
+	CHECK(bool(acknowledged));
+	CHECK(acknowledged.version.key == child.version.key);
+	CHECK(acknowledged.version.parents == child.version.parents);
+	CHECK(acknowledged.version.lineage == child.version.lineage);
+	CHECK_EQ(Purple::ParseConfigVersionKey(acknowledged.version.key)->generation,
+		uint64_t(2));
+	const auto acknowledgedPayload = Purple::InspectConfigPayload(
+		Purple::ParseSyncEnvelope(acknowledged.canonical));
+	CHECK(bool(acknowledgedPayload));
+	CHECK(acknowledgedPayload.version.key == child.version.key);
+	CHECK(acknowledgedPayload.version.parents == child.version.parents);
+	CHECK(acknowledgedPayload.version.lineage == child.version.lineage);
+	const auto anotherDevice = Purple::ConfigSyncState{
+		space, u"in-"_q + QString(25, u'a') + u'i',
+		built.version.key, built.version.lineage, {}, {}, {},
+	};
+	const auto classified = Purple::ClassifyConfig(
+		Purple::SettingsFingerprint(acknowledgement.text), anotherDevice,
+		{ Purple::ConfigHead{ space, acknowledgement.install,
+			acknowledgement.seq, acknowledged.version.key,
+			acknowledged.version.lineage } });
+	CHECK(classified.inputValid);
+	CHECK_EQ(classified.heads.size(), size_t(1));
+	CHECK(classified.heads.front().kind == Purple::ConfigHeadKind::Same);
+	auto invalidAcknowledgement = acknowledgement;
+	invalidAcknowledgement.text = text;
+	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).error
+		== Purple::ConfigRecordBuildError::InvalidVersion);
+	invalidAcknowledgement = acknowledgement;
+	invalidAcknowledgement.version->lineage.clear();
+	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).error
+		== Purple::ConfigRecordBuildError::InvalidVersion);
+	invalidAcknowledgement = acknowledgement;
+	invalidAcknowledgement.version->key = u"bad"_q;
+	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).error
+		== Purple::ConfigRecordBuildError::InvalidVersion);
+	invalidAcknowledgement = acknowledgement;
+	invalidAcknowledgement.parents = { built.version };
+	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).error
+		== Purple::ConfigRecordBuildError::InvalidParents);
+	invalidAcknowledgement = acknowledgement;
+	invalidAcknowledgement.text = QByteArray("version = 1\nname = '")
+		+ '\xc0' + "'\n";
+	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).error
+		== Purple::ConfigRecordBuildError::InvalidUtf8);
+	invalidAcknowledgement.text = "version = [\n";
+	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).error
+		== Purple::ConfigRecordBuildError::TomlSyntax);
+	invalidAcknowledgement.text = "version = 2\n";
+	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).status
+		== Purple::ConfigRecordBuildStatus::NewerSchema);
+	invalidAcknowledgement = acknowledgement;
+	invalidAcknowledgement.seq = 0;
+	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).envelopeError
+		== Purple::SyncEnvelopeError::FieldType);
 	input.parents = { child.version };
 	input.text = text;
 	const auto reverted = Purple::BuildConfigRecord(input);

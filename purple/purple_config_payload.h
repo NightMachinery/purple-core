@@ -13,6 +13,7 @@ option) any later version.
 #include <QtCore/QByteArray>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace Purple {
@@ -55,6 +56,7 @@ struct ConfigPayloadInspection {
 struct ConfigRecordBuildInput {
 	QByteArray text;
 	std::vector<ConfigVersion> parents;
+	std::optional<ConfigVersion> version;
 	QString space;
 	QString install;
 	QString device;
@@ -75,6 +77,7 @@ enum class ConfigRecordBuildError {
 	InvalidUtf8,
 	TomlSyntax,
 	InvalidParents,
+	InvalidVersion,
 	Envelope,
 	SelfInspection,
 };

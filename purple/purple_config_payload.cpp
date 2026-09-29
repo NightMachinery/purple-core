@@ -37,6 +37,46 @@ constexpr auto kMaximumSafeIntegerUnsigned = uint64_t(9007199254740991ULL);
 		&& std::floor(number) == number;
 }
 
+[[nodiscard]] bool ValidExistingVersion(
+		const ConfigVersion &version,
+		const QByteArray &text) {
+	const auto key = ParseConfigVersionKey(version.key);
+	if (!key || key->fingerprint != SettingsFingerprint(text)
+		|| version.parents.size() > 2
+		|| version.lineage.size() > 64) {
+		return false;
+	}
+	auto parents = QSet<QString>();
+	auto maximum = uint64_t(0);
+	for (const auto &parent : version.parents) {
+		const auto parsed = ParseConfigVersionKey(parent);
+		if (!parsed || parents.contains(parent)) {
+			return false;
+		}
+		parents.insert(parent);
+		maximum = std::max(maximum, parsed->generation);
+	}
+	auto lineage = QSet<QString>();
+	for (const auto &ancestor : version.lineage) {
+		const auto parsed = ParseConfigVersionKey(ancestor);
+		if (!parsed || parsed->generation >= key->generation
+			|| lineage.contains(ancestor)) {
+			return false;
+		}
+		lineage.insert(ancestor);
+	}
+	if (parents.empty()) {
+		return key->generation == 1 && lineage.empty();
+	}
+	if (maximum == std::numeric_limits<uint64_t>::max()
+		|| key->generation != maximum + 1) {
+		return false;
+	}
+	return std::all_of(parents.begin(), parents.end(), [&](const auto &parent) {
+		return lineage.contains(parent);
+	});
+}
+
 } // namespace
 
 ConfigPayloadInspection InspectConfigPayload(
@@ -195,9 +235,19 @@ ConfigRecordBuildResult BuildConfigRecord(
 		result.status = ConfigRecordBuildStatus::NewerSchema;
 		return result;
 	}
-	const auto version = MakeConfigVersion(input.text, input.parents);
+	if (input.version && !input.parents.empty()) {
+		result.error = ConfigRecordBuildError::InvalidParents;
+		return result;
+	}
+	const auto version = input.version
+		? input.version
+		: MakeConfigVersion(input.text, input.parents);
 	if (!version) {
 		result.error = ConfigRecordBuildError::InvalidParents;
+		return result;
+	}
+	if (input.version && !ValidExistingVersion(*version, input.text)) {
+		result.error = ConfigRecordBuildError::InvalidVersion;
 		return result;
 	}
 	result.version = *version;
