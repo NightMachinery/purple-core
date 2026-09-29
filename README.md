@@ -55,8 +55,14 @@ rules about data are far easier to prove outside a running app than inside one.
   leniently for display only. It runs Myers' linear-space algorithm, so memory
   stays linear; when the edit distance exceeds `kConfigDiffEditLimit` (1,000
   lines) or the search exceeds a fixed work budget, it reports one hunk that
-  replaces everything and sets `truncated`. See
-  [`docs/config-sync.md`](docs/config-sync.md).
+  replaces everything and sets `truncated`. `SummarizeConfigChange` parses
+  both texts with toml++ and names what changed by table, so comment,
+  whitespace and key-order edits produce nothing: each list, preset, list set
+  and folder set, each named schedule ruleset, each other top-level table as
+  a whole, and the top-level keys together. Labels follow the sync review's
+  wording (List "work", Schedule "phone", Device names); a side that does not
+  parse yields `parsed` false so the client can fall back to the line diff.
+  See [`docs/config-sync.md`](docs/config-sync.md).
 - `purple/purple_sync_json.{h,cpp}` - validates and canonicalizes JSON for
   account-backed sync. It preserves every member, including unknown members,
   sorts object names by raw UTF-16 code units, emits compact UTF-8 with RFC 8785

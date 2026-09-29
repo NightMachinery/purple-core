@@ -8,10 +8,17 @@ option) any later version.
 #include "purple/purple_config_diff.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <optional>
+#include <string>
+#include <tuple>
+
+#define TOML_EXCEPTIONS 0
+#include <toml.hpp>
 
 namespace Purple {
 namespace {
@@ -506,6 +513,377 @@ auto LineDiffer::middle(
 	return result;
 }
 
+struct ChangeUnit {
+	QString table;
+	QString label;
+	std::map<std::string, const toml::node*> values;
+	std::vector<QString> order;
+};
+
+using ChangeUnits = std::map<QString, ChangeUnit>;
+
+[[nodiscard]] QString Utf8(std::string_view value) {
+	return QString::fromUtf8(value.data(), qsizetype(value.size()));
+}
+
+[[nodiscard]] QString DottedKey(std::string_view key) {
+	const auto bare = !key.empty()
+		&& std::all_of(key.begin(), key.end(), [](char c) {
+			return (c >= 'a' && c <= 'z')
+				|| (c >= 'A' && c <= 'Z')
+				|| (c >= '0' && c <= '9')
+				|| c == '_'
+				|| c == '-';
+		});
+	if (bare) {
+		return Utf8(key);
+	}
+	auto result = QString(u'"');
+	for (const auto c : Utf8(key)) {
+		if (c == u'"' || c == u'\\') {
+			result += u'\\';
+			result += c;
+		} else if (c.unicode() < 0x20 || c.unicode() == 0x7f) {
+			result += u"\\u%1"_q.arg(int(c.unicode()), 4, 16, QChar(u'0'));
+		} else {
+			result += c;
+		}
+	}
+	return result + u'"';
+}
+
+[[nodiscard]] bool Collection(std::string_view key) {
+	return key == "lists"
+		|| key == "presets"
+		|| key == "list_sets"
+		|| key == "folder_sets";
+}
+
+[[nodiscard]] QString TableLabel(std::string_view key) {
+	if (key == "notifications") {
+		return u"Notification previews"_q;
+	} else if (key == "premium") {
+		return u"Local Premium"_q;
+	} else if (key == "devices") {
+		return u"Device names"_q;
+	} else if (key == "schedule") {
+		return u"Schedule settings"_q;
+	} else if (key == "focus_sync") {
+		return u"Focus sync"_q;
+	} else if (key == "peek") {
+		return u"Peek"_q;
+	} else if (key == "recent") {
+		return u"Recent chats"_q;
+	} else if (key == "overrides") {
+		return u"Overrides"_q;
+	} else if (key == "suggestions") {
+		return u"Suggestions"_q;
+	} else if (key == "sync") {
+		return u"Send on save"_q;
+	} else if (key == "last_seen") {
+		return u"Last seen"_q;
+	} else if (key == "screen_time") {
+		return u"Screen time"_q;
+	} else if (key == "lists") {
+		return u"Lists"_q;
+	} else if (key == "presets") {
+		return u"Presets"_q;
+	} else if (key == "list_sets") {
+		return u"List sets"_q;
+	} else if (key == "folder_sets") {
+		return u"Folder sets"_q;
+	}
+	return DottedKey(key);
+}
+
+[[nodiscard]] QString ChildLabel(
+		std::string_view collection,
+		const QString &name) {
+	const auto kind = (collection == "lists")
+		? u"List"_q
+		: (collection == "presets")
+		? u"Preset"_q
+		: (collection == "list_sets")
+		? u"List set"_q
+		: u"Folder set"_q;
+	return u"%1 \"%2\""_q.arg(kind, name);
+}
+
+[[nodiscard]] QString ElementLabel(const QString &path, const QString &name) {
+	return (path == u"schedule.rulesets"_q)
+		? u"Schedule \"%1\""_q.arg(name)
+		: u"%1 \"%2\""_q.arg(path, name);
+}
+
+[[nodiscard]] bool TableLike(const toml::node *node) {
+	if (!node) {
+		return false;
+	} else if (node->is_table()) {
+		return true;
+	}
+	const auto array = node->as_array();
+	return array
+		&& !array->empty()
+		&& std::all_of(array->begin(), array->end(), [](const auto &item) {
+			return item.is_table();
+		});
+}
+
+[[nodiscard]] std::optional<std::vector<QString>> Names(
+		const toml::node *node) {
+	auto result = std::vector<QString>();
+	if (!node) {
+		return result;
+	}
+	const auto array = node->as_array();
+	if (!array) {
+		return std::nullopt;
+	}
+	for (const auto &item : *array) {
+		const auto table = item.as_table();
+		const auto name = table
+			? table->get_as<std::string>("name")
+			: nullptr;
+		if (!name) {
+			return std::nullopt;
+		}
+		const auto text = Utf8(name->get());
+		if (std::find(result.begin(), result.end(), text) != result.end()) {
+			return std::nullopt;
+		}
+		result.push_back(text);
+	}
+	return result;
+}
+
+[[nodiscard]] bool Same(const toml::node &a, const toml::node &b) {
+	if (a.type() != b.type()) {
+		return false;
+	}
+	switch (a.type()) {
+	case toml::node_type::table: {
+		const auto &first = *a.as_table();
+		const auto &second = *b.as_table();
+		if (first.size() != second.size()) {
+			return false;
+		}
+		for (auto &&[key, value] : first) {
+			const auto other = second.get(key.str());
+			if (!other || !Same(value, *other)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	case toml::node_type::array: {
+		const auto &first = *a.as_array();
+		const auto &second = *b.as_array();
+		if (first.size() != second.size()) {
+			return false;
+		}
+		for (auto index = size_t(0); index != first.size(); ++index) {
+			if (!Same(first[index], second[index])) {
+				return false;
+			}
+		}
+		return true;
+	}
+	case toml::node_type::string:
+		return a.as_string()->get() == b.as_string()->get();
+	case toml::node_type::integer:
+		return a.as_integer()->get() == b.as_integer()->get();
+	case toml::node_type::floating_point: {
+		const auto first = a.as_floating_point()->get();
+		const auto second = b.as_floating_point()->get();
+		return (first == second) || (std::isnan(first) && std::isnan(second));
+	}
+	case toml::node_type::boolean:
+		return a.as_boolean()->get() == b.as_boolean()->get();
+	case toml::node_type::date:
+		return a.as_date()->get() == b.as_date()->get();
+	case toml::node_type::time:
+		return a.as_time()->get() == b.as_time()->get();
+	case toml::node_type::date_time:
+		return a.as_date_time()->get() == b.as_date_time()->get();
+	case toml::node_type::none:
+		return true;
+	}
+	return false;
+}
+
+[[nodiscard]] std::optional<toml::table> ParseToml(const QByteArray &bytes) {
+	auto parsed = toml::parse(
+		std::string_view(bytes.constData(), size_t(bytes.size())));
+	if (!parsed) {
+		return std::nullopt;
+	}
+	return std::move(parsed).table();
+}
+
+class ChangeCollector final {
+public:
+	ChangeCollector(const toml::table &before, const toml::table &after);
+
+	[[nodiscard]] ChangeUnits collect(const toml::table &root) const;
+
+private:
+	[[nodiscard]] bool tableLike(std::string_view key) const;
+	[[nodiscard]] bool splits(std::string_view key) const;
+	[[nodiscard]] bool splits(
+		std::string_view key,
+		std::string_view child) const;
+	void addElements(
+		ChangeUnits &units,
+		ChangeUnit &parent,
+		const QString &path,
+		const toml::array &array,
+		const QString &prefix) const;
+
+	const toml::table &_before;
+	const toml::table &_after;
+
+};
+
+ChangeCollector::ChangeCollector(
+	const toml::table &before,
+	const toml::table &after)
+: _before(before)
+, _after(after) {
+}
+
+bool ChangeCollector::tableLike(std::string_view key) const {
+	return TableLike(_before.get(key)) || TableLike(_after.get(key));
+}
+
+bool ChangeCollector::splits(std::string_view key) const {
+	const auto first = _before.get(key);
+	const auto second = _after.get(key);
+	return (TableLike(first) || TableLike(second))
+		&& (!first || first->is_array())
+		&& (!second || second->is_array())
+		&& Names(first)
+		&& Names(second);
+}
+
+bool ChangeCollector::splits(
+		std::string_view key,
+		std::string_view child) const {
+	const auto inside = [&](const toml::table &root) -> const toml::node* {
+		const auto table = root.get_as<toml::table>(key);
+		return table ? table->get(child) : nullptr;
+	};
+	const auto first = inside(_before);
+	const auto second = inside(_after);
+	return (TableLike(first) || TableLike(second))
+		&& Names(first)
+		&& Names(second);
+}
+
+void ChangeCollector::addElements(
+		ChangeUnits &units,
+		ChangeUnit &parent,
+		const QString &path,
+		const toml::array &array,
+		const QString &prefix) const {
+	for (const auto &item : array) {
+		const auto name = Utf8(item.as_table()->get_as<std::string>(
+			"name")->get());
+		auto &unit = units[path + u'\n' + name];
+		unit.table = path;
+		unit.label = ElementLabel(path, name);
+		unit.values[std::string()] = &item;
+		parent.order.push_back(prefix + name);
+	}
+}
+
+ChangeUnits ChangeCollector::collect(const toml::table &root) const {
+	auto result = ChangeUnits();
+	for (auto &&[key, value] : root) {
+		const auto name = key.str();
+		if (!tableLike(name)) {
+			auto &unit = result[QString()];
+			unit.label = u"Top-level settings"_q;
+			unit.values[std::string(name)] = &value;
+			continue;
+		}
+		const auto path = DottedKey(name);
+		auto &parent = result[path];
+		parent.table = path;
+		parent.label = TableLabel(name);
+		const auto table = value.as_table();
+		if (table && Collection(name)) {
+			auto children = std::vector<std::tuple<
+				toml::source_index,
+				toml::source_index,
+				QString>>();
+			for (auto &&[childKey, child] : *table) {
+				if (!child.is_table()) {
+					parent.values[std::string(childKey.str())] = &child;
+					continue;
+				}
+				const auto childPath = path + u'.' + DottedKey(childKey.str());
+				auto &unit = result[childPath];
+				unit.table = childPath;
+				unit.label = ChildLabel(name, Utf8(childKey.str()));
+				unit.values[std::string()] = &child;
+				const auto &begin = child.source().begin;
+				children.emplace_back(begin.line, begin.column, childPath);
+			}
+			std::sort(children.begin(), children.end());
+			for (const auto &child : children) {
+				parent.order.push_back(std::get<2>(child));
+			}
+		} else if (table) {
+			for (auto &&[childKey, child] : *table) {
+				if (splits(name, childKey.str()) && child.is_array()) {
+					const auto childName = DottedKey(childKey.str());
+					addElements(
+						result,
+						parent,
+						path + u'.' + childName,
+						*child.as_array(),
+						childName + u'\n');
+				} else {
+					parent.values[std::string(childKey.str())] = &child;
+				}
+			}
+		} else if (splits(name)) {
+			addElements(result, parent, path, *value.as_array(), QString());
+		} else {
+			parent.values[std::string()] = &value;
+		}
+	}
+	return result;
+}
+
+[[nodiscard]] bool SameValues(const ChangeUnit &a, const ChangeUnit &b) {
+	if (a.values.size() != b.values.size()) {
+		return false;
+	}
+	for (const auto &[key, value] : a.values) {
+		const auto other = b.values.find(key);
+		if (other == b.values.end() || !Same(*value, *other->second)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] bool SameOrder(const ChangeUnit &a, const ChangeUnit &b) {
+	const auto common = [](
+			const std::vector<QString> &order,
+			const std::vector<QString> &other) {
+		auto result = std::vector<QString>();
+		for (const auto &entry : order) {
+			if (std::find(other.begin(), other.end(), entry) != other.end()) {
+				result.push_back(entry);
+			}
+		}
+		return result;
+	};
+	return common(a.order, b.order) == common(b.order, a.order);
+}
+
 } // namespace
 
 ConfigTextDiff DiffConfigText(
@@ -544,6 +922,60 @@ ConfigTextDiff DiffConfigText(
 		return Replacement(oldLines, newLines);
 	}
 	return Hunks(oldLines, *blocks, newLines, std::max(context, 0));
+}
+
+ConfigChangeSummary SummarizeConfigChange(
+		const QByteArray &before,
+		const QByteArray &after) {
+	const auto first = ParseToml(before);
+	const auto second = ParseToml(after);
+	if (!first || !second) {
+		return ConfigChangeSummary();
+	}
+	const auto collector = ChangeCollector(*first, *second);
+	const auto old = collector.collect(*first);
+	const auto now = collector.collect(*second);
+	auto result = ConfigChangeSummary();
+	result.parsed = true;
+	const auto add = [&](ConfigChangeKind kind, const ChangeUnit &unit) {
+		result.entries.push_back({ kind, unit.table, unit.label });
+	};
+	for (const auto &[id, unit] : old) {
+		const auto other = now.find(id);
+		if (other == now.end()) {
+			if (!unit.values.empty()) {
+				add(ConfigChangeKind::Removed, unit);
+			}
+		} else if (!SameValues(unit, other->second)
+			|| !SameOrder(unit, other->second)) {
+			add(ConfigChangeKind::Changed, other->second);
+		}
+	}
+	for (const auto &[id, unit] : now) {
+		if (!old.contains(id) && !unit.values.empty()) {
+			add(ConfigChangeKind::Added, unit);
+		}
+	}
+	const auto rank = [](ConfigChangeKind kind) {
+		switch (kind) {
+		case ConfigChangeKind::Changed: return 0;
+		case ConfigChangeKind::Added: return 1;
+		case ConfigChangeKind::Removed: return 2;
+		}
+		return 3;
+	};
+	std::sort(result.entries.begin(), result.entries.end(), [&](
+			const ConfigChangeEntry &a,
+			const ConfigChangeEntry &b) {
+		if (a.kind != b.kind) {
+			return rank(a.kind) < rank(b.kind);
+		}
+		const auto folded = a.label.compare(b.label, Qt::CaseInsensitive);
+		return folded
+			? (folded < 0)
+			: (std::tie(a.label, a.table) < std::tie(b.label, b.table));
+	});
+	return result;
 }
 
 } // namespace Purple

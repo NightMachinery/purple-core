@@ -52,4 +52,25 @@ struct ConfigTextDiff {
 	const QByteArray &after,
 	int context = 3);
 
+enum class ConfigChangeKind {
+	Added,
+	Removed,
+	Changed,
+};
+
+struct ConfigChangeEntry {
+	ConfigChangeKind kind = ConfigChangeKind::Changed;
+	QString table;
+	QString label;
+};
+
+struct ConfigChangeSummary {
+	std::vector<ConfigChangeEntry> entries;
+	bool parsed = false;
+};
+
+[[nodiscard]] ConfigChangeSummary SummarizeConfigChange(
+	const QByteArray &before,
+	const QByteArray &after);
+
 } // namespace Purple

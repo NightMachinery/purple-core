@@ -150,3 +150,47 @@ Measured on 256 KiB inputs with an optimized build on an M2 under load: a
 dozen scattered edits take about 1 ms, two unrelated files about 6 ms, and the
 most repetitive inputs tried about 25 to 35 ms, mostly spent building the
 truncated result's text. Unoptimized builds are several times slower.
+
+## SummarizeConfigChange
+
+`SummarizeConfigChange(before, after)` is the review's change summary. It
+parses both texts with the vendored toml++ and compares values, not lines, so
+comments, whitespace, line endings, key order inside a table, string quoting
+and number spelling (`0x10` against `16`) produce no entry. A change of type
+(`1` against `1.0`) is a change. When either side fails to parse, `parsed` is
+false and there are no entries; the client then shows the line diff alone.
+
+Each entry has a kind (Changed, Added or Removed), the TOML table it is about
+(`table`, as dotted TOML with quoted keys where needed) and an English label.
+The units compared are:
+
+- Each table under the keyed collections `lists`, `presets`, `list_sets` and
+  `folder_sets`: `[lists.work]` is List "work", `[presets.gym]` Preset "gym",
+  `[list_sets.x]` List set "x" and `[folder_sets.x]` Folder set "x". Anything
+  nested inside, such as a preset's `[[presets.work.views]]`, belongs to that
+  entry. Keys directly in the collection table, and the order of its tables
+  (which is the order the apps show them in), form one more entry labelled
+  Lists, Presets, List sets or Folder sets.
+- Each element of an array of tables whose elements all carry a unique string
+  `name`, directly under a top-level table or at the top level. For
+  `[[schedule.rulesets]]` the label is Schedule "name"; any other such array
+  uses its dotted name followed by the quoted name. When names are missing or
+  repeated on either side, the array is compared whole as part of its parent.
+- Every other top-level table as a whole. Tables users edit have readable
+  labels: `[devices]` Device names, `[notifications]` Notification previews,
+  `[premium]` Local Premium, `[schedule]` Schedule settings (its own keys,
+  the flat `[[schedule.rules]]` array and the order of its rulesets),
+  `[focus_sync]` Focus sync, `[peek]` Peek, `[recent]` Recent chats,
+  `[overrides]` Overrides, `[suggestions]` Suggestions, `[sync]` Send on save,
+  `[last_seen]` Last seen and `[screen_time]` Screen time. Any other table is
+  labelled with its dotted TOML name.
+- The top-level keys outside every table, such as `version`, together form one
+  entry with an empty `table`, labelled Top-level settings.
+
+A unit present on both sides is Changed when its values or order differ. A
+unit present on one side only is Added or Removed, except that a table whose
+only content is split into entries of its own (for example a `[schedule]`
+holding nothing but rulesets) produces no entry itself. Entries are ordered
+Changed, then Added, then Removed, and within each kind by label ignoring
+case, then by label and table. The labels are English; a client that
+localizes can derive its own wording from `table` and the kind of unit.

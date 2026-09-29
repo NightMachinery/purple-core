@@ -9388,6 +9388,243 @@ void TestConfigDiff() {
 	CHECK_EQ(wideButClose.added, 460);
 }
 
+[[nodiscard]] QStringList Changes(const Purple::ConfigChangeSummary &summary) {
+	auto result = QStringList();
+	for (const auto &entry : summary.entries) {
+		const auto kind = (entry.kind == Purple::ConfigChangeKind::Added)
+			? u"Added"_q
+			: (entry.kind == Purple::ConfigChangeKind::Removed)
+			? u"Removed"_q
+			: u"Changed"_q;
+		result.push_back(kind + u" "_q + entry.table + u" / "_q + entry.label);
+	}
+	return result;
+}
+
+void TestConfigChangeSummary() {
+	Begin("config change summary");
+	const auto summarize = [](const char *before, const char *after) {
+		return Purple::SummarizeConfigChange(before, after);
+	};
+	const auto base = QByteArray(R"(version = 1
+
+[premium]
+enabled_p = true
+
+[notifications]
+preview_always = [ 1, 2 ]
+
+[lists.work]
+members = [ 10, 11 ]
+
+[lists.noise]
+kinds = [ "channels" ]
+
+[presets.work]
+list_order = [ { list = "work", notify_p = true } ]
+
+[schedule]
+enabled_p = true
+
+[[schedule.rulesets]]
+name = "phone"
+device = "mobile"
+
+[[schedule.rulesets.rules]]
+days = [ "mon" ]
+from = "09:00"
+to = "17:00"
+preset = "work"
+
+[[schedule.rulesets]]
+name = "desk"
+device = "desktop"
+
+[devices]
+"macos-1" = "the laptop"
+)");
+
+	const auto unchanged = Purple::SummarizeConfigChange(base, base);
+	CHECK(unchanged.parsed);
+	CHECK(unchanged.entries.empty());
+	auto cosmetic = base;
+	cosmetic.replace(
+		"version = 1\n",
+		"# a comment\nversion   =   1 # trailing\n");
+	cosmetic.replace("[ 10, 11 ]", "[\n  10,\n  11,\n]");
+	cosmetic.replace("enabled_p = true\n\n[notifications]",
+		"enabled_p = true # still on\n\n\n[notifications]");
+	cosmetic.replace("name = \"phone\"\ndevice = \"mobile\"",
+		"device = 'mobile'\nname = \"phone\"");
+	cosmetic.replace("\n", "\r\n");
+	const auto quiet = Purple::SummarizeConfigChange(base, cosmetic);
+	CHECK(quiet.parsed);
+	CHECK(quiet.entries.empty());
+	auto inlined = base;
+	inlined.replace("[premium]\nenabled_p = true\n",
+		"premium = { enabled_p = true }\n");
+	CHECK(Purple::SummarizeConfigChange(base, inlined).entries.empty());
+
+	auto edited = base;
+	edited.replace("[ 10, 11 ]", "[ 10, 12 ]");
+	edited.replace("[lists.noise]\nkinds = [ \"channels\" ]\n", "");
+	edited.replace("[schedule]", "[presets.gym]\nlist_order = []\n\n[schedule]");
+	edited.replace("from = \"09:00\"", "from = \"08:00\"");
+	const auto example = Purple::SummarizeConfigChange(base, edited);
+	CHECK(example.parsed);
+	CHECK(Changes(example) == QStringList({
+		u"Changed lists.work / List \"work\""_q,
+		u"Changed schedule.rulesets / Schedule \"phone\""_q,
+		u"Added presets.gym / Preset \"gym\""_q,
+		u"Removed lists.noise / List \"noise\""_q,
+	}));
+
+	auto tables = base;
+	tables.replace("enabled_p = true\n\n[notifications]",
+		"enabled_p = false\n\n[notifications]");
+	tables.replace("[ 1, 2 ]", "[ 1, 2, 3 ]");
+	tables.replace("\"the laptop\"", "\"my laptop\"");
+	tables.replace("[schedule]\nenabled_p = true",
+		"[schedule]\nenabled_p = false");
+	tables.replace("version = 1", "version = 2");
+	tables += "\n[peek]\nhotkey = \"Ctrl+Shift+K\"\n"
+		"\n[custom_thing]\nvalue = 1\n"
+		"\n[\"odd table\"]\nvalue = 1\n"
+		"\n[list_sets.focus]\nlist_order = [ \"work\" ]\n"
+		"\n[folder_sets.all]\nfolders = [ \"Work\" ]\n";
+	const auto labels = Purple::SummarizeConfigChange(base, tables);
+	CHECK(Changes(labels) == QStringList({
+		u"Changed devices / Device names"_q,
+		u"Changed premium / Local Premium"_q,
+		u"Changed notifications / Notification previews"_q,
+		u"Changed schedule / Schedule settings"_q,
+		u"Changed  / Top-level settings"_q,
+		u"Added \"odd table\" / \"odd table\""_q,
+		u"Added custom_thing / custom_thing"_q,
+		u"Added folder_sets.all / Folder set \"all\""_q,
+		u"Added list_sets.focus / List set \"focus\""_q,
+		u"Added peek / Peek"_q,
+	}));
+	const auto reverse = Purple::SummarizeConfigChange(tables, base);
+	CHECK(Changes(reverse) == QStringList({
+		u"Changed devices / Device names"_q,
+		u"Changed premium / Local Premium"_q,
+		u"Changed notifications / Notification previews"_q,
+		u"Changed schedule / Schedule settings"_q,
+		u"Changed  / Top-level settings"_q,
+		u"Removed \"odd table\" / \"odd table\""_q,
+		u"Removed custom_thing / custom_thing"_q,
+		u"Removed folder_sets.all / Folder set \"all\""_q,
+		u"Removed list_sets.focus / List set \"focus\""_q,
+		u"Removed peek / Peek"_q,
+	}));
+	CHECK(labels.entries[4].table.isEmpty());
+
+	CHECK(Changes(summarize("[peek]\nhotkey = \"x\"\n",
+		"version = 1\n[peek]\nhotkey = \"x\"\n")) == QStringList({
+		u"Added  / Top-level settings"_q,
+	}));
+	CHECK(Changes(summarize("version = 1\n", "")) == QStringList({
+		u"Removed  / Top-level settings"_q,
+	}));
+	CHECK(Changes(summarize("a = 1\n", "a = 1.0\n")) == QStringList({
+		u"Changed  / Top-level settings"_q,
+	}));
+	CHECK(summarize("a = 0x10\nb = 'x'\n", "b = \"x\"\na = 16\n")
+		.entries.empty());
+	CHECK(summarize("a = nan\n", "a = nan\n").entries.empty());
+
+	auto reordered = base;
+	reordered.replace("[[schedule.rulesets]]\nname = \"desk\"\n"
+		"device = \"desktop\"\n", "");
+	reordered.replace("[[schedule.rulesets]]\nname = \"phone\"",
+		"[[schedule.rulesets]]\nname = \"desk\"\ndevice = \"desktop\"\n\n"
+		"[[schedule.rulesets]]\nname = \"phone\"");
+	CHECK(Changes(Purple::SummarizeConfigChange(base, reordered))
+		== QStringList({ u"Changed schedule / Schedule settings"_q }));
+	auto presetOrder = QByteArray(
+		"[presets.a]\nhotkey = \"1\"\n[presets.b]\nhotkey = \"2\"\n");
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		presetOrder,
+		"[presets.b]\nhotkey = \"2\"\n[presets.a]\nhotkey = \"1\"\n"))
+		== QStringList({ u"Changed presets / Presets"_q }));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		presetOrder,
+		"[presets.b]\nhotkey = \"2\"\n[presets.c]\n[presets.a]\n"
+		"hotkey = \"1\"\n")) == QStringList({
+		u"Changed presets / Presets"_q,
+		u"Added presets.c / Preset \"c\""_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[lists.a]\n[lists.b]\n",
+		"[lists.a]\n[lists.c]\n[lists.b]\n")) == QStringList({
+		u"Added lists.c / List \"c\""_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[lists.\"my list\"]\nmembers = [ 1 ]\n",
+		"[lists.\"my list\"]\nmembers = [ 2 ]\n")) == QStringList({
+		u"Changed lists.\"my list\" / List \"my list\""_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[[presets.work.views]]\nname = \"a\"\n",
+		"[[presets.work.views]]\nname = \"b\"\n")) == QStringList({
+		u"Changed presets.work / Preset \"work\""_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[[schedule.rulesets]]\nname = \"a\"\n",
+		"[[schedule.rulesets]]\nname = \"a\"\n"
+		"[[schedule.rulesets]]\nname = \"b\"\n")) == QStringList({
+		u"Added schedule.rulesets / Schedule \"b\""_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[[schedule.rulesets]]\nname = \"a\"\n",
+		"[[schedule.rulesets]]\nname = \"a\"\n"
+		"[[schedule.rulesets]]\nname = \"a\"\n")) == QStringList({
+		u"Changed schedule / Schedule settings"_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[schedule]\nenabled_p = true\n[[schedule.rules]]\nfrom = \"1\"\n",
+		"[schedule]\nenabled_p = true\n[[schedule.rules]]\nfrom = \"2\"\n"))
+		== QStringList({ u"Changed schedule / Schedule settings"_q }));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[schedule]\nenabled_p = true\n[[schedule.rulesets]]\nname = \"a\"\n",
+		"[[schedule.rulesets]]\nname = \"a\"\n")) == QStringList({
+		u"Changed schedule / Schedule settings"_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"",
+		"[[schedule.rulesets]]\nname = \"a\"\n")) == QStringList({
+		u"Added schedule.rulesets / Schedule \"a\""_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[[things]]\nname = \"a\"\nx = 1\n",
+		"[[things]]\nname = \"a\"\nx = 2\n")) == QStringList({
+		u"Changed things / things \"a\""_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[[things]]\nx = 1\n",
+		"[[things]]\nx = 2\n")) == QStringList({
+		u"Changed things / things"_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"premium = true\n",
+		"[premium]\nenabled_p = true\n")) == QStringList({
+		u"Changed premium / Local Premium"_q,
+	}));
+	CHECK(Changes(Purple::SummarizeConfigChange(
+		"[lists]\nstray = 1\n[lists.a]\n",
+		"[lists]\nstray = 2\n[lists.a]\n")) == QStringList({
+		u"Changed lists / Lists"_q,
+	}));
+
+	const auto broken = Purple::SummarizeConfigChange(base, "[lists\n");
+	CHECK(!broken.parsed);
+	CHECK(broken.entries.empty());
+	CHECK(!Purple::SummarizeConfigChange("x = \n", base).parsed);
+	CHECK(!Purple::SummarizeConfigChange(base, "a = \"\xff\"\n").parsed);
+	CHECK(Purple::SummarizeConfigChange("", "").parsed);
+}
+
 void TestSyncJson() {
 	Begin("sync json");
 	const auto canonical = [](const QByteArray &input, const QByteArray &expected) {
@@ -11699,6 +11936,7 @@ int main() {
 	TestConfigAdoption();
 	TestConfigChoice();
 	TestConfigDiff();
+	TestConfigChangeSummary();
 	TestPersianKeyboardToEnglish();
 	TestLists();
 	TestKinds();
