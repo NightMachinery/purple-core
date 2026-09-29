@@ -112,6 +112,32 @@ struct Validation {
 	return QByteArray("aeimquy4").contains(bytes.back());
 }
 
+[[nodiscard]] std::optional<QString> FormatId(
+		const QByteArray &entropy,
+		const char *prefix) {
+	if (entropy.size() != 16) {
+		return std::nullopt;
+	}
+	constexpr auto alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+	auto result = QByteArray(prefix);
+	result.reserve(29);
+	auto buffer = uint32_t(0);
+	auto bits = 0;
+	for (const auto byte : entropy) {
+		buffer = (buffer << 8) | uint8_t(byte);
+		bits += 8;
+		while (bits >= 5) {
+			bits -= 5;
+			result.append(alphabet[(buffer >> bits) & 31]);
+		}
+		buffer &= (uint32_t(1) << bits) - 1;
+	}
+	if (bits != 0) {
+		result.append(alphabet[(buffer << (5 - bits)) & 31]);
+	}
+	return QString::fromLatin1(result);
+}
+
 [[nodiscard]] bool ValidMetadata(const QJsonValue &value) {
 	if (!value.isString()) {
 		return false;
@@ -270,6 +296,14 @@ bool IsSyncSpaceId(const QString &value) {
 
 bool IsSyncInstallId(const QString &value) {
 	return ValidId(value, "in-");
+}
+
+std::optional<QString> FormatSyncSpaceId(const QByteArray &entropy) {
+	return FormatId(entropy, "sp-");
+}
+
+std::optional<QString> FormatSyncInstallId(const QByteArray &entropy) {
+	return FormatId(entropy, "in-");
 }
 
 SyncEnvelopeParseResult ParseSyncEnvelope(const QByteArray &json) {

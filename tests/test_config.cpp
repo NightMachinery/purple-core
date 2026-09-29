@@ -8561,6 +8561,52 @@ void TestSyncJson() {
 		Purple::SyncJsonErrorKind::SizeLimit);
 }
 
+void TestSyncIdFormatting() {
+	Begin("sync id formatting");
+	const auto zero = QByteArray(16, '\0');
+	const auto ones = QByteArray(16, char(0xff));
+	const auto known = QByteArray::fromHex(
+		"000102030405060708090a0b0c0d0e0f");
+	const auto zeroInstall = Purple::FormatSyncInstallId(zero);
+	const auto zeroSpace = Purple::FormatSyncSpaceId(zero);
+	CHECK(zeroInstall == u"in-"_q + QString(26, u'a'));
+	CHECK(zeroSpace == u"sp-"_q + QString(26, u'a'));
+	CHECK(Purple::FormatSyncInstallId(ones)
+		== u"in-77777777777777777777777774"_q);
+	CHECK(Purple::FormatSyncSpaceId(ones)
+		== u"sp-77777777777777777777777774"_q);
+	CHECK(Purple::FormatSyncInstallId(known)
+		== u"in-aaaqeayeaudaocajbifqydiob4"_q);
+	CHECK(Purple::FormatSyncSpaceId(known)
+		== u"sp-aaaqeayeaudaocajbifqydiob4"_q);
+	CHECK(Purple::IsSyncInstallId(*zeroInstall));
+	CHECK(Purple::IsSyncSpaceId(*zeroSpace));
+	CHECK(!Purple::IsSyncSpaceId(*zeroInstall));
+	CHECK(!Purple::IsSyncInstallId(*zeroSpace));
+	for (auto size = 0; size != 33; ++size) {
+		if (size == 16) {
+			continue;
+		}
+		CHECK(!Purple::FormatSyncInstallId(QByteArray(size, 'a')));
+		CHECK(!Purple::FormatSyncSpaceId(QByteArray(size, 'a')));
+	}
+	const auto endings = u"aeimquy4"_q;
+	for (auto last = 0; last != 256; ++last) {
+		auto entropy = zero;
+		entropy[15] = char(last);
+		const auto install = Purple::FormatSyncInstallId(entropy);
+		const auto space = Purple::FormatSyncSpaceId(entropy);
+		CHECK(install.has_value());
+		CHECK(space.has_value());
+		CHECK_EQ(install->size(), 29);
+		CHECK_EQ(space->size(), 29);
+		CHECK(install->back() == endings[last & 7]);
+		CHECK(space->back() == endings[last & 7]);
+		CHECK(Purple::IsSyncInstallId(*install));
+		CHECK(Purple::IsSyncSpaceId(*space));
+	}
+}
+
 void TestSyncEnvelope() {
 	Begin("sync envelope");
 	const auto space = u"sp-"_q + QString(26, u'a');
@@ -9580,6 +9626,7 @@ void TestSyncSimulation() {
 
 int main() {
 	TestSyncJson();
+	TestSyncIdFormatting();
 	TestSyncEnvelope();
 	TestConfigPayload();
 	TestConfigRecordBuilder();

@@ -48,14 +48,16 @@ rules about data are far easier to prove outside a running app than inside one.
 - `purple/purple_sync_envelope.{h,cpp}` - parses and writes uncompressed sync
   records on top of that strict JSON format. It validates the version, stream,
   canonical 128-bit IDs, sequence, timestamp, writer metadata, and payload
-  hash; it preserves unknown JSON members at every level. Writing recomputes
-  the payload hash and emits canonical JSON. Invalid records report a reason,
-  while a higher major or unsupported encoding has a separate outcome. Config
-  records are capped at 256 KiB and library records at 4 MiB, including the
-  full document bytes. The caller must separately verify the Telegram peer,
-  document name, and forwarding metadata. A newer major that uses JSON numbers
-  outside version 1's safe-integer subset is unreadable by this parser rather
-  than receiving the higher-major outcome.
+  hash; it preserves unknown JSON members at every level. Its ID formatters
+  encode exactly 16 caller-supplied entropy bytes as lowercase unpadded
+  RFC 4648 base32 with `in-` or `sp-` prefixes; the core does not generate
+  randomness. Writing recomputes the payload hash and emits canonical JSON.
+  Invalid records report a reason, while a higher major or unsupported encoding
+  has a separate outcome. Config records are capped at 256 KiB and library
+  records at 4 MiB, including the full document bytes. The caller must
+  separately verify the Telegram peer, document name, and forwarding metadata.
+  A newer major that uses JSON numbers outside version 1's safe-integer subset
+  is unreadable by this parser rather than receiving the higher-major outcome.
 - `purple/purple_config_payload.{h,cpp}` - inspects a validated config envelope
   before its settings file can be used. It checks the key against the exact
   UTF-8 bytes represented by the JSON `text` string, validates direct parents

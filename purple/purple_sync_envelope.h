@@ -11,6 +11,8 @@ option) any later version.
 #include <QtCore/QJsonObject>
 #include <QtCore/QString>
 
+#include <optional>
+
 namespace Purple {
 
 enum class SyncEnvelopeStatus {
@@ -58,6 +60,10 @@ struct SyncEnvelopeWriteResult {
 
 [[nodiscard]] bool IsSyncSpaceId(const QString &value);
 [[nodiscard]] bool IsSyncInstallId(const QString &value);
+[[nodiscard]] std::optional<QString> FormatSyncSpaceId(
+	const QByteArray &entropy);
+[[nodiscard]] std::optional<QString> FormatSyncInstallId(
+	const QByteArray &entropy);
 [[nodiscard]] SyncEnvelopeParseResult ParseSyncEnvelope(
 	const QByteArray &json);
 [[nodiscard]] SyncEnvelopeWriteResult SerializeSyncEnvelope(
