@@ -8750,7 +8750,8 @@ void TestConfigAdoption() {
 		head(sameUnrelated, u"phone"_q, 7), head(b, u"pc"_q, 3) });
 	CHECK(replaced.has_value());
 	CHECK_EQ(replaced->base, b.key);
-	CHECK(replaced->baseLineage == b.lineage);
+	CHECK(replaced->baseLineage == std::vector<QString>({
+		a.key, sameUnrelated.key }));
 	CHECK(replaced->equiv == std::vector<QString>({ sameUnrelated.key }));
 	CHECK_EQ(replaced->seenSeq.at(u"pc"_q), 10);
 	CHECK_EQ(replaced->seenSeq.at(u"phone"_q), 7);
@@ -8776,9 +8777,11 @@ void TestConfigAdoption() {
 		head(revert, u"phone"_q, 6),
 	});
 	CHECK(grown.has_value());
-	CHECK_EQ(grown->base, a.key);
-	CHECK(grown->baseLineage == a.lineage);
-	CHECK(grown->equiv == std::vector<QString>({ revert.key, stranger.key }));
+	CHECK_EQ(grown->base, revert.key);
+	CHECK(grown->baseLineage == std::vector<QString>({ b.key, a.key }));
+	auto grownEquiv = std::vector<QString>({ a.key, stranger.key });
+	std::sort(grownEquiv.begin(), grownEquiv.end());
+	CHECK(grown->equiv == grownEquiv);
 	CHECK_EQ(grown->seenSeq.at(u"pc"_q), 12);
 	CHECK_EQ(grown->seenSeq.at(u"phone"_q), 6);
 	CHECK_EQ(grown->seenSeq.at(u"tablet"_q), 5);
@@ -8801,9 +8804,15 @@ void TestConfigAdoption() {
 	}
 	const auto capped = Purple::AdoptConfigHeads(state, fpA, heads);
 	CHECK(capped.has_value());
+	CHECK_EQ(capped->base, chain[19].key);
 	CHECK_EQ(capped->equiv.size(), 16);
-	CHECK_EQ(capped->equiv.front(), chain[19].key);
-	CHECK_EQ(capped->equiv.back(), chain[4].key);
+	CHECK_EQ(capped->equiv.front(), chain[18].key);
+	CHECK_EQ(capped->equiv.back(), chain[3].key);
+	CHECK(std::find(capped->equiv.begin(), capped->equiv.end(),
+		a.key) == capped->equiv.end());
+	CHECK_EQ(capped->baseLineage.size(), 40);
+	CHECK(std::find(capped->baseLineage.begin(), capped->baseLineage.end(),
+		chain[0].key) != capped->baseLineage.end());
 	CHECK(std::find(capped->equiv.begin(), capped->equiv.end(),
 		stranger.key) == capped->equiv.end());
 	CHECK_EQ(capped->seenSeq.size(), 21);
@@ -8811,12 +8820,23 @@ void TestConfigAdoption() {
 	const auto cappedFresh = Purple::AdoptConfigHeads(fresh, fpA, heads);
 	CHECK(cappedFresh.has_value());
 	CHECK_EQ(cappedFresh->base, chain[19].key);
-	CHECK(cappedFresh->baseLineage == chain[19].lineage);
+	CHECK(std::all_of(
+		chain[19].lineage.begin(),
+		chain[19].lineage.end(),
+		[&](const QString &key) {
+			return std::find(
+				capped->baseLineage.begin(),
+				capped->baseLineage.end(),
+				key) != capped->baseLineage.end();
+		}));
+	CHECK(cappedFresh->baseLineage == capped->baseLineage);
 	CHECK_EQ(cappedFresh->equiv.size(), 16);
 	CHECK_EQ(cappedFresh->equiv.front(), chain[18].key);
 	CHECK_EQ(cappedFresh->equiv.back(), chain[3].key);
 
 	auto tied = state;
+	tied.base = u"60."_q + fpA;
+	tied.baseLineage.clear();
 	tied.equiv.clear();
 	for (auto index = 0; index != 16; ++index) {
 		tied.equiv.push_back(u"50."_q + Purple::SettingsFingerprint(
@@ -8842,6 +8862,32 @@ void TestConfigAdoption() {
 	std::sort(expectedTies.begin(), expectedTies.end());
 	expectedTies.pop_back();
 	CHECK(tieBroken->equiv == expectedTies);
+
+	const auto first1 = *Purple::MakeConfigVersion("c1", {});
+	const auto then0 = *Purple::MakeConfigVersion("c0", { first1 });
+	const auto back1 = *Purple::MakeConfigVersion("c1", { then0 });
+	auto original = Purple::ConfigSyncState();
+	original.space = u"space"_q;
+	original.install = u"mine"_q;
+	original.base = first1.key;
+	const auto history = std::vector<Purple::ConfigHead>{
+		head(then0, u"pc"_q, 1),
+		head(back1, u"phone"_q, 1),
+	};
+	const auto fpC1 = Purple::SettingsFingerprint("c1");
+	const auto caughtUp = Purple::PlanConfigSync(fpC1, original, history);
+	CHECK(caughtUp.verdict == Purple::ConfigSyncVerdict::Adopt);
+	const auto recorded = Purple::AdoptConfigHeads(
+		original,
+		fpC1,
+		caughtUp.same);
+	CHECK(recorded.has_value());
+	CHECK_EQ(recorded->base, back1.key);
+	CHECK(recorded->baseLineage == std::vector<QString>({
+		then0.key, first1.key }));
+	CHECK(recorded->equiv == std::vector<QString>({ first1.key }));
+	CHECK(Purple::PlanConfigSync(fpC1, *recorded, history).verdict
+		== Purple::ConfigSyncVerdict::UpToDate);
 
 	CHECK(!Purple::AdoptConfigHeads(state, fpA, {}));
 	auto pending = state;

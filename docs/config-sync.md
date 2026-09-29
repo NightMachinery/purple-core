@@ -69,14 +69,27 @@ cannot adopt; the install must exist first), or when any head is in another
 space, belongs to this install, has sequence 0, has an invalid key or lineage,
 or has a fingerprint other than `localFp`.
 
-When the base is empty or its content differs from `localFp`, the first head
-in the ordering becomes the base, its lineage the base lineage, and the other
-heads' keys the equivalent keys. When the base already has `localFp`, the base
-stays and the equivalent keys gain the heads' keys. Equivalent keys never
-include the base, never repeat, are kept sorted by generation descending and
-then key ascending, and are cut to the 16 first in that order, the limit
-`ClassifyConfig` enforces. Each head's install gets a seen sequence of at least
-that head's sequence. Space, install and pending key are unchanged.
+The versions being recorded are the heads, plus the current base when it
+already has `localFp`. All of them carry the same content. The newest of them
+(highest generation) becomes the base, and every other one joins the
+equivalent keys, together with the old equivalent keys when the base content
+is unchanged. The base lineage becomes the union of all their lineages plus the
+other versions' keys, newest first, cut to the 64 newest. The base's own
+ancestors win ties.
+
+Keeping the newest version and the merged lineage matters. Suppose this device
+kept an older base and filed a newer same-content version under the
+equivalent keys. It would forget that version's history, so a version the
+newer one had replaced could come back as Ahead, and the device would apply
+old settings and then call itself UpToDate. When the base is empty or its
+content differs, the result is the same as before this rule: the first head
+in the ordering becomes the base.
+
+Equivalent keys never include the base, never repeat, are kept sorted by
+generation descending and then key ascending, and are cut to the 16 first in
+that order, the limit `ClassifyConfig` enforces. Each head's install gets a
+seen sequence of at least that head's sequence. Space, install and pending key
+are unchanged.
 
 ## PlanConfigChoice
 

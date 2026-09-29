@@ -415,24 +415,48 @@ std::optional<ConfigSyncState> AdoptConfigHeads(
 			return std::nullopt;
 		}
 	}
-	auto sorted = heads;
-	std::sort(sorted.begin(), sorted.end(), Precedes);
-	auto result = state;
-	auto equiv = std::vector<QString>();
-	if (Fingerprint(state.base) != localFp) {
-		result.base = sorted.front().key;
-		result.baseLineage = sorted.front().lineage;
-	} else {
-		equiv = state.equiv;
-	}
-	for (const auto &head : sorted) {
-		equiv.push_back(head.key);
-	}
-	std::sort(equiv.begin(), equiv.end(), [](const auto &a, const auto &b) {
+	const auto newer = [](const QString &a, const QString &b) {
 		const auto first = Generation(a);
 		const auto second = Generation(b);
 		return (first != second) ? (first > second) : (a < b);
+	};
+	auto result = state;
+	auto equiv = std::vector<QString>();
+	auto versions = std::vector<std::pair<QString, std::vector<QString>>>();
+	if (Fingerprint(state.base) == localFp) {
+		equiv = state.equiv;
+		versions.emplace_back(state.base, state.baseLineage);
+	}
+	for (const auto &head : heads) {
+		versions.emplace_back(head.key, head.lineage);
+	}
+	const auto top = std::min_element(
+		versions.begin(),
+		versions.end(),
+		[&](const auto &a, const auto &b) { return newer(a.first, b.first); });
+	result.base = top->first;
+	auto lineage = top->second;
+	for (const auto &[key, ancestors] : versions) {
+		equiv.push_back(key);
+		for (const auto &ancestor : ancestors) {
+			if (!Has(lineage, ancestor)) {
+				lineage.push_back(ancestor);
+			}
+		}
+		if (key != result.base && !Has(lineage, key)) {
+			lineage.push_back(key);
+		}
+	}
+	std::stable_sort(lineage.begin(), lineage.end(), [](
+			const auto &a,
+			const auto &b) {
+		return Generation(a) > Generation(b);
 	});
+	if (lineage.size() > kLineageLimit) {
+		lineage.resize(kLineageLimit);
+	}
+	result.baseLineage = std::move(lineage);
+	std::sort(equiv.begin(), equiv.end(), newer);
 	equiv.erase(std::unique(equiv.begin(), equiv.end()), equiv.end());
 	equiv.erase(
 		std::remove(equiv.begin(), equiv.end(), result.base),
@@ -441,7 +465,7 @@ std::optional<ConfigSyncState> AdoptConfigHeads(
 		equiv.resize(16);
 	}
 	result.equiv = std::move(equiv);
-	for (const auto &head : sorted) {
+	for (const auto &head : heads) {
 		auto &seen = result.seenSeq[head.install];
 		seen = std::max(seen, head.seq);
 	}
