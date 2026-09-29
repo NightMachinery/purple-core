@@ -20,8 +20,12 @@ option) any later version.
 #include "purple/purple_splice.h"
 #include "purple/purple_state.h"
 #include "purple/purple_sync_json.h"
+#include "purple/purple_sync_envelope.h"
 
 #include <QtCore/QDateTime>
+#include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
 #include <QtCore/QStringList>
 #include <QtCore/QTimeZone>
 
@@ -8553,10 +8557,191 @@ void TestSyncJson() {
 		Purple::SyncJsonErrorKind::SizeLimit);
 }
 
+void TestSyncEnvelope() {
+	Begin("sync envelope");
+	const auto space = u"sp-"_q + QString(26, u'a');
+	const auto install = u"in-"_q + QString(26, u'a');
+	auto writer = QJsonObject{
+		{ u"install"_q, install },
+		{ u"device"_q, u"phone"_q },
+		{ u"platform"_q, u"android"_q },
+		{ u"app"_q, u"Purple"_q },
+		{ u"writer_extra"_q, QJsonObject{ { u"kept"_q, true } } },
+	};
+	auto document = QJsonObject{
+		{ u"purple_sync"_q, 1 },
+		{ u"stream"_q, u"config"_q },
+		{ u"space"_q, space },
+		{ u"writer"_q, writer },
+		{ u"seq"_q, QJsonValue(qint64(9007199254740991LL)) },
+		{ u"at"_q, QJsonValue(qint64(9007199254740991LL)) },
+		{ u"payload"_q, QJsonObject{
+			{ u"nested"_q, QJsonArray{ QJsonObject{
+				{ u"unknown"_q, QJsonValue(qint64(9007199254740991LL)) },
+			} } },
+		} },
+		{ u"envelope_extra"_q, u"preserved"_q },
+	};
+	const auto write = [](const QJsonObject &value) {
+		return Purple::SerializeSyncEnvelope(Purple::SyncEnvelope{ value });
+	};
+	const auto valid = write(document);
+	CHECK(bool(valid));
+	CHECK(valid.canonical.startsWith('{'));
+	const auto parsed = Purple::ParseSyncEnvelope(valid.canonical);
+	CHECK(bool(parsed));
+	CHECK(parsed.envelope.document.value(u"envelope_extra"_q).toString()
+		== u"preserved"_q);
+	CHECK(parsed.envelope.document.value(u"writer"_q).toObject()
+		.value(u"writer_extra"_q).toObject().value(u"kept"_q).toBool());
+	CHECK(parsed.envelope.document.value(u"seq"_q).toDouble()
+		== 9007199254740991.0);
+	CHECK(parsed.envelope.document.value(u"payload"_q).toObject()
+		.value(u"nested"_q).toArray().first().toObject()
+		.value(u"unknown"_q).toDouble() == 9007199254740991.0);
+	const auto rewritten = Purple::SerializeSyncEnvelope(parsed.envelope);
+	CHECK(bool(rewritten));
+	CHECK(rewritten.canonical == valid.canonical);
+	CHECK(bool(Purple::ParseSyncEnvelope(rewritten.canonical)));
+	const auto originalHash = parsed.envelope.document
+		.value(u"payload_sha256"_q).toString();
+	CHECK_EQ(originalHash.size(), 64);
+
+	const auto rejected = [&](QJsonObject changed, Purple::SyncEnvelopeError error) {
+		const auto result = write(changed);
+		CHECK(!result);
+		CHECK(result.status == Purple::SyncEnvelopeStatus::Invalid);
+		CHECK(result.error == error);
+	};
+	const auto received = [&](QByteArray bytes,
+			Purple::SyncEnvelopeStatus status,
+			Purple::SyncEnvelopeError error) {
+		const auto result = Purple::ParseSyncEnvelope(bytes);
+		CHECK(result.status == status);
+		CHECK(result.error == error);
+	};
+
+	document.insert(u"payload"_q, QJsonObject());
+	const auto empty = write(document);
+	CHECK(bool(empty));
+	CHECK(bool(Purple::ParseSyncEnvelope(empty.canonical)));
+	document.insert(u"payload"_q, QJsonObject{
+		{ u"a"_q, 1 }, { u"b"_q, 2 },
+	});
+	const auto ordered = write(document);
+	CHECK(bool(ordered));
+	auto reordered = ordered.canonical;
+	CHECK(reordered.contains("{\"a\":1,\"b\":2}"));
+	reordered.replace("{\"a\":1,\"b\":2}", "{ \"b\": 2, \"a\": 1.0 }");
+	received(reordered, Purple::SyncEnvelopeStatus::Valid,
+		Purple::SyncEnvelopeError::None);
+	const auto reorderParsed = Purple::ParseSyncEnvelope(reordered);
+	CHECK(bool(reorderParsed));
+	CHECK(write(reorderParsed.envelope.document).canonical == ordered.canonical);
+
+	auto tampered = ordered.canonical;
+	tampered.replace("{\"a\":1,\"b\":2}", "{\"a\":1,\"b\":3}");
+	received(tampered, Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::HashMismatch);
+	const auto padded = ordered.canonical + QByteArray(256 * 1024, ' ');
+	received(padded, Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::SizeLimit);
+	auto duplicate = ordered.canonical;
+	duplicate.replace("\"at\":9007199254740991,",
+		"\"at\":9007199254740991,\"at\":0,");
+	received(duplicate, Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::InvalidJson);
+	auto loneSurrogate = ordered.canonical;
+	loneSurrogate.replace("\"envelope_extra\":\"preserved\"",
+		"\"envelope_extra\":\"\\ud800\"");
+	received(loneSurrogate, Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::InvalidJson);
+	auto fractionalUnknown = ordered.canonical;
+	fractionalUnknown.replace("\"envelope_extra\":\"preserved\"",
+		"\"envelope_extra\":1.5");
+	received(fractionalUnknown, Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::InvalidJson);
+
+	auto changed = document;
+	changed.insert(u"purple_sync"_q, 2);
+	CHECK(write(changed).status == Purple::SyncEnvelopeStatus::NewerMajor);
+	const auto newer = QJsonDocument(changed).toJson(QJsonDocument::Compact);
+	received(newer, Purple::SyncEnvelopeStatus::NewerMajor,
+		Purple::SyncEnvelopeError::None);
+	changed = document;
+	changed.insert(u"encoding"_q, u"gzip+base64"_q);
+	CHECK(write(changed).status == Purple::SyncEnvelopeStatus::UnsupportedEncoding);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::UnsupportedEncoding,
+		Purple::SyncEnvelopeError::None);
+	changed.insert(u"encoding"_q, u"identity"_q);
+	const auto identity = write(changed);
+	CHECK(bool(identity));
+	CHECK(Purple::ParseSyncEnvelope(identity.canonical).envelope.document
+		.value(u"encoding"_q).toString() == u"identity"_q);
+	changed.insert(u"encoding"_q, 1);
+	rejected(changed, Purple::SyncEnvelopeError::FieldType);
+
+	changed = document;
+	changed.insert(u"space"_q, u"sp-"_q + QString(25, u'a') + u'b');
+	rejected(changed, Purple::SyncEnvelopeError::InvalidId);
+	changed.insert(u"space"_q, u"sp-"_q + QString(25, u'a') + u'e');
+	CHECK(bool(write(changed)));
+	changed.insert(u"space"_q, u"sp-"_q + QString(25, u'a'));
+	rejected(changed, Purple::SyncEnvelopeError::InvalidId);
+	changed = document;
+	writer.insert(u"install"_q, u"sp-"_q + QString(26, u'a'));
+	changed.insert(u"writer"_q, writer);
+	rejected(changed, Purple::SyncEnvelopeError::InvalidId);
+	writer.insert(u"install"_q, install);
+	writer.insert(u"device"_q, QString(257, u'a'));
+	changed.insert(u"writer"_q, writer);
+	rejected(changed, Purple::SyncEnvelopeError::InvalidValue);
+	changed = document;
+	changed.remove(u"seq"_q);
+	rejected(changed, Purple::SyncEnvelopeError::MissingField);
+	changed = document;
+	changed.insert(u"seq"_q, 0);
+	rejected(changed, Purple::SyncEnvelopeError::FieldType);
+	changed.insert(u"seq"_q, QJsonValue(qint64(9007199254740992LL)));
+	rejected(changed, Purple::SyncEnvelopeError::InvalidJson);
+	changed = document;
+	changed.insert(u"at"_q, -1);
+	rejected(changed, Purple::SyncEnvelopeError::FieldType);
+	changed = document;
+	changed.insert(u"payload"_q, QJsonArray());
+	rejected(changed, Purple::SyncEnvelopeError::FieldType);
+	changed = document;
+	changed.insert(u"stream"_q, u"other"_q);
+	rejected(changed, Purple::SyncEnvelopeError::InvalidValue);
+	changed = document;
+	changed.insert(u"payload_sha256"_q, QString(64, u'0'));
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::HashMismatch);
+	changed.insert(u"payload_sha256"_q, originalHash.toUpper());
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::InvalidHash);
+
+	changed = document;
+	changed.insert(u"padding"_q, QString(256 * 1024, u'a'));
+	rejected(changed, Purple::SyncEnvelopeError::SizeLimit);
+	received(QJsonDocument(changed).toJson(QJsonDocument::Compact),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::SizeLimit);
+	changed.insert(u"stream"_q, u"library"_q);
+	CHECK(bool(write(changed)));
+	received(QByteArray(4 * 1024 * 1024 + 1, ' '),
+		Purple::SyncEnvelopeStatus::Invalid,
+		Purple::SyncEnvelopeError::SizeLimit);
+}
+
 } // namespace
 
 int main() {
 	TestSyncJson();
+	TestSyncEnvelope();
 	TestConfigVersions();
 	TestConfigClassification();
 	TestPersianKeyboardToEnglish();

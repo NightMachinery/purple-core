@@ -34,6 +34,7 @@ clang++ -std=c++20 -g -O0 -o "$Output" \
     "$RepoPath/purple/purple_state.cpp" \
     "$RepoPath/purple/purple_config_sync.cpp" \
     "$RepoPath/purple/purple_sync_json.cpp" \
+    "$RepoPath/purple/purple_sync_envelope.cpp" \
     "$RepoPath/purple/purple_engine.cpp" \
     "$RepoPath/purple/purple_passcode.cpp" \
     "$RepoPath/purple/purple_screentime.cpp" \

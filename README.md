@@ -45,6 +45,17 @@ rules about data are far easier to prove outside a running app than inside one.
   limited to 4 MiB and 128 levels of nesting. The result includes an error
   kind and byte offset on failure; callers must check it before hashing or
   interpreting the JSON.
+- `purple/purple_sync_envelope.{h,cpp}` - parses and writes uncompressed sync
+  records on top of that strict JSON format. It validates the version, stream,
+  canonical 128-bit IDs, sequence, timestamp, writer metadata, and payload
+  hash; it preserves unknown JSON members at every level. Writing recomputes
+  the payload hash and emits canonical JSON. Invalid records report a reason,
+  while a higher major or unsupported encoding has a separate outcome. Config
+  records are capped at 256 KiB and library records at 4 MiB, including the
+  full document bytes. The caller must separately verify the Telegram peer,
+  document name, and forwarding metadata. A newer major that uses JSON numbers
+  outside version 1's safe-integer subset is unreadable by this parser rather
+  than receiving the higher-major outcome.
 - `purple/purple_engine.{h,cpp}` - resolves a preset into a flat table of "for
   this list, show and notify are these", and answers what that means for one
   chat. Resolution runs once per config or preset change, never per repaint.
