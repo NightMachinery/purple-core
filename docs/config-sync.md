@@ -113,3 +113,40 @@ A choice that does not fit the verdict returns nothing, and so does any
 parent set that `MakeConfigVersion` would reject (for example a parent at the
 largest generation), so the client never stages a record the core cannot
 build.
+
+## DiffConfigText
+
+`DiffConfigText(before, after, context)` is the line diff behind the review's
+Show lines. It returns unified-diff hunks: 1-based line numbers, `context`
+unchanged lines around each change (3 by default, negative treated as 0), and
+hunks merged when their context would touch or overlap. Within a change the
+removed lines come before the added ones. A hunk with no old (or new) lines
+starts at the line before it, as in `diff -u`, so an insertion at the top of
+the file starts at old line 0. `added` and `removed` count every changed line,
+and `identical` is set when the two texts have the same lines.
+
+Lines split on LF. A trailing CR is ignored when lines are compared and
+stripped from the displayed text, and a missing final newline is not a change
+by itself, so CRLF and LF copies of one file are identical here even though
+their fingerprints differ. Lines are compared as bytes; invalid UTF-8 is
+decoded leniently, with replacement characters, only for display.
+
+The algorithm is Myers' O(ND) difference algorithm in its linear-space form
+after the common first and last lines are stripped, so memory stays linear in
+the input and the result is a shortest edit script. Two bounds keep it fast on
+any input of up to 256 KiB per side:
+
+- **Edit limit**: when the shortest edit script is longer than
+  `kConfigDiffEditLimit` (1,000 changed lines, counting removed plus added),
+  the diff is reported as one hunk that removes every old line and adds every
+  new one, with `truncated` set. A change that large is a rewrite, and a full
+  replacement reads better than a thousand scattered hunks.
+- **Work budget**: the search also stops after 5 million steps (diagonals
+  visited plus lines compared) with the same truncated result. Only very
+  repetitive texts, such as thousands of identical lines around many small
+  changes, come near it.
+
+Measured on 256 KiB inputs with an optimized build on an M2 under load: a
+dozen scattered edits take about 1 ms, two unrelated files about 6 ms, and the
+most repetitive inputs tried about 25 to 35 ms, mostly spent building the
+truncated result's text. Unoptimized builds are several times slower.

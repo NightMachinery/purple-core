@@ -47,6 +47,16 @@ rules about data are far easier to prove outside a running app than inside one.
   parents of any version to publish. See
   [`docs/config-sync.md`](docs/config-sync.md) for the precedence, the head
   ordering, the parent rules and every refusal.
+- `purple/purple_config_diff.{h,cpp}` - compares two `settings.toml` texts
+  for the sync review. `DiffConfigText` returns unified-diff hunks with 1-based
+  line numbers and three lines of context by default, merging hunks whose
+  context overlaps. Lines split on LF; a trailing CR and a missing final
+  newline are not changes by themselves, and invalid UTF-8 is decoded
+  leniently for display only. It runs Myers' linear-space algorithm, so memory
+  stays linear; when the edit distance exceeds `kConfigDiffEditLimit` (1,000
+  lines) or the search exceeds a fixed work budget, it reports one hunk that
+  replaces everything and sets `truncated`. See
+  [`docs/config-sync.md`](docs/config-sync.md).
 - `purple/purple_sync_json.{h,cpp}` - validates and canonicalizes JSON for
   account-backed sync. It preserves every member, including unknown members,
   sorts object names by raw UTF-16 code units, emits compact UTF-8 with RFC 8785

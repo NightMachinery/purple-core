@@ -14,6 +14,7 @@ option) any later version.
 
 #include "purple/purple_engine.h"
 #include "purple/purple_config_sync.h"
+#include "purple/purple_config_diff.h"
 #include "purple/purple_config_payload.h"
 #include "purple/purple_passcode.h"
 #include "purple/purple_screentime.h"
@@ -27,6 +28,7 @@ option) any later version.
 #include "purple/purple_sync_status.h"
 
 #include <QtCore/QDateTime>
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
@@ -9088,6 +9090,304 @@ void TestConfigChoice() {
 	CHECK(!Purple::PlanConfigChoice(limitState, limitLocal, std::nullopt));
 }
 
+[[nodiscard]] QString Unified(const Purple::ConfigTextDiff &diff) {
+	auto result = QString();
+	for (const auto &hunk : diff.hunks) {
+		result += u"@@ -%1,%2 +%3,%4 @@\n"_q
+			.arg(hunk.oldStart)
+			.arg(hunk.oldCount)
+			.arg(hunk.newStart)
+			.arg(hunk.newCount);
+		for (const auto &line : hunk.lines) {
+			switch (line.kind) {
+			case Purple::ConfigDiffLineKind::Context: result += u' '; break;
+			case Purple::ConfigDiffLineKind::Removed: result += u'-'; break;
+			case Purple::ConfigDiffLineKind::Added: result += u'+'; break;
+			}
+			result += line.text + u'\n';
+		}
+	}
+	return result;
+}
+
+[[nodiscard]] bool NumberedConsistently(const Purple::ConfigTextDiff &diff) {
+	for (const auto &hunk : diff.hunks) {
+		auto oldLine = hunk.oldCount ? hunk.oldStart : hunk.oldStart + 1;
+		auto newLine = hunk.newCount ? hunk.newStart : hunk.newStart + 1;
+		auto oldCount = 0;
+		auto newCount = 0;
+		for (const auto &line : hunk.lines) {
+			const auto context = (line.kind
+				== Purple::ConfigDiffLineKind::Context);
+			const auto removed = (line.kind
+				== Purple::ConfigDiffLineKind::Removed);
+			const auto added = (line.kind
+				== Purple::ConfigDiffLineKind::Added);
+			if (context || removed) {
+				if (line.oldLine != oldLine++) {
+					return false;
+				}
+				++oldCount;
+			} else if (line.oldLine != 0) {
+				return false;
+			}
+			if (context || added) {
+				if (line.newLine != newLine++) {
+					return false;
+				}
+				++newCount;
+			} else if (line.newLine != 0) {
+				return false;
+			}
+		}
+		if (oldCount != hunk.oldCount || newCount != hunk.newCount) {
+			return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] int LongestCommon(const QStringList &a, const QStringList &b) {
+	auto table = std::vector<std::vector<int>>(
+		a.size() + 1,
+		std::vector<int>(b.size() + 1, 0));
+	for (auto i = 1; i <= a.size(); ++i) {
+		for (auto j = 1; j <= b.size(); ++j) {
+			table[i][j] = (a[i - 1] == b[j - 1])
+				? (table[i - 1][j - 1] + 1)
+				: std::max(table[i - 1][j], table[i][j - 1]);
+		}
+	}
+	return table[a.size()][b.size()];
+}
+
+void TestConfigDiff() {
+	Begin("config diff");
+	using Kind = Purple::ConfigDiffLineKind;
+	const auto diff = [](const char *before, const char *after,
+			int context = 3) {
+		return Purple::DiffConfigText(before, after, context);
+	};
+
+	const auto same = diff("a\nb\n", "a\nb\n");
+	CHECK(same.identical);
+	CHECK(same.hunks.empty());
+	CHECK_EQ(same.added, 0);
+	CHECK_EQ(same.removed, 0);
+	CHECK(!same.truncated);
+	CHECK(diff("", "").identical);
+	CHECK(diff("a\r\nb\r\n", "a\nb").identical);
+	CHECK(diff("a\nb", "a\nb\n").identical);
+	CHECK(!diff("a\n", "a\n\n").identical);
+	CHECK(!diff("a\n", "a \n").identical);
+
+	const auto inserted = diff("a\nb\nc\n", "a\nb\nX\nc\n");
+	CHECK(!inserted.identical);
+	CHECK_EQ(inserted.added, 1);
+	CHECK_EQ(inserted.removed, 0);
+	CHECK_EQ(Unified(inserted),
+		u"@@ -1,3 +1,4 @@\n a\n b\n+X\n c\n"_q);
+	CHECK(NumberedConsistently(inserted));
+	CHECK(inserted.hunks.front().lines[2].kind == Kind::Added);
+	CHECK_EQ(inserted.hunks.front().lines[2].oldLine, 0);
+	CHECK_EQ(inserted.hunks.front().lines[2].newLine, 3);
+	CHECK_EQ(inserted.hunks.front().lines[3].oldLine, 3);
+	CHECK_EQ(inserted.hunks.front().lines[3].newLine, 4);
+	CHECK_EQ(Unified(diff("", "a\nb\n")), u"@@ -0,0 +1,2 @@\n+a\n+b\n"_q);
+	CHECK_EQ(Unified(diff("a\n", "")), u"@@ -1,1 +0,0 @@\n-a\n"_q);
+	const auto deleted = diff("a\nb\nc\nd\n", "a\nc\nd\n");
+	CHECK_EQ(deleted.removed, 1);
+	CHECK_EQ(deleted.added, 0);
+	CHECK_EQ(Unified(deleted), u"@@ -1,4 +1,3 @@\n a\n-b\n c\n d\n"_q);
+	CHECK(NumberedConsistently(deleted));
+	CHECK_EQ(Unified(diff("a\nb\nc\n", "a\nB\nc\n")),
+		u"@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"_q);
+	CHECK_EQ(Unified(diff("a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\n")),
+		u"@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"_q);
+	CHECK_EQ(Unified(diff("a\r\nb\r\n", "a\nb\nc")),
+		u"@@ -1,2 +1,3 @@\n a\n b\n+c\n"_q);
+	CHECK_EQ(Unified(diff("a\nb", "a\nc")), u"@@ -1,2 +1,2 @@\n a\n-b\n+c\n"_q);
+	CHECK_EQ(Unified(diff("a\nb\n", "b\na\n", 0)),
+		u"@@ -1,1 +0,0 @@\n-a\n@@ -2,0 +2,1 @@\n+a\n"_q);
+	CHECK_EQ(Unified(diff("a\nb\nc\n", "a\nB\nc\n", -5)),
+		u"@@ -2,1 +2,1 @@\n-b\n+B\n"_q);
+	const auto lenient = diff("\xff\xfe ok\n", "ok\n");
+	CHECK_EQ(lenient.hunks.front().lines.front().text,
+		QString(u"�� ok"_q));
+
+	auto twenty = QByteArray();
+	for (auto index = 1; index <= 20; ++index) {
+		twenty += "line " + QByteArray::number(index) + "\n";
+	}
+	auto near = twenty;
+	near.replace("line 5\n", "five\n").replace("line 11\n", "eleven\n");
+	const auto merged = Purple::DiffConfigText(twenty, near);
+	CHECK_EQ(merged.hunks.size(), 1);
+	CHECK_EQ(merged.hunks.front().oldStart, 2);
+	CHECK_EQ(merged.hunks.front().oldCount, 13);
+	CHECK_EQ(merged.hunks.front().newStart, 2);
+	CHECK_EQ(merged.hunks.front().newCount, 13);
+	CHECK(NumberedConsistently(merged));
+	auto far = twenty;
+	far.replace("line 5\n", "five\n").replace("line 13\n", "thirteen\n");
+	const auto split = Purple::DiffConfigText(twenty, far);
+	CHECK_EQ(split.hunks.size(), 2);
+	CHECK_EQ(split.hunks[0].oldStart, 2);
+	CHECK_EQ(split.hunks[0].oldCount, 7);
+	CHECK_EQ(split.hunks[1].oldStart, 10);
+	CHECK_EQ(split.hunks[1].oldCount, 7);
+	CHECK_EQ(split.added, 2);
+	CHECK_EQ(split.removed, 2);
+	CHECK(NumberedConsistently(split));
+	auto edges = twenty;
+	edges.replace("line 1\n", "one\n").replace("line 20\n", "twenty\n");
+	const auto atEdges = Purple::DiffConfigText(twenty, edges, 2);
+	CHECK_EQ(atEdges.hunks.size(), 2);
+	CHECK_EQ(atEdges.hunks[0].oldStart, 1);
+	CHECK_EQ(atEdges.hunks[0].oldCount, 3);
+	CHECK_EQ(atEdges.hunks[1].oldStart, 18);
+	CHECK_EQ(atEdges.hunks[1].oldCount, 3);
+
+	auto seed = uint32_t(12345);
+	const auto next = [&] {
+		seed = seed * 1103515245u + 12345u;
+		return int((seed >> 16) & 0x7fff);
+	};
+	auto minimal = true;
+	auto reconstructed = true;
+	for (auto round = 0; round != 300; ++round) {
+		auto a = QStringList();
+		auto b = QStringList();
+		const auto alphabet = 2 + next() % 3;
+		for (auto count = next() % 14; count != 0; --count) {
+			a.push_back(QString(QChar(u'a' + next() % alphabet)));
+		}
+		for (auto count = next() % 14; count != 0; --count) {
+			b.push_back(QString(QChar(u'a' + next() % alphabet)));
+		}
+		const auto text = [](const QStringList &lines) {
+			return lines.isEmpty()
+				? QByteArray()
+				: (lines.join(u'\n') + u'\n').toUtf8();
+		};
+		const auto result = Purple::DiffConfigText(
+			text(a),
+			text(b),
+			1000);
+		auto oldSide = QStringList();
+		auto newSide = QStringList();
+		for (const auto &hunk : result.hunks) {
+			for (const auto &line : hunk.lines) {
+				if (line.kind != Kind::Added) {
+					oldSide.push_back(line.text);
+				}
+				if (line.kind != Kind::Removed) {
+					newSide.push_back(line.text);
+				}
+			}
+		}
+		if (result.identical) {
+			oldSide = a;
+			newSide = b;
+		}
+		reconstructed = reconstructed
+			&& (oldSide == a)
+			&& (newSide == b)
+			&& (result.identical == (a == b))
+			&& NumberedConsistently(result);
+		minimal = minimal
+			&& (result.added + result.removed
+				== a.size() + b.size() - 2 * LongestCommon(a, b));
+	}
+	CHECK(reconstructed);
+	CHECK(minimal);
+
+	auto large = QByteArray();
+	auto index = 0;
+	while (large.size() < 256 * 1024 - 64) {
+		large += "key_" + QByteArray::number(index++)
+			+ " = \"value for this line\"\n";
+	}
+	auto edited = large;
+	auto changes = 0;
+	for (auto line = 250; line < index; line += 500) {
+		const auto from = "key_" + QByteArray::number(line) + " = ";
+		const auto to = "key_" + QByteArray::number(line) + "_edited = ";
+		edited.replace(from, to);
+		++changes;
+	}
+	edited.insert(0, "# a new first line\n");
+	auto timer = QElapsedTimer();
+	timer.start();
+	const auto big = Purple::DiffConfigText(large, edited);
+	const auto elapsed = timer.elapsed();
+	CHECK(large.size() <= 256 * 1024);
+	CHECK(!big.truncated);
+	CHECK_EQ(big.removed, changes);
+	CHECK_EQ(big.added, changes + 1);
+	CHECK_EQ(big.hunks.size(), changes + 1);
+	CHECK(NumberedConsistently(big));
+	CHECK(elapsed < 2000);
+
+	auto unrelated = QByteArray();
+	index = 0;
+	while (unrelated.size() < 256 * 1024 - 64) {
+		unrelated += "other_" + QByteArray::number(index++) + " = 1\n";
+	}
+	timer.start();
+	const auto replaced = Purple::DiffConfigText(large, unrelated);
+	CHECK(timer.elapsed() < 2000);
+	CHECK(replaced.truncated);
+	CHECK_EQ(replaced.hunks.size(), 1);
+	CHECK_EQ(replaced.removed, large.count('\n'));
+	CHECK_EQ(replaced.added, unrelated.count('\n'));
+
+	auto repetitive = QByteArray();
+	auto shifted = QByteArray();
+	for (auto block = 0; block != 2048; ++block) {
+		repetitive += QByteArray("x\n").repeated(62) + "y\n";
+		shifted += QByteArray("x\n").repeated(62) + "z\n";
+	}
+	timer.start();
+	const auto pathological = Purple::DiffConfigText(repetitive, shifted);
+	CHECK(timer.elapsed() < 2000);
+	CHECK(pathological.truncated);
+
+	const auto lines = [](const char *prefix, int count) {
+		auto result = QByteArray();
+		for (auto index = 0; index != count; ++index) {
+			result += prefix + QByteArray::number(index) + "\n";
+		}
+		return result;
+	};
+	const auto atLimit = Purple::DiffConfigText(
+		lines("old ", Purple::kConfigDiffEditLimit / 2),
+		lines("new ", Purple::kConfigDiffEditLimit / 2));
+	CHECK(!atLimit.truncated);
+	CHECK_EQ(atLimit.removed + atLimit.added, Purple::kConfigDiffEditLimit);
+	const auto overLimit = Purple::DiffConfigText(
+		lines("old ", Purple::kConfigDiffEditLimit / 2 + 1),
+		lines("new ", Purple::kConfigDiffEditLimit / 2));
+	CHECK(overLimit.truncated);
+	CHECK(!overLimit.identical);
+	CHECK_EQ(overLimit.hunks.size(), 1);
+	CHECK_EQ(overLimit.removed, Purple::kConfigDiffEditLimit / 2 + 1);
+	CHECK_EQ(overLimit.added, Purple::kConfigDiffEditLimit / 2);
+	CHECK_EQ(overLimit.hunks.front().oldStart, 1);
+	CHECK_EQ(overLimit.hunks.front().oldCount, overLimit.removed);
+	CHECK_EQ(overLimit.hunks.front().newStart, 1);
+	CHECK_EQ(overLimit.hunks.front().newCount, overLimit.added);
+	CHECK(overLimit.hunks.front().lines.front().kind == Kind::Removed);
+	CHECK(overLimit.hunks.front().lines.back().kind == Kind::Added);
+	CHECK(NumberedConsistently(overLimit));
+	const auto wideButClose = Purple::DiffConfigText(
+		lines("same ", 5000) + lines("old ", 450),
+		lines("same ", 5000) + lines("new ", 450) + lines("same ", 10));
+	CHECK(!wideButClose.truncated);
+	CHECK_EQ(wideButClose.removed, 450);
+	CHECK_EQ(wideButClose.added, 460);
+}
+
 void TestSyncJson() {
 	Begin("sync json");
 	const auto canonical = [](const QByteArray &input, const QByteArray &expected) {
@@ -11398,6 +11698,7 @@ int main() {
 	TestConfigSyncPlanner();
 	TestConfigAdoption();
 	TestConfigChoice();
+	TestConfigDiff();
 	TestPersianKeyboardToEnglish();
 	TestLists();
 	TestKinds();
