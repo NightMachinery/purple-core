@@ -65,6 +65,13 @@ rules about data are far easier to prove outside a running app than inside one.
   Arbitrary non-UTF-8 settings bytes cannot be represented by a JSON string.
   Without the parent records, inspection cannot prove that lineage is the
   complete union of their histories; it verifies membership and structure.
+  `BuildConfigRecord` creates the canonical config envelope from exact UTF-8
+  settings bytes, full parent versions, writer metadata, a sequence and a
+  timestamp. It rejects malformed UTF-8 and TOML, validates the complete
+  record by inspecting its own output, and leaves newer settings schemas
+  read-only for older clients. Size, identity, metadata and number failures
+  carry the underlying envelope error. It does not reserve or persist a
+  sequence.
 - `purple/purple_sync_local_state.{h,cpp}` - validates and writes versioned,
   device-local `sync/state.json` data: install, creation-device and space IDs;
   per-stream issue, pending and confirmation counters and the hash for the

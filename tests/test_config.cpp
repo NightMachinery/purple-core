@@ -33,6 +33,7 @@ option) any later version.
 
 #include <cstdio>
 #include <algorithm>
+#include <limits>
 #include <type_traits>
 #include <utility>
 
@@ -8926,6 +8927,130 @@ void TestConfigPayload() {
 		== Purple::ConfigPayloadError::InvalidEnvelope);
 }
 
+void TestConfigRecordBuilder() {
+	Begin("config record builder");
+	const auto text = QByteArray("version = 1\nname = 'caf\xc3\xa9'\n");
+	const auto space = u"sp-"_q + QString(26, u'a');
+	const auto install = u"in-"_q + QString(26, u'a');
+	auto input = Purple::ConfigRecordBuildInput();
+	input.text = text;
+	input.space = space;
+	input.install = install;
+	input.device = u"phone"_q;
+	input.platform = u"android"_q;
+	input.app = u"Purple"_q;
+	input.seq = 9007199254740991ULL;
+	input.at = 9007199254740991ULL;
+	const auto built = Purple::BuildConfigRecord(input);
+	CHECK(bool(built));
+	CHECK(built.status == Purple::ConfigRecordBuildStatus::Valid);
+	CHECK(built.error == Purple::ConfigRecordBuildError::None);
+	CHECK(built.version.key == Purple::MakeConfigVersion(text, {})->key);
+	CHECK(built.canonical.contains("caf\xc3\xa9"));
+	const auto parsed = Purple::ParseSyncEnvelope(built.canonical);
+	CHECK(bool(parsed));
+	const auto inspected = Purple::InspectConfigPayload(parsed);
+	CHECK(bool(inspected));
+	CHECK(inspected.text == text);
+	CHECK(inspected.version.key == built.version.key);
+	CHECK_EQ(inspected.writerWarnings, uint64_t(built.localWarnings.size()));
+	CHECK(parsed.envelope.document.value(u"payload_sha256"_q).toString()
+		== built.payloadHash);
+	CHECK(parsed.envelope.document.value(u"seq"_q).toDouble()
+		== 9007199254740991.0);
+	CHECK(Purple::SerializeSyncEnvelope(parsed.envelope).canonical
+		== built.canonical);
+
+	input.seq = 1;
+	input.at = 0;
+	input.text = "version = 1\n[premium]\nenabled_p = 'yes'\n";
+	const auto warned = Purple::BuildConfigRecord(input);
+	CHECK(bool(warned));
+	CHECK(!warned.localWarnings.empty());
+	CHECK_EQ(Purple::InspectConfigPayload(
+		Purple::ParseSyncEnvelope(warned.canonical)).writerWarnings,
+		uint64_t(warned.localWarnings.size()));
+	input.text = "version = 1\nname = 'child'\n";
+	input.parents = { built.version };
+	const auto child = Purple::BuildConfigRecord(input);
+	CHECK(bool(child));
+	CHECK(child.version.parents == std::vector<QString>{ built.version.key });
+	CHECK(child.version.lineage == std::vector<QString>{ built.version.key });
+	input.parents = { built.version, child.version };
+	const auto merged = Purple::BuildConfigRecord(input);
+	CHECK(bool(merged));
+	CHECK_EQ(Purple::ParseConfigVersionKey(merged.version.key)->generation,
+		uint64_t(3));
+	CHECK_EQ(merged.version.parents.size(), size_t(2));
+	input.parents = { child.version };
+	input.text = text;
+	const auto reverted = Purple::BuildConfigRecord(input);
+	CHECK(bool(reverted));
+	CHECK(reverted.version.key != built.version.key);
+	CHECK(Purple::ParseConfigVersionKey(reverted.version.key)->fingerprint
+		== Purple::ParseConfigVersionKey(built.version.key)->fingerprint);
+
+	input = Purple::ConfigRecordBuildInput();
+	input.text = text;
+	input.space = space;
+	input.install = install;
+	input.device = u"phone"_q;
+	input.platform = u"android"_q;
+	input.app = u"Purple"_q;
+	input.seq = 1;
+	input.text = QByteArray("version = 1\nname = '") + '\xc0' + "'\n";
+	const auto malformedUtf8 = Purple::BuildConfigRecord(input);
+	CHECK(malformedUtf8.error == Purple::ConfigRecordBuildError::InvalidUtf8);
+	CHECK(malformedUtf8.canonical.isEmpty());
+	input.text = "version = [\n";
+	const auto syntax = Purple::BuildConfigRecord(input);
+	CHECK(syntax.error == Purple::ConfigRecordBuildError::TomlSyntax);
+	CHECK(!syntax.tomlError.isEmpty());
+	input.text = "version = 2\n";
+	const auto newer = Purple::BuildConfigRecord(input);
+	CHECK(newer.status == Purple::ConfigRecordBuildStatus::NewerSchema);
+	CHECK(newer.error == Purple::ConfigRecordBuildError::None);
+	CHECK(newer.canonical.isEmpty());
+	input.text = text;
+	input.parents = { Purple::ConfigVersion{ u"bad"_q, {}, {} } };
+	CHECK(Purple::BuildConfigRecord(input).error
+		== Purple::ConfigRecordBuildError::InvalidParents);
+	input.parents.clear();
+	input.seq = 0;
+	const auto zeroSeq = Purple::BuildConfigRecord(input);
+	CHECK(zeroSeq.error == Purple::ConfigRecordBuildError::Envelope);
+	CHECK(zeroSeq.envelopeError == Purple::SyncEnvelopeError::FieldType);
+	input.seq = 9007199254740992ULL;
+	const auto largeSeq = Purple::BuildConfigRecord(input);
+	CHECK(largeSeq.error == Purple::ConfigRecordBuildError::Envelope);
+	CHECK(largeSeq.envelopeError == Purple::SyncEnvelopeError::FieldType);
+	input.seq = std::numeric_limits<uint64_t>::max();
+	const auto extremeSeq = Purple::BuildConfigRecord(input);
+	CHECK(extremeSeq.error == Purple::ConfigRecordBuildError::Envelope);
+	CHECK(extremeSeq.envelopeError == Purple::SyncEnvelopeError::FieldType);
+	input.seq = 1;
+	input.at = 9007199254740992ULL;
+	CHECK(Purple::BuildConfigRecord(input).envelopeError
+		== Purple::SyncEnvelopeError::FieldType);
+	input.at = std::numeric_limits<uint64_t>::max();
+	const auto extremeTime = Purple::BuildConfigRecord(input);
+	CHECK(extremeTime.error == Purple::ConfigRecordBuildError::Envelope);
+	CHECK(extremeTime.envelopeError == Purple::SyncEnvelopeError::FieldType);
+	input.at = 0;
+	input.device.clear();
+	CHECK(Purple::BuildConfigRecord(input).envelopeError
+		== Purple::SyncEnvelopeError::InvalidValue);
+	input.device = u"phone"_q;
+	input.install = u"bad"_q;
+	CHECK(Purple::BuildConfigRecord(input).envelopeError
+		== Purple::SyncEnvelopeError::InvalidId);
+	input.install = install;
+	input.text = QByteArray("version = 1\nname = '")
+		+ QByteArray(256 * 1024, 'x') + "'\n";
+	CHECK(Purple::BuildConfigRecord(input).envelopeError
+		== Purple::SyncEnvelopeError::SizeLimit);
+}
+
 void TestSyncLocalState() {
 	Begin("sync local state");
 	const auto install = u"in-"_q + QString(26, u'a');
@@ -9457,6 +9582,7 @@ int main() {
 	TestSyncJson();
 	TestSyncEnvelope();
 	TestConfigPayload();
+	TestConfigRecordBuilder();
 	TestSyncLocalState();
 	TestSyncSimulation();
 	TestConfigVersions();

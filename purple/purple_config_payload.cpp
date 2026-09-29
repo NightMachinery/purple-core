@@ -21,6 +21,7 @@ namespace Purple {
 namespace {
 
 constexpr auto kMaximumSafeInteger = 9007199254740991.0;
+constexpr auto kMaximumSafeIntegerUnsigned = uint64_t(9007199254740991ULL);
 
 [[nodiscard]] bool IntegerInRange(
 		const QJsonValue &value,
@@ -172,6 +173,96 @@ ConfigPayloadInspection InspectConfigPayload(
 	result.status = (result.schema > kSettingsVersion)
 		? ConfigPayloadStatus::NewerSchema
 		: ConfigPayloadStatus::Valid;
+	return result;
+}
+
+ConfigRecordBuildResult BuildConfigRecord(
+		const ConfigRecordBuildInput &input) {
+	auto result = ConfigRecordBuildResult();
+	const auto text = QString::fromUtf8(input.text);
+	if (text.toUtf8() != input.text) {
+		result.error = ConfigRecordBuildError::InvalidUtf8;
+		return result;
+	}
+	const auto parsedSettings = ParseSettings(text, u"settings.toml"_q);
+	result.localWarnings = parsedSettings.warnings;
+	if (!parsedSettings.ok()) {
+		result.error = ConfigRecordBuildError::TomlSyntax;
+		result.tomlError = parsedSettings.error;
+		return result;
+	}
+	if (parsedSettings.settings.version > kSettingsVersion) {
+		result.status = ConfigRecordBuildStatus::NewerSchema;
+		return result;
+	}
+	const auto version = MakeConfigVersion(input.text, input.parents);
+	if (!version) {
+		result.error = ConfigRecordBuildError::InvalidParents;
+		return result;
+	}
+	result.version = *version;
+	if (input.seq > kMaximumSafeIntegerUnsigned
+		|| input.at > kMaximumSafeIntegerUnsigned) {
+		result.error = ConfigRecordBuildError::Envelope;
+		result.envelopeError = SyncEnvelopeError::FieldType;
+		return result;
+	}
+	auto parents = QJsonArray();
+	auto lineage = QJsonArray();
+	for (const auto &key : version->parents) {
+		parents.append(key);
+	}
+	for (const auto &key : version->lineage) {
+		lineage.append(key);
+	}
+	const auto document = QJsonObject{
+		{ u"purple_sync"_q, 1 },
+		{ u"stream"_q, u"config"_q },
+		{ u"space"_q, input.space },
+		{ u"writer"_q, QJsonObject{
+			{ u"install"_q, input.install },
+			{ u"device"_q, input.device },
+			{ u"platform"_q, input.platform },
+			{ u"app"_q, input.app },
+		} },
+		{ u"seq"_q, QJsonValue(qint64(input.seq)) },
+		{ u"at"_q, QJsonValue(qint64(input.at)) },
+		{ u"payload"_q, QJsonObject{
+			{ u"schema"_q, parsedSettings.settings.version },
+			{ u"key"_q, version->key },
+			{ u"parents"_q, parents },
+			{ u"lineage"_q, lineage },
+			{ u"warnings"_q, QJsonValue(qint64(result.localWarnings.size())) },
+			{ u"text"_q, text },
+		} },
+	};
+	const auto written = SerializeSyncEnvelope(SyncEnvelope{ document });
+	if (!written) {
+		result.error = ConfigRecordBuildError::Envelope;
+		result.envelopeError = written.error;
+		return result;
+	}
+	const auto parsed = ParseSyncEnvelope(written.canonical);
+	if (!parsed) {
+		result.error = ConfigRecordBuildError::SelfInspection;
+		result.envelopeError = parsed.error;
+		return result;
+	}
+	const auto inspected = InspectConfigPayload(parsed);
+	if (inspected.status != ConfigPayloadStatus::Valid
+		|| inspected.version.key != version->key
+		|| inspected.version.parents != version->parents
+		|| inspected.version.lineage != version->lineage
+		|| inspected.text != input.text
+		|| inspected.writerWarnings != result.localWarnings.size()) {
+		result.error = ConfigRecordBuildError::SelfInspection;
+		result.payloadError = inspected.error;
+		return result;
+	}
+	result.status = ConfigRecordBuildStatus::Valid;
+	result.canonical = written.canonical;
+	result.payloadHash = parsed.envelope.document
+		.value(u"payload_sha256"_q).toString();
 	return result;
 }
 

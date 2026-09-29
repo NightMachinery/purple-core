@@ -52,7 +52,52 @@ struct ConfigPayloadInspection {
 	}
 };
 
+struct ConfigRecordBuildInput {
+	QByteArray text;
+	std::vector<ConfigVersion> parents;
+	QString space;
+	QString install;
+	QString device;
+	QString platform;
+	QString app;
+	uint64_t seq = 0;
+	uint64_t at = 0;
+};
+
+enum class ConfigRecordBuildStatus {
+	Valid,
+	NewerSchema,
+	Invalid,
+};
+
+enum class ConfigRecordBuildError {
+	None,
+	InvalidUtf8,
+	TomlSyntax,
+	InvalidParents,
+	Envelope,
+	SelfInspection,
+};
+
+struct ConfigRecordBuildResult {
+	ConfigRecordBuildStatus status = ConfigRecordBuildStatus::Invalid;
+	ConfigRecordBuildError error = ConfigRecordBuildError::None;
+	SyncEnvelopeError envelopeError = SyncEnvelopeError::None;
+	ConfigPayloadError payloadError = ConfigPayloadError::None;
+	QByteArray canonical;
+	ConfigVersion version;
+	QString payloadHash;
+	std::vector<QString> localWarnings;
+	QString tomlError;
+
+	[[nodiscard]] explicit operator bool() const {
+		return status == ConfigRecordBuildStatus::Valid;
+	}
+};
+
 [[nodiscard]] ConfigPayloadInspection InspectConfigPayload(
 	const SyncEnvelopeParseResult &envelope);
+[[nodiscard]] ConfigRecordBuildResult BuildConfigRecord(
+	const ConfigRecordBuildInput &input);
 
 } // namespace Purple
