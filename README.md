@@ -41,9 +41,12 @@ rules about data are far easier to prove outside a running app than inside one.
   install and empty config data, so joining and daily use share one decision.
   `AdoptConfigHeads` records heads whose content equals the local file,
   replacing the base when its content differs and otherwise growing the
-  equivalent keys, and raises the seen sequences. See
+  equivalent keys, and raises the seen sequences. `PlanConfigChoice` maps
+  the user's choice for a verdict (apply the update, pick a remote version or
+  keep this device's text) to the file write, the heads to adopt and the
+  parents of any version to publish. See
   [`docs/config-sync.md`](docs/config-sync.md) for the precedence, the head
-  ordering and every refusal.
+  ordering, the parent rules and every refusal.
 - `purple/purple_sync_json.{h,cpp}` - validates and canonicalizes JSON for
   account-backed sync. It preserves every member, including unknown members,
   sorts object names by raw UTF-16 code units, emits compact UTF-8 with RFC 8785

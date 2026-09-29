@@ -108,4 +108,17 @@ struct ConfigSyncPlan {
 	const QString &localFp,
 	const std::vector<ConfigHead> &heads);
 
+struct ConfigChoicePlan {
+	bool writeRemote = false;
+	ConfigHead write;
+	std::vector<ConfigHead> adopt;
+	bool publish = false;
+	std::vector<ConfigVersion> parents;
+};
+
+[[nodiscard]] std::optional<ConfigChoicePlan> PlanConfigChoice(
+	const ConfigSyncState &state,
+	const ConfigSyncPlan &plan,
+	const std::optional<QString> &chosenRemoteKey);
+
 } // namespace Purple

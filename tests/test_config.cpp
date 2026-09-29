@@ -8874,6 +8874,220 @@ void TestConfigAdoption() {
 		head(revert, u"pc"_q, 11), head(b, u"phone"_q, 2) }));
 }
 
+void TestConfigChoice() {
+	Begin("config choice");
+	using Verdict = Purple::ConfigSyncVerdict;
+	const auto a = *Purple::MakeConfigVersion("A", {});
+	const auto b = *Purple::MakeConfigVersion("B", { a });
+	const auto c = *Purple::MakeConfigVersion("C", { a });
+	const auto stranger = *Purple::MakeConfigVersion("X", {});
+	const auto elsewhereA = *Purple::MakeConfigVersion(
+		"A",
+		{ *Purple::MakeConfigVersion("E", {}) });
+	const auto fpA = Purple::SettingsFingerprint("A");
+	const auto fpB = Purple::SettingsFingerprint("B");
+	const auto fpX = Purple::SettingsFingerprint("X");
+	const auto fpEdited = Purple::SettingsFingerprint("A edited");
+	const auto head = [](const Purple::ConfigVersion &version,
+			const QString &writer, uint64_t seq = 1) {
+		return Purple::ConfigHead{
+			u"space"_q, writer, seq, version.key, version.lineage };
+	};
+	const auto parentKeys = [](const Purple::ConfigChoicePlan &choice) {
+		auto result = std::vector<QString>();
+		for (const auto &parent : choice.parents) {
+			result.push_back(parent.key);
+		}
+		return result;
+	};
+	auto preview = Purple::ConfigSyncState();
+	preview.space = u"space"_q;
+	auto state = preview;
+	state.install = u"mine"_q;
+	state.base = a.key;
+	state.baseLineage = a.lineage;
+
+	const auto update = Purple::PlanConfigSync(fpA, state, {
+		head(b, u"pc"_q, 2), head(b, u"phone"_q, 4) });
+	CHECK(update.verdict == Verdict::UpdateReady);
+	const auto apply = Purple::PlanConfigChoice(state, update, b.key);
+	CHECK(apply.has_value());
+	CHECK(apply->writeRemote);
+	CHECK_EQ(apply->write.install, u"phone"_q);
+	CHECK(HeadInstalls(apply->adopt) == std::vector<QString>({
+		u"phone"_q, u"pc"_q }));
+	CHECK(!apply->publish);
+	CHECK(apply->parents.empty());
+	const auto applied = Purple::AdoptConfigHeads(state, fpB, apply->adopt);
+	CHECK(applied.has_value());
+	CHECK_EQ(applied->base, b.key);
+	CHECK(Purple::PlanConfigSync(fpB, *applied, {
+		head(b, u"pc"_q, 2), head(b, u"phone"_q, 4) }).verdict
+		== Verdict::UpToDate);
+	CHECK(!Purple::PlanConfigChoice(state, update, std::nullopt));
+	CHECK(!Purple::PlanConfigChoice(state, update, c.key));
+
+	const auto adopt = Purple::PlanConfigSync(fpA, state, {
+		head(elsewhereA, u"tv"_q, 3) });
+	CHECK(adopt.verdict == Verdict::Adopt);
+	const auto silent = Purple::PlanConfigChoice(state, adopt, std::nullopt);
+	CHECK(silent.has_value());
+	CHECK(!silent->writeRemote);
+	CHECK(!silent->publish);
+	CHECK(HeadKeys(silent->adopt) == std::vector<QString>({ elsewhereA.key }));
+	CHECK(!Purple::PlanConfigChoice(state, adopt, elsewhereA.key));
+
+	const auto local = Purple::PlanConfigSync(fpEdited, state, {});
+	CHECK(local.verdict == Verdict::LocalChanges);
+	const auto publish = Purple::PlanConfigChoice(state, local, std::nullopt);
+	CHECK(publish.has_value());
+	CHECK(publish->publish);
+	CHECK(!publish->writeRemote);
+	CHECK(publish->adopt.empty());
+	CHECK(parentKeys(*publish) == std::vector<QString>({ a.key }));
+	CHECK(publish->parents.front().parents.empty());
+	CHECK(publish->parents.front().lineage == a.lineage);
+	const auto next = Purple::MakeConfigVersion(
+		"A edited",
+		publish->parents);
+	CHECK(next.has_value());
+	CHECK_EQ(next->key, u"2."_q + fpEdited);
+	CHECK(!Purple::PlanConfigChoice(state, local, a.key));
+
+	auto joined = preview;
+	joined.install = u"mine"_q;
+	const auto empty = Purple::PlanConfigSync(fpA, joined, {});
+	CHECK(empty.verdict == Verdict::Empty);
+	const auto first = Purple::PlanConfigChoice(joined, empty, std::nullopt);
+	CHECK(first.has_value());
+	CHECK(first->publish);
+	CHECK(first->parents.empty());
+	CHECK(!Purple::PlanConfigChoice(joined, empty, a.key));
+
+	const auto join = Purple::PlanConfigSync(fpA, preview, {
+		head(stranger, u"pc"_q, 2), head(stranger, u"phone"_q, 5) });
+	CHECK(join.verdict == Verdict::Choose);
+	const auto takeRemote = Purple::PlanConfigChoice(
+		preview,
+		join,
+		stranger.key);
+	CHECK(takeRemote.has_value());
+	CHECK(takeRemote->writeRemote);
+	CHECK_EQ(takeRemote->write.install, u"phone"_q);
+	CHECK(HeadInstalls(takeRemote->adopt) == std::vector<QString>({
+		u"phone"_q, u"pc"_q }));
+	CHECK(!takeRemote->publish);
+	const auto joinedAfter = Purple::AdoptConfigHeads(
+		joined,
+		fpX,
+		takeRemote->adopt);
+	CHECK(joinedAfter.has_value());
+	CHECK_EQ(joinedAfter->base, stranger.key);
+	const auto keepJoin = Purple::PlanConfigChoice(
+		preview,
+		join,
+		std::nullopt);
+	CHECK(keepJoin.has_value());
+	CHECK(!keepJoin->writeRemote);
+	CHECK(keepJoin->publish);
+	CHECK(keepJoin->adopt.empty());
+	CHECK(parentKeys(*keepJoin) == std::vector<QString>({ stranger.key }));
+	CHECK(!Purple::PlanConfigChoice(preview, join, a.key));
+
+	const auto split = Purple::PlanConfigSync(fpA, preview, {
+		head(b, u"pc"_q, 3), head(c, u"phone"_q, 5) });
+	CHECK(split.verdict == Verdict::Conflict);
+	const auto resolve = Purple::PlanConfigChoice(preview, split, b.key);
+	CHECK(resolve.has_value());
+	CHECK(resolve->writeRemote);
+	CHECK_EQ(resolve->write.key, b.key);
+	CHECK(HeadKeys(resolve->adopt) == std::vector<QString>({ b.key }));
+	CHECK(resolve->publish);
+	CHECK(parentKeys(*resolve) == std::vector<QString>({ b.key, c.key }));
+	const auto resolution = Purple::MakeConfigVersion("B", resolve->parents);
+	CHECK(resolution.has_value());
+	CHECK(resolution->lineage == std::vector<QString>({
+		b.key, c.key, a.key }));
+	const auto keepSplit = Purple::PlanConfigChoice(
+		preview,
+		split,
+		std::nullopt);
+	CHECK(keepSplit.has_value());
+	CHECK(!keepSplit->writeRemote);
+	CHECK(keepSplit->publish);
+	CHECK(parentKeys(*keepSplit) == std::vector<QString>({ c.key, b.key }));
+
+	const auto three = Purple::PlanConfigSync(fpA, preview, {
+		head(b, u"pc"_q, 3), head(c, u"phone"_q, 5), head(stranger, u"tv"_q) });
+	CHECK(three.verdict == Verdict::Conflict);
+	CHECK_EQ(three.offered.size(), 3);
+	const auto keepThree = Purple::PlanConfigChoice(
+		preview,
+		three,
+		std::nullopt);
+	CHECK(parentKeys(*keepThree) == std::vector<QString>({ c.key, b.key }));
+	const auto takeStranger = Purple::PlanConfigChoice(
+		preview,
+		three,
+		stranger.key);
+	CHECK(parentKeys(*takeStranger) == std::vector<QString>({
+		stranger.key, c.key }));
+
+	const auto choose = Purple::PlanConfigSync(fpA, state, {
+		head(stranger, u"pc"_q), head(elsewhereA, u"tv"_q, 3) });
+	CHECK(choose.verdict == Verdict::Choose);
+	const auto keepMine = Purple::PlanConfigChoice(state, choose, std::nullopt);
+	CHECK(keepMine.has_value());
+	CHECK(HeadKeys(keepMine->adopt) == std::vector<QString>({ elsewhereA.key }));
+	CHECK(parentKeys(*keepMine) == std::vector<QString>({
+		stranger.key, a.key }));
+	CHECK(Purple::MakeConfigVersion("A", keepMine->parents).has_value());
+	const auto conflict = Purple::PlanConfigSync(fpEdited, state, {
+		head(c, u"pc"_q) });
+	CHECK(conflict.verdict == Verdict::Conflict);
+	const auto keepEdited = Purple::PlanConfigChoice(
+		state,
+		conflict,
+		std::nullopt);
+	CHECK(parentKeys(*keepEdited) == std::vector<QString>({ c.key }));
+	const auto takeC = Purple::PlanConfigChoice(state, conflict, c.key);
+	CHECK(takeC->writeRemote);
+	CHECK(!takeC->publish);
+	CHECK(HeadKeys(takeC->adopt) == std::vector<QString>({ c.key }));
+
+	auto pending = state;
+	pending.pending = b.key;
+	const auto waiting = Purple::PlanConfigSync(fpA, pending, {
+		head(c, u"pc"_q) });
+	CHECK(waiting.verdict == Verdict::Pending);
+	CHECK(!Purple::PlanConfigChoice(pending, waiting, std::nullopt));
+	CHECK(!Purple::PlanConfigChoice(pending, waiting, c.key));
+	const auto current = Purple::PlanConfigSync(fpA, state, {});
+	CHECK(current.verdict == Verdict::UpToDate);
+	CHECK(!Purple::PlanConfigChoice(state, current, std::nullopt));
+	auto broken = head(c, u"pc"_q);
+	broken.lineage = { u"garbage"_q };
+	const auto invalid = Purple::PlanConfigSync(fpA, state, { broken });
+	CHECK(invalid.verdict == Verdict::Invalid);
+	CHECK(!Purple::PlanConfigChoice(state, invalid, std::nullopt));
+	CHECK(!Purple::PlanConfigChoice(state, invalid, c.key));
+
+	const auto top = u"18446744073709551615."_q + fpX;
+	const auto exhausted = Purple::ConfigHead{
+		u"space"_q, u"pc"_q, 1, top, {} };
+	const auto atLimit = Purple::PlanConfigSync(fpA, preview, { exhausted });
+	CHECK(atLimit.verdict == Verdict::Choose);
+	CHECK(!Purple::PlanConfigChoice(preview, atLimit, std::nullopt));
+	const auto takeLimit = Purple::PlanConfigChoice(preview, atLimit, top);
+	CHECK(takeLimit.has_value());
+	CHECK(!takeLimit->publish);
+	auto limitState = joined;
+	limitState.base = top;
+	const auto limitLocal = Purple::PlanConfigSync(fpA, limitState, {});
+	CHECK(limitLocal.verdict == Verdict::LocalChanges);
+	CHECK(!Purple::PlanConfigChoice(limitState, limitLocal, std::nullopt));
+}
+
 void TestSyncJson() {
 	Begin("sync json");
 	const auto canonical = [](const QByteArray &input, const QByteArray &expected) {
@@ -11183,6 +11397,7 @@ int main() {
 	TestConfigClassification();
 	TestConfigSyncPlanner();
 	TestConfigAdoption();
+	TestConfigChoice();
 	TestPersianKeyboardToEnglish();
 	TestLists();
 	TestKinds();

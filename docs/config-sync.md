@@ -77,3 +77,39 @@ include the base, never repeat, are kept sorted by generation descending and
 then key ascending, and are cut to the 16 first in that order, the limit
 `ClassifyConfig` enforces. Each head's install gets a seen sequence of at least
 that head's sequence. Space, install and pending key are unchanged.
+
+## PlanConfigChoice
+
+`PlanConfigChoice(state, plan, chosenRemoteKey)` turns the user's choice in a
+review into the work the client performs. `chosenRemoteKey` names one offered
+head; `std::nullopt` means keep this device's text. The result says whether to
+write a head's text into the settings file (`writeRemote`, `write`), which
+heads to record afterwards with `AdoptConfigHeads` (`adopt`), and whether to
+publish (`publish`, `parents`). The client builds the published record from
+the current local text after any write, so publishing always means publishing
+the local text with these parents. A parent is `ConfigVersion{ key, {},
+lineage }` built from a head, or from the base and base lineage.
+
+- **UpdateReady**: the key must be the one offered head; keeping the local
+  text is not a choice here (the client offers Not now, which changes
+  nothing). Write that head, then adopt every head that is not `Stale` and
+  carries its content. Nothing is published.
+- **Adopt**: no key. Adopt `plan.same`. Nothing is written or published.
+- **LocalChanges**: no key. Publish with the base as the only parent.
+- **Empty**: no key. Publish with no parents.
+- **Choose or Conflict, remote key R** (one of the offered heads): write R and
+  adopt every head that is not `Stale` and carries R's content. When another
+  offered content remains, also publish, with R and the first offered head of
+  another content as parents, so the other devices see an ordinary update
+  instead of a lasting conflict. When R was the only offered content, nothing
+  is published.
+- **Choose or Conflict, keep local**: adopt `plan.same` (possibly none), then
+  publish with the first two offered heads as parents. When only one head is
+  offered, the base fills the second slot, unless the base is empty, is that
+  head, or already appears in that head's lineage.
+- **Invalid, Pending, UpToDate**: nothing to choose.
+
+A choice that does not fit the verdict returns nothing, and so does any
+parent set that `MakeConfigVersion` would reject (for example a parent at the
+largest generation), so the client never stages a record the core cannot
+build.

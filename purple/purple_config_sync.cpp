@@ -448,4 +448,108 @@ std::optional<ConfigSyncState> AdoptConfigHeads(
 	return result;
 }
 
+std::optional<ConfigChoicePlan> PlanConfigChoice(
+		const ConfigSyncState &state,
+		const ConfigSyncPlan &plan,
+		const std::optional<QString> &chosenRemoteKey) {
+	const auto parent = [](const ConfigHead &head) {
+		return ConfigVersion{ head.key, {}, head.lineage };
+	};
+	const auto carrying = [&](const QString &fp) {
+		auto result = HeadsOf(plan.classification, {
+			ConfigHeadKind::Same,
+			ConfigHeadKind::Ahead,
+			ConfigHeadKind::Concurrent,
+			ConfigHeadKind::Unrelated,
+		});
+		result.erase(std::remove_if(result.begin(), result.end(), [&](
+				const ConfigHead &head) {
+			return Fingerprint(head.key) != fp;
+		}), result.end());
+		return result;
+	};
+	auto result = ConfigChoicePlan();
+	switch (plan.verdict) {
+	case ConfigSyncVerdict::UpdateReady:
+		if (!chosenRemoteKey
+			|| plan.offered.empty()
+			|| *chosenRemoteKey != plan.offered.front().key) {
+			return std::nullopt;
+		}
+		result.writeRemote = true;
+		result.write = plan.offered.front();
+		result.adopt = carrying(Fingerprint(result.write.key));
+		break;
+	case ConfigSyncVerdict::Adopt:
+		if (chosenRemoteKey || plan.same.empty()) {
+			return std::nullopt;
+		}
+		result.adopt = plan.same;
+		break;
+	case ConfigSyncVerdict::LocalChanges:
+		if (chosenRemoteKey || state.base.isEmpty()) {
+			return std::nullopt;
+		}
+		result.publish = true;
+		result.parents.push_back(
+			ConfigVersion{ state.base, {}, state.baseLineage });
+		break;
+	case ConfigSyncVerdict::Empty:
+		if (chosenRemoteKey) {
+			return std::nullopt;
+		}
+		result.publish = true;
+		break;
+	case ConfigSyncVerdict::Choose:
+	case ConfigSyncVerdict::Conflict:
+		if (plan.offered.empty()) {
+			return std::nullopt;
+		} else if (chosenRemoteKey) {
+			const auto chosen = std::find_if(
+				plan.offered.begin(),
+				plan.offered.end(),
+				[&](const ConfigHead &head) {
+					return head.key == *chosenRemoteKey;
+				});
+			if (chosen == plan.offered.end()) {
+				return std::nullopt;
+			}
+			const auto fp = Fingerprint(chosen->key);
+			result.writeRemote = true;
+			result.write = *chosen;
+			result.adopt = carrying(fp);
+			const auto other = std::find_if(
+				plan.offered.begin(),
+				plan.offered.end(),
+				[&](const ConfigHead &head) {
+					return Fingerprint(head.key) != fp;
+				});
+			if (other != plan.offered.end()) {
+				result.publish = true;
+				result.parents = { parent(*chosen), parent(*other) };
+			}
+		} else {
+			const auto &first = plan.offered.front();
+			result.adopt = plan.same;
+			result.publish = true;
+			result.parents.push_back(parent(first));
+			if (plan.offered.size() > 1) {
+				result.parents.push_back(parent(plan.offered[1]));
+			} else if (!state.base.isEmpty()
+				&& state.base != first.key
+				&& !Has(first.lineage, state.base)) {
+				result.parents.push_back(
+					ConfigVersion{ state.base, {}, state.baseLineage });
+			}
+		}
+		break;
+	default:
+		return std::nullopt;
+	}
+	if (result.publish && !MakeConfigVersion({}, result.parents)) {
+		return std::nullopt;
+	}
+	return result;
+}
+
 } // namespace Purple
