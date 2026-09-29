@@ -617,6 +617,159 @@ SyncAccountBindingVerdict CheckSyncAccountBinding(
 		: SyncAccountBindingVerdict::Mismatch;
 }
 
+SyncPublishDecision PlanSyncPublish(
+		const SyncLocalState &state,
+		const QByteArray &accountPrefToken,
+		const QString &currentDevice,
+		SyncLocalStream stream,
+		const QString &desiredPayloadHash,
+		const SyncPublishPolicy &policy,
+		const SyncPublishObservations &observations) {
+	if ((stream != SyncLocalStream::Config
+			&& stream != SyncLocalStream::Library)
+		|| CheckSyncAccountBinding(state, accountPrefToken)
+			!= SyncAccountBindingVerdict::Bound
+		|| state.space.isEmpty()
+		|| currentDevice.isEmpty()
+		|| currentDevice != state.createdDevice
+		|| !policy.enabled
+		|| (stream == SyncLocalStream::Library
+			&& !policy.libraryPayloadValidated)) {
+		return { SyncPublishAction::Pause };
+	}
+	if (!observations.discoveryComplete
+		|| observations.ownRecord.kind
+			== OwnRecordObservationKind::Unresolved) {
+		return { SyncPublishAction::Wait };
+	}
+	if (CheckSyncClone(state, currentDevice, stream,
+			observations.ownRecord) != SyncCloneVerdict::NoClone) {
+		return { SyncPublishAction::Pause };
+	}
+	const auto &local = Select(state, stream);
+	const auto &own = observations.ownRecord;
+	if ((own.kind == OwnRecordObservationKind::Absent
+			&& local.confirmedSeq != 0)
+		|| (own.kind == OwnRecordObservationKind::Present
+			&& own.seq != local.confirmedSeq
+			&& own.seq != local.pendingSeq)
+		|| (own.kind == OwnRecordObservationKind::Present
+			&& local.confirmedSeq == 0
+			&& own.seq != local.pendingSeq)) {
+		return { SyncPublishAction::Pause };
+	}
+	if (observations.publishInFlight) {
+		return { SyncPublishAction::Wait };
+	}
+	if (local.pendingSeq != 0) {
+		if (!observations.stagedRecordMatches) {
+			return { SyncPublishAction::Pause };
+		}
+		const auto issued = std::find_if(
+			local.issuedRecords.begin(), local.issuedRecords.end(),
+			[&](const auto &entry) {
+				return entry.seq == local.pendingSeq;
+			});
+		if (issued == local.issuedRecords.end()
+			|| issued->recordHash != observations.stagedRecordHash) {
+			return { SyncPublishAction::Pause };
+		}
+		if (own.kind == OwnRecordObservationKind::Present
+			&& own.seq == local.confirmedSeq) {
+			const auto previous = std::find_if(
+				state.ownMessages.begin(), state.ownMessages.end(),
+				[&](const auto &message) {
+					return message.stream == stream
+						&& message.space == state.space
+						&& message.seq == own.seq
+						&& message.payloadHash == own.payloadHash;
+				});
+			if (previous == state.ownMessages.end()) {
+				return { SyncPublishAction::Pause };
+			}
+		}
+		if (own.kind == OwnRecordObservationKind::Present
+			&& own.seq == local.pendingSeq) {
+			return observations.ready
+				? SyncPublishDecision{ SyncPublishAction::Reconcile }
+				: SyncPublishDecision{ SyncPublishAction::Wait };
+		}
+		if (observations.attempt == SyncPublishAttempt::MayHaveReachedServer) {
+			return observations.ready
+				? SyncPublishDecision{ SyncPublishAction::Reconcile }
+				: SyncPublishDecision{ SyncPublishAction::Wait };
+		}
+		if (observations.attempt != SyncPublishAttempt::Unsent
+			&& observations.attempt
+				!= SyncPublishAttempt::ReconciledAbsent) {
+			return { SyncPublishAction::Pause };
+		}
+		if (!observations.ready) {
+			return { SyncPublishAction::Wait };
+		}
+	} else {
+		if (!ValidHash(desiredPayloadHash)) {
+			return { SyncPublishAction::Wait };
+		}
+		if (own.kind == OwnRecordObservationKind::Present) {
+			const auto confirmed = std::find_if(
+				state.ownMessages.begin(), state.ownMessages.end(),
+				[&](const auto &message) {
+					return message.stream == stream
+						&& message.space == state.space
+						&& message.seq == local.confirmedSeq
+						&& message.payloadHash == own.payloadHash;
+				});
+			if (confirmed == state.ownMessages.end()) {
+				return observations.ready
+					? SyncPublishDecision{ SyncPublishAction::Reconcile }
+					: SyncPublishDecision{ SyncPublishAction::Wait };
+			}
+		}
+		if (local.confirmedSeq == 0
+			|| desiredPayloadHash != local.ownHash) {
+			return observations.ready
+				? SyncPublishDecision{ SyncPublishAction::ReserveAndStage }
+				: SyncPublishDecision{ SyncPublishAction::Wait };
+		}
+		if (!observations.ready) {
+			return { SyncPublishAction::Wait };
+		}
+		for (const auto &message : state.ownMessages) {
+			if (message.stream != stream
+				|| message.seq >= local.confirmedSeq) {
+				continue;
+			}
+			return { SyncPublishAction::RetireCandidate,
+				message.messageId };
+		}
+		return { SyncPublishAction::Wait };
+	}
+	if (own.kind == OwnRecordObservationKind::Absent
+		|| observations.editRefused
+		|| !policy.editEnabled) {
+		return { SyncPublishAction::Post };
+	}
+	const auto head = std::find_if(
+		state.ownMessages.begin(), state.ownMessages.end(),
+		[&](const auto &message) {
+			return message.stream == stream
+				&& message.space == state.space
+				&& message.messageId == observations.ownHead.messageId
+				&& message.seq == local.confirmedSeq
+				&& message.payloadHash == own.payloadHash;
+		});
+	if (head == state.ownMessages.end()) {
+		return { SyncPublishAction::Reconcile };
+	}
+	if (!observations.ownHead.fresh) {
+		return { SyncPublishAction::Reconcile, head->messageId };
+	}
+	return (observations.ownHead.recordHash == head->recordHash)
+		? SyncPublishDecision{ SyncPublishAction::Edit, head->messageId }
+		: SyncPublishDecision{ SyncPublishAction::Pause };
+}
+
 SyncIssueResult AppendIssuedConfigRecord(
 		const SyncLocalState &state,
 		const QByteArray &canonicalRecord) {

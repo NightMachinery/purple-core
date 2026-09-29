@@ -10523,6 +10523,141 @@ void TestSyncStatus() {
 	check(facts, Status::ManuallyPaused, Tier::StatusOnly, Action::Resume);
 }
 
+void TestSyncPublishPlanner() {
+	Begin("sync publish planner");
+	using Action = Purple::SyncPublishAction;
+	using Attempt = Purple::SyncPublishAttempt;
+	using Stream = Purple::SyncLocalStream;
+	const auto hashA = QString(64, u'a');
+	const auto hashB = QString(64, u'b');
+	const auto recordA = QString(64, u'c');
+	const auto recordB = QString(64, u'd');
+	const auto token = QByteArray(32, 'e');
+	auto state = Purple::SyncLocalState();
+	state.install = u"in-"_q + QString(26, u'a');
+	state.createdDevice = u"device-1"_q;
+	state.space = u"sp-"_q + QString(26, u'a');
+	state.bindingToken = QString::fromLatin1(token);
+	auto policy = Purple::SyncPublishPolicy();
+	policy.enabled = true;
+	policy.editEnabled = true;
+	auto facts = Purple::SyncPublishObservations();
+	facts.discoveryComplete = true;
+	facts.ready = true;
+	facts.ownRecord.kind = Purple::OwnRecordObservationKind::Absent;
+	const auto plan = [&](const Purple::SyncLocalState &current,
+			Stream stream = Stream::Config) {
+		return Purple::PlanSyncPublish(current, token, u"device-1"_q,
+			stream, hashB, policy, facts);
+	};
+	CHECK(bool(Purple::SerializeSyncLocalState(state)));
+	CHECK(plan(state).action == Action::ReserveAndStage);
+	CHECK(Purple::PlanSyncPublish(state, {}, u"device-1"_q,
+		Stream::Config, hashB, policy, facts).action == Action::Pause);
+	CHECK(Purple::PlanSyncPublish(state, QByteArray(32, 'f'),
+		u"device-1"_q, Stream::Config, hashB, policy, facts).action
+		== Action::Pause);
+	CHECK(Purple::PlanSyncPublish(state, token, u"device-2"_q,
+		Stream::Config, hashB, policy, facts).action == Action::Pause);
+	facts.discoveryComplete = false;
+	CHECK(plan(state).action == Action::Wait);
+	facts.discoveryComplete = true;
+	facts.ownRecord.kind = Purple::OwnRecordObservationKind::Unresolved;
+	CHECK(plan(state).action == Action::Wait);
+	facts.ownRecord.kind = Purple::OwnRecordObservationKind::Absent;
+	facts.publishInFlight = true;
+	CHECK(plan(state).action == Action::Wait);
+	facts.publishInFlight = false;
+	CHECK(plan(state, Stream::Library).action == Action::Pause);
+	policy.libraryPayloadValidated = true;
+	CHECK(plan(state, Stream::Library).action == Action::ReserveAndStage);
+	policy.libraryPayloadValidated = false;
+
+	state.config.seq = 1;
+	state.config.confirmedSeq = 1;
+	state.config.ownHash = hashA;
+	facts.ownRecord = { Purple::OwnRecordObservationKind::Present,
+		1, hashA };
+	CHECK(bool(Purple::SerializeSyncLocalState(state)));
+	CHECK(plan(state).action == Action::Reconcile);
+	facts.ready = false;
+	CHECK(plan(state).action == Action::Wait);
+	facts.ready = true;
+	state.ownMessages.push_back({ state.space, Stream::Config, 10,
+		state.install, state.createdDevice, 1, hashA, recordA });
+	CHECK(bool(Purple::SerializeSyncLocalState(state)));
+	CHECK(plan(state).action == Action::ReserveAndStage);
+	facts.ownRecord.payloadHash = hashB;
+	CHECK(plan(state).action == Action::Pause);
+	facts.ownRecord.payloadHash = hashA;
+	facts.ownRecord.kind = Purple::OwnRecordObservationKind::Absent;
+	CHECK(plan(state).action == Action::Pause);
+	facts.ownRecord.kind = Purple::OwnRecordObservationKind::Present;
+	const auto reserved = Purple::ReserveSyncSeq(state, Stream::Config, hashB);
+	CHECK(bool(reserved));
+	auto pending = reserved.state;
+	pending.config.issuedRecords.push_back({ 2, recordB });
+	CHECK(bool(Purple::SerializeSyncLocalState(pending)));
+	facts.stagedRecordMatches = true;
+	facts.stagedRecordHash = recordB;
+	facts.attempt = Attempt::MayHaveReachedServer;
+	CHECK(plan(pending).action == Action::Reconcile);
+	facts.ready = false;
+	CHECK(plan(pending).action == Action::Wait);
+	facts.ready = true;
+	facts.attempt = Attempt::None;
+	CHECK(plan(pending).action == Action::Pause);
+	facts.attempt = Attempt::Unsent;
+	facts.stagedRecordHash = recordA;
+	CHECK(plan(pending).action == Action::Pause);
+	facts.stagedRecordHash = recordB;
+	facts.ownHead = { 10, recordA, false };
+	CHECK(plan(pending).action == Action::Reconcile);
+	facts.ownHead.fresh = true;
+	CHECK(plan(pending).action == Action::Edit);
+	CHECK_EQ(plan(pending).messageId, 10);
+	facts.ready = false;
+	CHECK(plan(pending).action == Action::Wait);
+	facts.ready = true;
+	facts.ownHead.recordHash = recordB;
+	CHECK(plan(pending).action == Action::Pause);
+	facts.ownHead.recordHash = recordA;
+	policy.editEnabled = false;
+	CHECK(plan(pending).action == Action::Post);
+	facts.ready = false;
+	CHECK(plan(pending).action == Action::Wait);
+	facts.ready = true;
+	policy.editEnabled = true;
+	facts.editRefused = true;
+	CHECK(plan(pending).action == Action::Post);
+	facts.editRefused = false;
+	facts.ownRecord = { Purple::OwnRecordObservationKind::Present,
+		2, hashB };
+	CHECK(plan(pending).action == Action::Reconcile);
+	facts.ownRecord.seq = 1;
+	facts.stagedRecordMatches = false;
+	CHECK(plan(pending).action == Action::Pause);
+	facts.ready = false;
+	CHECK(plan(pending).action == Action::Pause);
+	facts.ready = true;
+
+	state.config.seq = 2;
+	state.config.confirmedSeq = 2;
+	state.config.ownHash = hashB;
+	state.ownMessages.push_back({ state.space, Stream::Config, 11,
+		state.install, state.createdDevice, 2, hashB, recordB });
+	facts.ownRecord = { Purple::OwnRecordObservationKind::Present,
+		2, hashB };
+	CHECK(bool(Purple::SerializeSyncLocalState(state)));
+	CHECK(plan(state).action == Action::RetireCandidate);
+	CHECK_EQ(plan(state).messageId, 10);
+	facts.ready = false;
+	CHECK(plan(state).action == Action::Wait);
+	facts.ready = true;
+	CHECK(Purple::CheckOwnConfigMessageDeletion(state, 999, {}).error
+		== Purple::SyncOwnMessageError::NotFound);
+}
+
 } // namespace
 
 int main() {
@@ -10534,6 +10669,7 @@ int main() {
 	TestConfigPayload();
 	TestConfigRecordBuilder();
 	TestSyncLocalState();
+	TestSyncPublishPlanner();
 	TestSyncAccountBinding();
 	TestOwnMessageLedger();
 	TestIssuedRecordAdoption();

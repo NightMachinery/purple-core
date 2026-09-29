@@ -156,6 +156,32 @@ rules about data are far easier to prove outside a running app than inside one.
   unchanged across space moves and install-ID changes; neither it nor the
   device-local state stores a Telegram user ID.
 
+  `PlanSyncPublish` is a pure next-action decision for one install and stream.
+  The caller supplies a completed own-record discovery, current device and
+  account binding, desired payload hash, local policy, and verified read-backs.
+  `ready` means network work may proceed now; while false, the planner waits
+  before reconciling, sending, or offering a retirement candidate, but still
+  pauses on invalid local state and mismatched staged records.
+  It pauses for an invalid binding, clone signal, missing own head, or missing
+  staged record, and waits while discovery or another publish is in progress.
+  A pending attempt that may have reached the server returns `Reconcile` before
+  any resend. `ReserveAndStage` means to reserve a sequence, construct the
+  canonical envelope, and persist its staged bytes and issued-record hash
+  before asking the planner again. `Unsent` is only for a stage known never to
+  have been submitted; after an uncertain response or restart the caller must
+  use `MayHaveReachedServer` until an authoritative scan establishes absence.
+  `Edit` requires an enabled policy and a fresh exact own-head read-back whose
+  full-record hash matches the ledger. A refused edit leads to `Post` for that
+  attempt. A confirmed own head absent from the ledger needs reconciliation
+  before the next sequence is reserved. `RetireCandidate` names one older
+  ledger ID, but does not authorize
+  deletion. The caller must freshly fetch the exact canonical server record
+  and pass it through the stream's deletion check before deleting. No action
+  performs I/O or validates a
+  playlist payload. The library stream additionally requires the caller's
+  explicit `libraryPayloadValidated` gate, which must come from a separate
+  library payload validator before it is enabled.
+
 The platform publisher must build the complete envelope for the reserved
 sequence, atomically stage its bytes at
 `sync/pending/<stream>-<seq>.json`, durably persist the new state and hash,

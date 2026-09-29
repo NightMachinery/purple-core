@@ -222,6 +222,61 @@ enum class SyncOwnMessagePresence {
 	Absent,
 };
 
+enum class SyncPublishAction {
+	Pause,
+	Wait,
+	Reconcile,
+	ReserveAndStage,
+	Edit,
+	Post,
+	RetireCandidate,
+};
+
+enum class SyncPublishAttempt {
+	None,
+	Unsent,
+	MayHaveReachedServer,
+	ReconciledAbsent,
+};
+
+struct SyncPublishPolicy {
+	bool enabled = false;
+	bool editEnabled = false;
+	bool libraryPayloadValidated = false;
+};
+
+struct SyncPublishReadBack {
+	int32_t messageId = 0;
+	QString recordHash;
+	bool fresh = false;
+};
+
+struct SyncPublishObservations {
+	bool discoveryComplete = false;
+	bool ready = false;
+	bool publishInFlight = false;
+	bool stagedRecordMatches = false;
+	bool editRefused = false;
+	SyncPublishAttempt attempt = SyncPublishAttempt::None;
+	QString stagedRecordHash;
+	OwnRecordObservation ownRecord;
+	SyncPublishReadBack ownHead;
+};
+
+struct SyncPublishDecision {
+	SyncPublishAction action = SyncPublishAction::Pause;
+	int32_t messageId = 0;
+};
+
+[[nodiscard]] SyncPublishDecision PlanSyncPublish(
+	const SyncLocalState &state,
+	const QByteArray &accountPrefToken,
+	const QString &currentDevice,
+	SyncLocalStream stream,
+	const QString &desiredPayloadHash,
+	const SyncPublishPolicy &policy,
+	const SyncPublishObservations &observations);
+
 [[nodiscard]] SyncOwnMessageResult RecordConfirmedOwnConfigMessage(
 	const SyncLocalState &state,
 	int32_t messageId,
