@@ -22,6 +22,7 @@ option) any later version.
 #include "purple/purple_state.h"
 #include "purple/purple_sync_json.h"
 #include "purple/purple_sync_envelope.h"
+#include "purple/purple_sync_directory.h"
 #include "purple/purple_sync_local_state.h"
 #include "purple/purple_sync_status.h"
 
@@ -8651,6 +8652,126 @@ void TestTimeOrderedSyncSpaceIds() {
 	CHECK(Purple::IsSyncSpaceId(u"sp-"_q + QString(26, u'a')));
 }
 
+void TestSyncDirectory() {
+	Begin("sync directory");
+	const auto oldest = *Purple::FormatTimeOrderedSyncSpaceId(
+		1000, QByteArray(10, 'a'));
+	const auto newest = *Purple::FormatTimeOrderedSyncSpaceId(
+		2000, QByteArray(10, 'b'));
+	const auto deviceA = *Purple::FormatSyncInstallId(QByteArray(16, 'a'));
+	const auto deviceB = *Purple::FormatSyncInstallId(QByteArray(16, 'b'));
+	const auto hashA = QString(64, u'a');
+	const auto hashB = QString(64, u'b');
+	const auto make = [&](int64_t messageId, const QString &space,
+			const QString &stream, const QString &install, uint64_t seq,
+			const QString &hash = QString(),
+			Purple::SyncEnvelopeStatus status = Purple::SyncEnvelopeStatus::Valid) {
+		return Purple::SyncDirectoryCandidate{
+			messageId, uint64_t(messageId + 1000), 0, true, status,
+			Purple::SyncEnvelopeHeader{
+				space, stream, install, u"device"_q,
+				u"desktop"_q, u"Purple"_q, seq, 0 }, hash,
+			status == Purple::SyncEnvelopeStatus::Valid
+				&& stream == u"config"_q };
+	};
+	auto records = std::vector<Purple::SyncDirectoryCandidate>{
+		make(10, oldest, u"config"_q, deviceA, 1, hashA),
+		make(11, oldest, u"config"_q, deviceA, 3, hashA),
+		make(12, oldest, u"config"_q, deviceB, 2, hashB),
+		make(13, oldest, u"library"_q, deviceA, 5, hashA),
+		make(14, newest, u"config"_q, deviceB, 100, hashB),
+	};
+	const auto resolved = Purple::ResolveSyncDirectory(records, true);
+	CHECK(resolved.groups.size() == 4);
+	CHECK(resolved.selectedSpace == oldest);
+	CHECK(resolved.publishableSpace == oldest);
+	CHECK(!resolved.canCreateSpace);
+	CHECK(!resolved.unreadableCandidate);
+	const auto group = [&](const Purple::SyncDirectory &directory,
+			const QString &space, const QString &stream,
+			const QString &install) -> const Purple::SyncDirectoryGroup & {
+		for (const auto &entry : directory.groups) {
+			if (entry.space == space && entry.stream == stream
+				&& entry.install == install) {
+				return entry;
+			}
+		}
+		CHECK(false);
+		return directory.groups.front();
+	};
+	const auto &configA = group(resolved, oldest, u"config"_q, deviceA);
+	CHECK(configA.records.size() == 2);
+	CHECK(configA.headCandidates.size() == 1);
+	CHECK(configA.headCandidates.front().messageId == 11);
+	CHECK(configA.supportedHead);
+	CHECK(!group(resolved, oldest, u"library"_q, deviceA)
+		.supportedHead);
+	records.push_back(make(15, oldest, u"config"_q, deviceA, 3, hashA));
+	const auto duplicate = Purple::ResolveSyncDirectory(records, true);
+	const auto &duplicated = group(duplicate, oldest, u"config"_q, deviceA);
+	CHECK(duplicated.headCandidates.size() == 2);
+	CHECK(!duplicated.ambiguous);
+	CHECK(duplicated.supportedHead);
+	records.push_back(make(16, oldest, u"config"_q, deviceA, 3, hashB));
+	const auto clone = Purple::ResolveSyncDirectory(records, true);
+	const auto &cloned = group(clone, oldest, u"config"_q, deviceA);
+	CHECK(cloned.headCandidates.size() == 3);
+	CHECK(cloned.ambiguous);
+	CHECK(!cloned.supportedHead);
+	CHECK(clone.selectedSpace == oldest);
+	CHECK(!clone.publishableSpace);
+	records.pop_back();
+	records.push_back(make(17, oldest, u"future"_q, deviceB, 1, {},
+		Purple::SyncEnvelopeStatus::UnsupportedStream));
+	records.push_back(make(18, oldest, u"library"_q, deviceB, 1, {},
+		Purple::SyncEnvelopeStatus::UnsupportedEncoding));
+	const auto future = Purple::ResolveSyncDirectory(records, true);
+	CHECK(future.groups.size() == 6);
+	CHECK(!future.unreadableCandidate);
+	CHECK(future.publishableSpace == oldest);
+	CHECK(!group(future, oldest, u"future"_q, deviceB).supportedHead);
+	CHECK(!group(future, oldest, u"library"_q, deviceB).supportedHead);
+	auto misclassified = make(22, newest, u"future"_q, deviceA, 1,
+		hashA);
+	misclassified.payloadValidated = true;
+	const auto unknown = Purple::ResolveSyncDirectory({ misclassified }, true);
+	CHECK(!unknown.groups.front().supportedHead);
+	const auto incomplete = Purple::ResolveSyncDirectory(records, false);
+	CHECK(incomplete.selectedSpace == oldest);
+	CHECK(!incomplete.publishableSpace);
+	CHECK(!incomplete.canCreateSpace);
+	CHECK(Purple::ResolveSyncDirectory({}, true).canCreateSpace);
+	CHECK(!Purple::ResolveSyncDirectory({}, false).canCreateSpace);
+	auto unreadable = records;
+	unreadable.push_back({ 19, 1019, 0, true,
+		Purple::SyncEnvelopeStatus::Invalid });
+	const auto invalid = Purple::ResolveSyncDirectory(unreadable, true);
+	CHECK(invalid.unreadableCandidate);
+	CHECK(invalid.selectedSpace == oldest);
+	CHECK(!invalid.publishableSpace);
+	unreadable.back().status = Purple::SyncEnvelopeStatus::NewerMajor;
+	const auto newer = Purple::ResolveSyncDirectory(unreadable, true);
+	CHECK(newer.unreadableCandidate);
+	CHECK(!newer.publishableSpace);
+	auto collision = records;
+	collision.push_back(make(11, newest, u"config"_q, deviceB, 200, hashB));
+	const auto collided = Purple::ResolveSyncDirectory(collision, true);
+	CHECK(collided.messageIdCollision);
+	CHECK(!collided.publishableSpace);
+	CHECK(collided.selectedSpace == oldest);
+	auto forwarded = make(20, oldest, u"future"_q, deviceA, 99, hashA);
+	forwarded.original = false;
+	const auto onlyForwarded = Purple::ResolveSyncDirectory({ forwarded }, true);
+	CHECK(onlyForwarded.groups.empty());
+	CHECK(onlyForwarded.canCreateSpace);
+	const auto futureOnly = Purple::ResolveSyncDirectory({
+		make(21, newest, u"future"_q, deviceA, 1, {},
+			Purple::SyncEnvelopeStatus::UnsupportedStream) }, true);
+	CHECK(futureOnly.selectedSpace == newest);
+	CHECK(futureOnly.publishableSpace == newest);
+	CHECK(!futureOnly.canCreateSpace);
+}
+
 void TestSyncEnvelope() {
 	Begin("sync envelope");
 	const auto space = u"sp-"_q + QString(26, u'a');
@@ -10666,6 +10787,7 @@ int main() {
 	TestSyncIdFormatting();
 	TestTimeOrderedSyncSpaceIds();
 	TestSyncEnvelope();
+	TestSyncDirectory();
 	TestConfigPayload();
 	TestConfigRecordBuilder();
 	TestSyncLocalState();

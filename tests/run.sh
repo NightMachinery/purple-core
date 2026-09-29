@@ -36,6 +36,7 @@ clang++ -std=c++20 -g -O0 -o "$Output" \
     "$RepoPath/purple/purple_config_payload.cpp" \
     "$RepoPath/purple/purple_sync_json.cpp" \
     "$RepoPath/purple/purple_sync_envelope.cpp" \
+    "$RepoPath/purple/purple_sync_directory.cpp" \
     "$RepoPath/purple/purple_sync_local_state.cpp" \
     "$RepoPath/purple/purple_sync_status.cpp" \
     "$RepoPath/purple/purple_engine.cpp" \

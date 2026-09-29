@@ -68,6 +68,25 @@ rules about data are far easier to prove outside a running app than inside one.
   separately verify the Telegram peer, document name, and forwarding metadata.
   A newer major that uses JSON numbers outside version 1's safe-integer subset
   is unreadable by this parser rather than receiving the higher-major outcome.
+- `purple/purple_sync_directory.{h,cpp}` - resolves a caller-supplied inventory
+  of original Saved Messages candidate documents without Telegram I/O. It
+  groups records by space, stream and install, selects the highest sequence in
+  each group, retains equal-sequence duplicates, and marks conflicting hashes
+  as ambiguous. A supported head requires a validated stream payload and
+  full-record SHA-256; a parser-valid library record remains opaque until a
+  library adapter exists. The caller sets `payloadValidated` only after its
+  stream adapter accepts the payload.
+  Unsupported stream and encoding headers keep a space alive but yield no
+  supported head. The oldest visible space is selected by decoded space ID.
+  `publishableSpace` means only that space election is safe: it requires a
+  complete inventory with no invalid, newer-major or colliding-message
+  candidates, and no ambiguous group in the selected space. It does not
+  authorize publishing into an opaque or unvalidated stream head. The caller
+  must check that group's `supportedHead` (or that the group is absent) and
+  satisfy the publish planner's other gates. `canCreateSpace` requires the
+  same inventory checks and no visible space. The caller must exclude
+  forwarded copies, or set `original` false, and provide the full-record hash
+  of supported records after exact validation.
 - `purple/purple_config_payload.{h,cpp}` - inspects a validated config envelope
   before its settings file can be used. It checks the key against the exact
   UTF-8 bytes represented by the JSON `text` string, validates direct parents
