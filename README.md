@@ -96,7 +96,22 @@ rules about data are far easier to prove outside a running app than inside one.
   config base and lineage to the validated staged version after exact read-back,
   clears its pending key, and retains equivalent keys only when content is
   unchanged. The platform must persist that returned state before deleting the
-  staged record.
+  staged record. Optional top-level `own_messages` holds at most 256 confirmed
+  config record message IDs with their space, writer identity, sequence,
+  payload hash and SHA-256 of the entire canonical envelope; old states without
+  it load an empty ledger. Entries from an older space remain valid after a
+  local space change. Unknown fields in each entry survive round trips.
+  `RecordConfirmedOwnConfigMessage` records a
+  validated own server read-back after confirmation, updating an ID after an
+  in-place edit or tracking multiple IDs for a duplicate post. A message ID
+  cannot be reassigned across spaces.
+  `CheckOwnConfigMessageDeletion` allows deletion only when a fresh canonical
+  read-back exactly matches a listed ID with a sequence strictly older than
+  the confirmed sequence. Even duplicate posts at the current confirmed
+  sequence remain protected until a newer version is confirmed.
+  `RemoveAbsentOwnConfigMessage` removes that entry only after the caller
+  reports authoritative absence for the same ID. The caller persists every
+  returned state and performs all Telegram reads and deletes; core does no I/O.
 
 The platform publisher must build the complete envelope for the reserved
 sequence, atomically stage its bytes at

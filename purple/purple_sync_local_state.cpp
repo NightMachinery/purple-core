@@ -8,15 +8,19 @@ option) any later version.
 #include "purple/purple_sync_local_state.h"
 
 #include "purple/purple_config_sync.h"
+#include "purple/purple_config_payload.h"
 #include "purple/purple_sync_envelope.h"
 #include "purple/purple_sync_json.h"
 #include "purple/purple_types.h"
 
 #include <QtCore/QJsonArray>
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QSet>
 
 #include <cmath>
+#include <algorithm>
+#include <limits>
 
 namespace Purple {
 namespace {
@@ -24,6 +28,7 @@ namespace {
 constexpr auto kMaximumSafeInteger = uint64_t(9007199254740991ULL);
 constexpr auto kMaximumStateBytes = 4 * 1024 * 1024;
 constexpr auto kMaximumDeviceBytes = 256;
+constexpr auto kMaximumOwnMessages = 256;
 
 [[nodiscard]] SyncLocalParseResult Invalid(SyncLocalError error) {
 	return { SyncLocalStatus::Invalid, error, {} };
@@ -219,6 +224,129 @@ void WriteStream(QJsonObject &object, const SyncLocalStreamState &stream) {
 	object.insert(u"own_hash"_q, stream.ownHash);
 }
 
+[[nodiscard]] bool ReadOwnMessages(
+		const QJsonValue &value,
+		const SyncLocalState &state,
+		std::vector<SyncOwnMessage> &messages) {
+	if (!value.isArray() || value.toArray().size() > kMaximumOwnMessages) {
+		return false;
+	}
+	auto seen = QSet<int32_t>();
+	for (const auto &item : value.toArray()) {
+		if (!item.isObject()) {
+			return false;
+		}
+		const auto object = item.toObject();
+		const auto space = object.value(u"space"_q);
+		const auto stream = object.value(u"stream"_q);
+		const auto messageId = object.value(u"message_id"_q);
+		const auto install = object.value(u"install"_q);
+		const auto device = object.value(u"device"_q);
+		const auto seq = object.value(u"seq"_q);
+		const auto hash = object.value(u"payload_sha256"_q);
+		const auto recordHash = object.value(u"record_sha256"_q);
+		if (!space.isString() || !stream.isString()
+			|| !SafeInteger(messageId)
+			|| !install.isString() || !device.isString()
+			|| !SafeInteger(seq) || !hash.isString()
+			|| !recordHash.isString()
+			|| !IsSyncSpaceId(space.toString())
+			|| stream.toString() != u"config"_q
+			|| messageId.toDouble() < 1
+			|| messageId.toDouble() > std::numeric_limits<int32_t>::max()
+			|| !IsSyncInstallId(install.toString())
+			|| install.toString() != state.install
+			|| device.toString().isEmpty()
+			|| device.toString() != state.createdDevice
+			|| seq.toDouble() < 1
+			|| seq.toDouble() > double(state.config.confirmedSeq)
+			|| !ValidHash(hash.toString())
+			|| !ValidHash(recordHash.toString())) {
+			return false;
+		}
+		const auto id = int32_t(messageId.toDouble());
+		if (seen.contains(id)) {
+			return false;
+		}
+		seen.insert(id);
+		messages.push_back({
+			space.toString(),
+			SyncLocalStream::Config,
+			id,
+			install.toString(),
+			device.toString(),
+			uint64_t(seq.toDouble()),
+			hash.toString(),
+			recordHash.toString(),
+			object,
+		});
+	}
+	return true;
+}
+
+[[nodiscard]] QJsonArray WriteOwnMessages(
+		const std::vector<SyncOwnMessage> &messages) {
+	auto result = QJsonArray();
+	for (const auto &message : messages) {
+		auto object = message.preserved;
+		object.insert(u"space"_q, message.space);
+		object.insert(u"stream"_q, u"config"_q);
+		object.insert(u"message_id"_q, message.messageId);
+		object.insert(u"install"_q, message.install);
+		object.insert(u"device"_q, message.device);
+		object.insert(u"seq"_q, QJsonValue(qint64(message.seq)));
+		object.insert(u"payload_sha256"_q, message.payloadHash);
+		object.insert(u"record_sha256"_q, message.recordHash);
+		result.append(object);
+	}
+	return result;
+}
+
+struct CheckedOwnConfigRecord {
+	QString space;
+	QString install;
+	QString device;
+	uint64_t seq = 0;
+	QString payloadHash;
+	QString recordHash;
+};
+
+[[nodiscard]] std::optional<CheckedOwnConfigRecord> CheckOwnConfigRecord(
+		const QByteArray &canonicalRecord) {
+	const auto parsed = ParseSyncEnvelope(canonicalRecord);
+	if (!parsed || InspectConfigPayload(parsed).status
+		!= ConfigPayloadStatus::Valid) {
+		return std::nullopt;
+	}
+	const auto canonical = SerializeSyncEnvelope(parsed.envelope);
+	if (!canonical || canonical.canonical != canonicalRecord) {
+		return std::nullopt;
+	}
+	const auto document = parsed.envelope.document;
+	const auto writer = document.value(u"writer"_q).toObject();
+	return CheckedOwnConfigRecord{
+		document.value(u"space"_q).toString(),
+		writer.value(u"install"_q).toString(),
+		writer.value(u"device"_q).toString(),
+		uint64_t(document.value(u"seq"_q).toDouble()),
+		document.value(u"payload_sha256"_q).toString(),
+		QString::fromLatin1(QCryptographicHash::hash(
+			canonicalRecord, QCryptographicHash::Sha256).toHex()),
+	};
+}
+
+[[nodiscard]] bool SameOwnMessage(
+		const SyncOwnMessage &message,
+		const CheckedOwnConfigRecord &record) {
+	return message.stream == SyncLocalStream::Config
+		&& message.space == record.space
+		&& message.install == record.install
+		&& message.device == record.device
+		&& message.seq == record.seq
+		&& message.payloadHash == record.payloadHash
+		&& message.recordHash == record.recordHash;
+}
+
 } // namespace
 
 SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
@@ -292,6 +420,11 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 		|| !ReadConfig(config.toObject(), state.configData, error)) {
 		return Invalid(error);
 	}
+	if (document.contains(u"own_messages"_q)
+		&& !ReadOwnMessages(document.value(u"own_messages"_q),
+			state, state.ownMessages)) {
+		return Invalid(SyncLocalError::InvalidOwnMessages);
+	}
 	return { SyncLocalStatus::Valid, SyncLocalError::None, std::move(state) };
 }
 
@@ -316,6 +449,16 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 				SyncLocalError::InvalidConfig };
 		}
 	}
+	if (state.ownMessages.size() > kMaximumOwnMessages) {
+		return { {}, SyncLocalStatus::Invalid,
+			SyncLocalError::InvalidOwnMessages };
+	}
+	for (const auto &message : state.ownMessages) {
+		if (message.stream != SyncLocalStream::Config) {
+			return { {}, SyncLocalStatus::Invalid,
+				SyncLocalError::InvalidOwnMessages };
+		}
+	}
 	auto document = state.preserved;
 	document.insert(u"version"_q, state.version);
 	document.insert(u"install"_q, state.install);
@@ -338,6 +481,11 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 	streams.insert(u"config"_q, config);
 	streams.insert(u"library"_q, library);
 	document.insert(u"streams"_q, streams);
+	if (!state.ownMessages.empty()
+		|| document.contains(u"own_messages"_q)) {
+		document.insert(u"own_messages"_q,
+			WriteOwnMessages(state.ownMessages));
+	}
 	const auto json = QJsonDocument(document).toJson(QJsonDocument::Compact);
 	const auto canonical = CanonicalizeSyncJson(json);
 	if (!canonical) {
@@ -350,6 +498,136 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 		return { {}, validated.status, validated.error };
 	}
 	return { canonical.canonical, SyncLocalStatus::Valid };
+}
+
+SyncOwnMessageResult RecordConfirmedOwnConfigMessage(
+		const SyncLocalState &state,
+		int32_t messageId,
+		const QByteArray &canonicalRecord) {
+	if (messageId <= 0) {
+		return { state, SyncOwnMessageError::InvalidMessageId };
+	}
+	if (!SerializeSyncLocalState(state)) {
+		return { state, SyncOwnMessageError::InvalidState };
+	}
+	const auto record = CheckOwnConfigRecord(canonicalRecord);
+	if (!record) {
+		return { state, SyncOwnMessageError::InvalidRecord };
+	}
+	if (state.createdDevice.isEmpty()
+		|| record->space != state.space
+		|| record->install != state.install
+		|| record->device != state.createdDevice
+		|| state.config.confirmedSeq == 0
+		|| record->seq != state.config.confirmedSeq
+		|| record->payloadHash != state.config.ownHash) {
+		return { state, SyncOwnMessageError::RecordMismatch };
+	}
+	auto next = state;
+	const auto existing = std::find_if(
+		next.ownMessages.begin(), next.ownMessages.end(),
+		[=](const auto &entry) { return entry.messageId == messageId; });
+	if (existing != next.ownMessages.end()) {
+		if (existing->space != record->space) {
+			return { state, SyncOwnMessageError::IdConflict };
+		}
+		if (existing->seq > record->seq) {
+			return { state, SyncOwnMessageError::SequenceRegression };
+		}
+		if (existing->seq == record->seq) {
+			return SameOwnMessage(*existing, *record)
+				? SyncOwnMessageResult{ state }
+				: SyncOwnMessageResult{ state,
+					SyncOwnMessageError::IdConflict };
+		}
+		*existing = {
+			record->space,
+			SyncLocalStream::Config,
+			messageId,
+			record->install,
+			record->device,
+			record->seq,
+			record->payloadHash,
+			record->recordHash,
+			existing->preserved,
+		};
+	} else {
+		if (next.ownMessages.size() == kMaximumOwnMessages) {
+			return { state, SyncOwnMessageError::CapacityExceeded };
+		}
+		next.ownMessages.push_back({
+			record->space,
+			SyncLocalStream::Config,
+			messageId,
+			record->install,
+			record->device,
+			record->seq,
+			record->payloadHash,
+			record->recordHash,
+		});
+	}
+	if (!SerializeSyncLocalState(next)) {
+		return { state, SyncOwnMessageError::InvalidState };
+	}
+	return { std::move(next), SyncOwnMessageError::None, true };
+}
+
+SyncOwnDeleteCheck CheckOwnConfigMessageDeletion(
+		const SyncLocalState &state,
+		int32_t messageId,
+		const QByteArray &canonicalRecord) {
+	if (messageId <= 0) {
+		return { SyncOwnMessageError::InvalidMessageId };
+	}
+	if (!SerializeSyncLocalState(state)) {
+		return { SyncOwnMessageError::InvalidState };
+	}
+	const auto existing = std::find_if(
+		state.ownMessages.begin(), state.ownMessages.end(),
+		[=](const auto &entry) { return entry.messageId == messageId; });
+	if (existing == state.ownMessages.end()) {
+		return { SyncOwnMessageError::NotFound };
+	}
+	if (existing->seq >= state.config.confirmedSeq) {
+		return { SyncOwnMessageError::NotOlder };
+	}
+	const auto record = CheckOwnConfigRecord(canonicalRecord);
+	if (!record) {
+		return { SyncOwnMessageError::InvalidRecord };
+	}
+	return SameOwnMessage(*existing, *record)
+		? SyncOwnDeleteCheck{}
+		: SyncOwnDeleteCheck{ SyncOwnMessageError::RecordMismatch };
+}
+
+SyncOwnMessageResult RemoveAbsentOwnConfigMessage(
+		const SyncLocalState &state,
+		int32_t messageId,
+		SyncOwnMessagePresence presence) {
+	if (messageId <= 0) {
+		return { state, SyncOwnMessageError::InvalidMessageId };
+	}
+	if (!SerializeSyncLocalState(state)) {
+		return { state, SyncOwnMessageError::InvalidState };
+	}
+	if (presence != SyncOwnMessagePresence::Absent) {
+		return { state, SyncOwnMessageError::NotAbsent };
+	}
+	auto next = state;
+	const auto existing = std::find_if(
+		next.ownMessages.begin(), next.ownMessages.end(),
+		[=](const auto &entry) { return entry.messageId == messageId; });
+	if (existing == next.ownMessages.end()) {
+		return { state, SyncOwnMessageError::NotFound };
+	}
+	if (existing->seq >= state.config.confirmedSeq) {
+		return { state, SyncOwnMessageError::NotOlder };
+	}
+	next.ownMessages.erase(existing);
+	if (!SerializeSyncLocalState(next)) {
+		return { state, SyncOwnMessageError::InvalidState };
+	}
+	return { std::move(next), SyncOwnMessageError::None, true };
 }
 
 SyncReservation ReserveSyncSeq(

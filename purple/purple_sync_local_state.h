@@ -39,6 +39,18 @@ struct SyncLocalConfigState {
 	std::map<QString, uint64_t> seenSeq;
 };
 
+struct SyncOwnMessage {
+	QString space;
+	SyncLocalStream stream = SyncLocalStream::Config;
+	int32_t messageId = 0;
+	QString install;
+	QString device;
+	uint64_t seq = 0;
+	QString payloadHash;
+	QString recordHash;
+	QJsonObject preserved;
+};
+
 struct SyncLocalState {
 	int version = 1;
 	QString install;
@@ -47,6 +59,7 @@ struct SyncLocalState {
 	SyncLocalStreamState config;
 	SyncLocalStreamState library;
 	SyncLocalConfigState configData;
+	std::vector<SyncOwnMessage> ownMessages;
 	QJsonObject preserved;
 };
 
@@ -67,6 +80,7 @@ enum class SyncLocalError {
 	InvalidCounters,
 	InvalidHash,
 	InvalidConfig,
+	InvalidOwnMessages,
 };
 
 struct SyncLocalParseResult {
@@ -132,6 +146,56 @@ struct SyncConfirmation {
 	SyncCloneVerdict verdict = SyncCloneVerdict::PendingReconcile;
 	bool changed = false;
 };
+
+enum class SyncOwnMessageError {
+	None,
+	InvalidState,
+	InvalidMessageId,
+	InvalidRecord,
+	RecordMismatch,
+	SequenceRegression,
+	IdConflict,
+	CapacityExceeded,
+	NotFound,
+	NotOlder,
+	NotAbsent,
+};
+
+struct SyncOwnMessageResult {
+	SyncLocalState state;
+	SyncOwnMessageError error = SyncOwnMessageError::None;
+	bool changed = false;
+
+	[[nodiscard]] explicit operator bool() const {
+		return error == SyncOwnMessageError::None;
+	}
+};
+
+struct SyncOwnDeleteCheck {
+	SyncOwnMessageError error = SyncOwnMessageError::None;
+
+	[[nodiscard]] explicit operator bool() const {
+		return error == SyncOwnMessageError::None;
+	}
+};
+
+enum class SyncOwnMessagePresence {
+	Present,
+	Absent,
+};
+
+[[nodiscard]] SyncOwnMessageResult RecordConfirmedOwnConfigMessage(
+	const SyncLocalState &state,
+	int32_t messageId,
+	const QByteArray &canonicalRecord);
+[[nodiscard]] SyncOwnDeleteCheck CheckOwnConfigMessageDeletion(
+	const SyncLocalState &state,
+	int32_t messageId,
+	const QByteArray &canonicalRecord);
+[[nodiscard]] SyncOwnMessageResult RemoveAbsentOwnConfigMessage(
+	const SyncLocalState &state,
+	int32_t messageId,
+	SyncOwnMessagePresence presence);
 
 [[nodiscard]] SyncConfirmation ConfirmConfigReadBack(
 	const SyncLocalState &state,
