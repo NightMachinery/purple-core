@@ -34,6 +34,7 @@ option) any later version.
 #include <cstdio>
 #include <algorithm>
 #include <type_traits>
+#include <utility>
 
 namespace {
 
@@ -9140,6 +9141,316 @@ void TestSyncLocalState() {
 		== Purple::SyncLocalError::SizeLimit);
 }
 
+void TestSyncSimulation() {
+	Begin("sync simulation");
+	const auto space = u"sp-"_q + QString(26, u'a');
+	const auto installA = u"in-"_q + QString(26, u'a');
+	const auto installB = u"in-"_q + QString(25, u'a') + u'e';
+	const auto installC = u"in-"_q + QString(25, u'a') + u'i';
+	const auto rootText = QByteArray("version = 1\nname = 'root'\n");
+	const auto aText = QByteArray("version = 1\nname = 'a'\n");
+	const auto bText = QByteArray("version = 1\nname = 'b'\n");
+	const auto aSecondText = QByteArray("version = 1\nname = 'a2'\n");
+	const auto root = *Purple::MakeConfigVersion(rootText, {});
+	const auto aVersion = *Purple::MakeConfigVersion(aText, { root });
+	const auto bVersion = *Purple::MakeConfigVersion(bText, { root });
+	const auto aSecond = *Purple::MakeConfigVersion(aSecondText, { aVersion });
+	struct Message {
+		int id = 0;
+		QByteArray bytes;
+		bool deleted = false;
+	};
+	struct SavedMessages {
+		std::vector<Message> messages;
+		int nextId = 1;
+		bool failUpload = false;
+		bool failSearch = false;
+		int searchVisibleThrough = 0;
+
+		int post(const QByteArray &bytes) {
+			if (std::exchange(failUpload, false)) {
+				return 0;
+			}
+			const auto id = nextId++;
+			messages.push_back({ id, bytes });
+			return id;
+		}
+
+		bool edit(int id, const QByteArray &bytes) {
+			if (std::exchange(failUpload, false)) {
+				return false;
+			}
+			for (auto &message : messages) {
+				if (message.id == id && !message.deleted) {
+					message.bytes = bytes;
+					return true;
+				}
+			}
+			return false;
+		}
+
+		QByteArray live(int id) const {
+			for (const auto &message : messages) {
+				if (message.id == id && !message.deleted) {
+					return message.bytes;
+				}
+			}
+			return {};
+		}
+
+		std::optional<std::vector<Message>> search() {
+			if (std::exchange(failSearch, false)) {
+				return std::nullopt;
+			}
+			auto found = std::vector<Message>();
+			for (const auto &message : messages) {
+				if (!message.deleted && message.id <= searchVisibleThrough) {
+					found.push_back(message);
+				}
+			}
+			std::reverse(found.begin(), found.end());
+			return found;
+		}
+
+		void erase(int id) {
+			for (auto &message : messages) {
+				if (message.id == id) {
+					message.deleted = true;
+				}
+			}
+		}
+	};
+	struct Device {
+		Purple::SyncLocalState state;
+		QByteArray durable;
+		std::map<uint64_t, QByteArray> staged;
+		int ownMessageId = 0;
+	};
+	const auto device = [&](const QString &install, const QString &name) {
+		auto result = Device();
+		result.state.install = install;
+		result.state.createdDevice = name;
+		result.state.space = space;
+		result.state.configData.base = root.key;
+		result.state.configData.baseLineage = root.lineage;
+		result.durable = Purple::SerializeSyncLocalState(result.state).canonical;
+		return result;
+	};
+	const auto payload = [](const Purple::ConfigVersion &version,
+			const QByteArray &text) {
+		auto parents = QJsonArray();
+		auto lineage = QJsonArray();
+		for (const auto &key : version.parents) {
+			parents.append(key);
+		}
+		for (const auto &key : version.lineage) {
+			lineage.append(key);
+		}
+		return QJsonObject{
+			{ u"schema"_q, 1 }, { u"key"_q, version.key },
+			{ u"parents"_q, parents }, { u"lineage"_q, lineage },
+			{ u"warnings"_q, 0 }, { u"text"_q, QString::fromUtf8(text) },
+		};
+	};
+	const auto makeBytes = [&](const Device &writer, uint64_t seq,
+			const Purple::ConfigVersion &version, const QByteArray &text) {
+		return Purple::SerializeSyncEnvelope(Purple::SyncEnvelope{
+			QJsonObject{
+				{ u"purple_sync"_q, 1 }, { u"stream"_q, u"config"_q },
+				{ u"space"_q, space },
+				{ u"writer"_q, QJsonObject{
+					{ u"install"_q, writer.state.install },
+					{ u"device"_q, writer.state.createdDevice },
+					{ u"platform"_q, u"test"_q }, { u"app"_q, u"Purple"_q },
+				} },
+				{ u"seq"_q, QJsonValue(qint64(seq)) }, { u"at"_q, 0 },
+				{ u"payload"_q, payload(version, text) },
+			},
+		});
+	};
+	const auto observe = [](const QByteArray &bytes) {
+		const auto parsed = Purple::ParseSyncEnvelope(bytes);
+		CHECK(bool(parsed));
+		return Purple::OwnRecordObservation{
+			Purple::OwnRecordObservationKind::Present,
+			uint64_t(parsed.envelope.document.value(u"seq"_q).toDouble()),
+			parsed.envelope.document.value(u"payload_sha256"_q).toString(),
+		};
+	};
+	const auto head = [](const QByteArray &bytes) {
+		const auto parsed = Purple::ParseSyncEnvelope(bytes);
+		CHECK(bool(parsed));
+		const auto inspected = Purple::InspectConfigPayload(parsed);
+		CHECK(bool(inspected));
+		const auto document = parsed.envelope.document;
+		return Purple::ConfigHead{
+			document.value(u"space"_q).toString(),
+			document.value(u"writer"_q).toObject().value(u"install"_q).toString(),
+			uint64_t(document.value(u"seq"_q).toDouble()),
+			inspected.version.key, inspected.version.lineage,
+		};
+	};
+	const auto classification = [&](const Device &reader,
+			const QByteArray &text, const std::vector<Purple::ConfigHead> &heads) {
+		const auto &local = reader.state;
+		return Purple::ClassifyConfig(Purple::SettingsFingerprint(text),
+			Purple::ConfigSyncState{
+				local.space, local.install, local.configData.base,
+				local.configData.baseLineage, local.configData.equiv,
+				local.configData.pending, local.configData.seenSeq,
+			}, heads);
+	};
+	const auto stageAndPersist = [&](Device &writer,
+			const Purple::ConfigVersion &version, const QByteArray &text) {
+		const auto bytes = makeBytes(writer, writer.state.config.seq + 1,
+			version, text);
+		CHECK(bool(bytes));
+		const auto observation = observe(bytes.canonical);
+		writer.staged[observation.seq] = bytes.canonical;
+		const auto reserved = Purple::ReserveSyncSeq(writer.state,
+			Purple::SyncLocalStream::Config, observation.payloadHash);
+		CHECK(bool(reserved));
+		CHECK_EQ(reserved.seq, observation.seq);
+		writer.state = reserved.state;
+		const auto durable = Purple::SerializeSyncLocalState(writer.state);
+		CHECK(bool(durable));
+		writer.durable = durable.canonical;
+	};
+	const auto confirm = [&](Device &writer, const QByteArray &readBack) {
+		const auto result = Purple::ConfirmSyncReadBack(writer.state,
+			writer.state.createdDevice, Purple::SyncLocalStream::Config,
+			observe(readBack));
+		CHECK(result.changed);
+		CHECK(result.verdict == Purple::SyncCloneVerdict::NoClone);
+		writer.state = result.state;
+		writer.staged.erase(writer.state.config.seq);
+		writer.durable = Purple::SerializeSyncLocalState(writer.state).canonical;
+	};
+
+	auto store = SavedMessages();
+	auto a = device(installA, u"device-a"_q);
+	auto b = device(installB, u"device-b"_q);
+	auto c = device(installC, u"device-c"_q);
+	stageAndPersist(a, root, rootText);
+	const auto stagedRoot = a.staged.at(1);
+	const auto persistedBeforeUpload = a.durable;
+	a.state = device(installA, u"device-a"_q).state;
+	CHECK_EQ(a.state.config.seq, uint64_t(0));
+	const auto recovered = Purple::ParseSyncLocalState(persistedBeforeUpload);
+	CHECK(bool(recovered));
+	a.state = recovered.state;
+	CHECK_EQ(a.state.config.pendingSeq, uint64_t(1));
+	CHECK(a.staged.at(a.state.config.pendingSeq) == stagedRoot);
+	CHECK(observe(a.staged.at(1)).payloadHash == a.state.config.ownHash);
+	const auto conflictingReadBack = makeBytes(a, 1, bVersion, bText);
+	CHECK(bool(conflictingReadBack));
+	const auto rejectedConfirmation = Purple::ConfirmSyncReadBack(a.state,
+		u"device-a"_q, Purple::SyncLocalStream::Config,
+		observe(conflictingReadBack.canonical));
+	CHECK(!rejectedConfirmation.changed);
+	CHECK(rejectedConfirmation.verdict == Purple::SyncCloneVerdict::HashMismatch);
+	CHECK_EQ(rejectedConfirmation.state.config.pendingSeq, uint64_t(1));
+	store.failSearch = true;
+	CHECK(!store.search().has_value());
+	CHECK(Purple::CheckSyncClone(a.state, u"device-a"_q,
+		Purple::SyncLocalStream::Config, {})
+		== Purple::SyncCloneVerdict::PendingReconcile);
+	const auto recoveredSearch = store.search();
+	CHECK(recoveredSearch.has_value());
+	CHECK(recoveredSearch->empty());
+	const auto absent = Purple::OwnRecordObservation{
+		Purple::OwnRecordObservationKind::Absent,
+	};
+	CHECK(Purple::CheckSyncClone(a.state, u"device-a"_q,
+		Purple::SyncLocalStream::Config, absent)
+		== Purple::SyncCloneVerdict::NoClone);
+	store.failUpload = true;
+	const auto failedPost = store.post(a.staged.at(1));
+	CHECK_EQ(failedPost, 0);
+	CHECK_EQ(a.state.config.pendingSeq, uint64_t(1));
+	a.ownMessageId = store.post(a.staged.at(1));
+	CHECK(a.ownMessageId > 0);
+	CHECK(store.live(a.ownMessageId) == stagedRoot);
+	confirm(a, store.live(a.ownMessageId));
+	CHECK_EQ(a.state.config.pendingSeq, uint64_t(0));
+	CHECK(a.staged.empty());
+	store.searchVisibleThrough = a.ownMessageId;
+	const auto delayedSearch = store.search();
+	CHECK(delayedSearch.has_value());
+	CHECK_EQ(delayedSearch->size(), size_t(1));
+
+	stageAndPersist(a, aVersion, aText);
+	const auto editedBytes = a.staged.at(2);
+	CHECK(store.edit(a.ownMessageId, editedBytes));
+	CHECK(store.live(a.ownMessageId) == editedBytes);
+	CHECK(delayedSearch->front().bytes == stagedRoot);
+	const auto liveHead = head(store.live(a.ownMessageId));
+	const auto staleHead = head(delayedSearch->front().bytes);
+	const auto liveResult = classification(b, rootText,
+		{ staleHead, liveHead });
+	CHECK_EQ(liveResult.heads.size(), size_t(1));
+	CHECK_EQ(liveResult.heads.front().head.seq, uint64_t(2));
+	CHECK(liveResult.heads.front().kind == Purple::ConfigHeadKind::Ahead);
+	confirm(a, store.live(a.ownMessageId));
+	CHECK_EQ(a.state.config.confirmedSeq, uint64_t(2));
+
+	stageAndPersist(a, aSecond, aSecondText);
+	const auto oldId = a.ownMessageId;
+	const auto newId = store.post(a.staged.at(3));
+	CHECK(newId > oldId);
+	CHECK(!store.live(oldId).isEmpty());
+	store.searchVisibleThrough = newId;
+	const auto reordered = store.search();
+	CHECK(reordered.has_value());
+	const auto repostHeads = std::vector<Purple::ConfigHead>{
+		head(reordered->front().bytes), head(reordered->back().bytes),
+	};
+	const auto repostResult = classification(b, rootText, repostHeads);
+	CHECK_EQ(repostResult.heads.size(), size_t(1));
+	CHECK_EQ(repostResult.heads.front().head.seq, uint64_t(3));
+	CHECK(repostResult.heads.front().head.key == aSecond.key);
+	confirm(a, store.live(newId));
+	a.ownMessageId = newId;
+	store.erase(oldId);
+	CHECK(store.live(oldId).isEmpty());
+	CHECK(!store.live(newId).isEmpty());
+	const auto cleanedSearch = store.search();
+	CHECK(cleanedSearch.has_value());
+	CHECK(std::none_of(cleanedSearch->begin(), cleanedSearch->end(),
+		[=](const auto &message) { return message.id == oldId; }));
+
+	stageAndPersist(b, bVersion, bText);
+	b.ownMessageId = store.post(b.staged.at(1));
+	CHECK(b.ownMessageId > 0);
+	confirm(b, store.live(b.ownMessageId));
+	const auto split = classification(c, rootText,
+		{ head(store.live(a.ownMessageId)), head(store.live(b.ownMessageId)) });
+	CHECK(split.split);
+	CHECK_EQ(split.heads.size(), size_t(2));
+	const auto concurrent = classification(c, bText,
+		{ head(store.live(a.ownMessageId)) });
+	CHECK(!concurrent.split);
+	CHECK_EQ(concurrent.heads.size(), size_t(1));
+	CHECK(concurrent.heads.front().kind == Purple::ConfigHeadKind::Concurrent);
+	CHECK(c.state.configData.base == root.key);
+
+	const auto oldDurable = persistedBeforeUpload;
+	const auto rewound = Purple::ParseSyncLocalState(oldDurable);
+	CHECK(bool(rewound));
+	CHECK(Purple::CheckSyncClone(rewound.state, u"device-a"_q,
+		Purple::SyncLocalStream::Config, observe(store.live(a.ownMessageId)))
+		== Purple::SyncCloneVerdict::RemoteAhead);
+	const auto replacement = makeBytes(a, a.state.config.seq,
+		bVersion, bText);
+	CHECK(bool(replacement));
+	CHECK(Purple::CheckSyncClone(a.state, u"device-a"_q,
+		Purple::SyncLocalStream::Config, observe(replacement.canonical))
+		== Purple::SyncCloneVerdict::HashMismatch);
+	CHECK(Purple::CheckSyncClone(a.state, u"device-a"_q,
+		Purple::SyncLocalStream::Config, observe(store.live(a.ownMessageId)))
+		== Purple::SyncCloneVerdict::NoClone);
+}
+
 } // namespace
 
 int main() {
@@ -9147,6 +9458,7 @@ int main() {
 	TestSyncEnvelope();
 	TestConfigPayload();
 	TestSyncLocalState();
+	TestSyncSimulation();
 	TestConfigVersions();
 	TestConfigClassification();
 	TestPersianKeyboardToEnglish();
