@@ -29,6 +29,7 @@ constexpr auto kMaximumSafeInteger = uint64_t(9007199254740991ULL);
 constexpr auto kMaximumStateBytes = 4 * 1024 * 1024;
 constexpr auto kMaximumDeviceBytes = 256;
 constexpr auto kMaximumOwnMessages = 256;
+constexpr auto kMaximumIssuedRecords = 32;
 
 [[nodiscard]] SyncLocalParseResult Invalid(SyncLocalError error) {
 	return { SyncLocalStatus::Invalid, error, {} };
@@ -113,6 +114,39 @@ constexpr auto kMaximumOwnMessages = 256;
 		|| (stream.seq != 0 && !ValidHash(stream.ownHash))) {
 		error = SyncLocalError::InvalidHash;
 		return false;
+	}
+	if (object.contains(u"issued_records"_q)) {
+		const auto value = object.value(u"issued_records"_q);
+		if (!value.isArray()
+			|| value.toArray().size() > kMaximumIssuedRecords) {
+			error = SyncLocalError::InvalidIssuedRecords;
+			return false;
+		}
+		for (const auto &item : value.toArray()) {
+			if (!item.isObject()) {
+				error = SyncLocalError::InvalidIssuedRecords;
+				return false;
+			}
+			const auto entry = item.toObject();
+			const auto issuedSeq = entry.value(u"seq"_q);
+			const auto issuedHash = entry.value(u"record_sha256"_q);
+			if (!SafeInteger(issuedSeq)
+				|| issuedSeq.toDouble() < 1
+				|| issuedSeq.toDouble() > double(stream.seq)
+				|| !issuedHash.isString()
+				|| !ValidHash(issuedHash.toString())
+				|| (!stream.issuedRecords.empty()
+					&& issuedSeq.toDouble()
+						<= double(stream.issuedRecords.back().seq))) {
+				error = SyncLocalError::InvalidIssuedRecords;
+				return false;
+			}
+			stream.issuedRecords.push_back({
+				uint64_t(issuedSeq.toDouble()),
+				issuedHash.toString(),
+				entry,
+			});
+		}
 	}
 	return true;
 }
@@ -222,6 +256,17 @@ void WriteStream(QJsonObject &object, const SyncLocalStreamState &stream) {
 	object.insert(u"pending_seq"_q, QJsonValue(qint64(stream.pendingSeq)));
 	object.insert(u"confirmed_seq"_q, QJsonValue(qint64(stream.confirmedSeq)));
 	object.insert(u"own_hash"_q, stream.ownHash);
+	if (!stream.issuedRecords.empty()
+		|| object.contains(u"issued_records"_q)) {
+		auto entries = QJsonArray();
+		for (const auto &issued : stream.issuedRecords) {
+			auto entry = issued.preserved;
+			entry.insert(u"seq"_q, QJsonValue(qint64(issued.seq)));
+			entry.insert(u"record_sha256"_q, issued.recordHash);
+			entries.append(entry);
+		}
+		object.insert(u"issued_records"_q, entries);
+	}
 }
 
 [[nodiscard]] bool ReadOwnMessages(
@@ -442,6 +487,19 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 			return { {}, SyncLocalStatus::Invalid,
 				SyncLocalError::InvalidCounters };
 		}
+		if (stream->issuedRecords.size() > kMaximumIssuedRecords) {
+			return { {}, SyncLocalStatus::Invalid,
+				SyncLocalError::InvalidIssuedRecords };
+		}
+		auto previous = uint64_t(0);
+		for (const auto &issued : stream->issuedRecords) {
+			if (issued.seq <= previous || issued.seq > stream->seq
+				|| !ValidHash(issued.recordHash)) {
+				return { {}, SyncLocalStatus::Invalid,
+					SyncLocalError::InvalidIssuedRecords };
+			}
+			previous = issued.seq;
+		}
 	}
 	for (const auto &entry : state.configData.seenSeq) {
 		if (entry.second > kMaximumSafeInteger) {
@@ -498,6 +556,99 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 		return { {}, validated.status, validated.error };
 	}
 	return { canonical.canonical, SyncLocalStatus::Valid };
+}
+
+SyncIssueResult AppendIssuedConfigRecord(
+		const SyncLocalState &state,
+		const QByteArray &canonicalRecord) {
+	if (!SerializeSyncLocalState(state)) {
+		return { state, SyncIssueError::InvalidState };
+	}
+	const auto record = CheckOwnConfigRecord(canonicalRecord);
+	if (!record) {
+		return { state, SyncIssueError::InvalidRecord };
+	}
+	if (state.createdDevice.isEmpty()
+		|| record->space != state.space
+		|| record->install != state.install
+		|| record->device != state.createdDevice
+		|| state.config.pendingSeq == 0
+		|| record->seq != state.config.pendingSeq
+		|| record->payloadHash != state.config.ownHash) {
+		return { state, SyncIssueError::RecordMismatch };
+	}
+	const auto &issued = state.config.issuedRecords;
+	if (!issued.empty() && issued.back().seq >= record->seq) {
+		return (issued.back().seq == record->seq
+			&& issued.back().recordHash == record->recordHash)
+			? SyncIssueResult{ state }
+			: SyncIssueResult{ state, SyncIssueError::RecordMismatch };
+	}
+	auto next = state;
+	auto &records = next.config.issuedRecords;
+	if (records.size() == kMaximumIssuedRecords) {
+		records.erase(records.begin());
+	}
+	records.push_back({ record->seq, record->recordHash });
+	if (!SerializeSyncLocalState(next)) {
+		return { state, SyncIssueError::InvalidState };
+	}
+	return { std::move(next), SyncIssueError::None, true };
+}
+
+SyncOwnMessageResult AdoptIssuedOwnConfigMessage(
+		const SyncLocalState &state,
+		int32_t messageId,
+		const QByteArray &canonicalRecord) {
+	if (messageId <= 0) {
+		return { state, SyncOwnMessageError::InvalidMessageId };
+	}
+	if (!SerializeSyncLocalState(state)) {
+		return { state, SyncOwnMessageError::InvalidState };
+	}
+	const auto record = CheckOwnConfigRecord(canonicalRecord);
+	if (!record) {
+		return { state, SyncOwnMessageError::InvalidRecord };
+	}
+	if (state.createdDevice.isEmpty()
+		|| record->install != state.install
+		|| record->device != state.createdDevice
+		|| record->seq > state.config.confirmedSeq) {
+		return { state, SyncOwnMessageError::RecordMismatch };
+	}
+	const auto issued = std::find_if(
+		state.config.issuedRecords.begin(), state.config.issuedRecords.end(),
+		[&](const auto &entry) { return entry.seq == record->seq; });
+	if (issued == state.config.issuedRecords.end()
+		|| issued->recordHash != record->recordHash) {
+		return { state, SyncOwnMessageError::UnissuedRecord };
+	}
+	const auto existing = std::find_if(
+		state.ownMessages.begin(), state.ownMessages.end(),
+		[=](const auto &entry) { return entry.messageId == messageId; });
+	if (existing != state.ownMessages.end()) {
+		return SameOwnMessage(*existing, *record)
+			? SyncOwnMessageResult{ state }
+			: SyncOwnMessageResult{ state, SyncOwnMessageError::IdConflict };
+	}
+	if (state.ownMessages.size() == kMaximumOwnMessages) {
+		return { state, SyncOwnMessageError::CapacityExceeded };
+	}
+	auto next = state;
+	next.ownMessages.push_back({
+		record->space,
+		SyncLocalStream::Config,
+		messageId,
+		record->install,
+		record->device,
+		record->seq,
+		record->payloadHash,
+		record->recordHash,
+	});
+	if (!SerializeSyncLocalState(next)) {
+		return { state, SyncOwnMessageError::InvalidState };
+	}
+	return { std::move(next), SyncOwnMessageError::None, true };
 }
 
 SyncOwnMessageResult RecordConfirmedOwnConfigMessage(

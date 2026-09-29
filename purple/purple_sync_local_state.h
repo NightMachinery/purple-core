@@ -24,11 +24,18 @@ enum class SyncLocalStream {
 	Library,
 };
 
+struct SyncIssuedRecord {
+	uint64_t seq = 0;
+	QString recordHash;
+	QJsonObject preserved;
+};
+
 struct SyncLocalStreamState {
 	uint64_t seq = 0;
 	uint64_t pendingSeq = 0;
 	uint64_t confirmedSeq = 0;
 	QString ownHash;
+	std::vector<SyncIssuedRecord> issuedRecords;
 };
 
 struct SyncLocalConfigState {
@@ -81,6 +88,7 @@ enum class SyncLocalError {
 	InvalidHash,
 	InvalidConfig,
 	InvalidOwnMessages,
+	InvalidIssuedRecords,
 };
 
 struct SyncLocalParseResult {
@@ -159,6 +167,24 @@ enum class SyncOwnMessageError {
 	NotFound,
 	NotOlder,
 	NotAbsent,
+	UnissuedRecord,
+};
+
+enum class SyncIssueError {
+	None,
+	InvalidState,
+	InvalidRecord,
+	RecordMismatch,
+};
+
+struct SyncIssueResult {
+	SyncLocalState state;
+	SyncIssueError error = SyncIssueError::None;
+	bool changed = false;
+
+	[[nodiscard]] explicit operator bool() const {
+		return error == SyncIssueError::None;
+	}
 };
 
 struct SyncOwnMessageResult {
@@ -185,6 +211,13 @@ enum class SyncOwnMessagePresence {
 };
 
 [[nodiscard]] SyncOwnMessageResult RecordConfirmedOwnConfigMessage(
+	const SyncLocalState &state,
+	int32_t messageId,
+	const QByteArray &canonicalRecord);
+[[nodiscard]] SyncIssueResult AppendIssuedConfigRecord(
+	const SyncLocalState &state,
+	const QByteArray &canonicalRecord);
+[[nodiscard]] SyncOwnMessageResult AdoptIssuedOwnConfigMessage(
 	const SyncLocalState &state,
 	int32_t messageId,
 	const QByteArray &canonicalRecord);

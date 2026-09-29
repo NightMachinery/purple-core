@@ -9747,6 +9747,226 @@ void TestOwnMessageLedger() {
 		== Purple::SyncOwnMessageError::CapacityExceeded);
 }
 
+void TestIssuedRecordAdoption() {
+	Begin("issued record adoption");
+	auto state = Purple::SyncLocalState();
+	state.install = u"in-"_q + QString(26, u'a');
+	state.space = u"sp-"_q + QString(26, u'a');
+	state.createdDevice = u"device-a"_q;
+	const auto first = Purple::BuildConfigRecord({
+		"version = 1\nname = 'first'\n",
+		{}, std::nullopt, state.space, state.install, state.createdDevice,
+		u"macos"_q, u"Purple"_q, 1, 0,
+	});
+	CHECK(bool(first));
+	state.config.seq = 1;
+	state.config.pendingSeq = 1;
+	state.config.ownHash = first.payloadHash;
+	const auto appended = Purple::AppendIssuedConfigRecord(
+		state, first.canonical);
+	CHECK(bool(appended));
+	CHECK(appended.changed);
+	CHECK_EQ(appended.state.config.issuedRecords.size(), size_t(1));
+	CHECK(!Purple::AppendIssuedConfigRecord(
+			appended.state, first.canonical).changed);
+	CHECK(Purple::AppendIssuedConfigRecord(state, first.canonical + " ").error
+		== Purple::SyncIssueError::InvalidRecord);
+	auto wrongPayloadHash = state;
+	wrongPayloadHash.config.ownHash = QString(64, u'a');
+	CHECK(Purple::AppendIssuedConfigRecord(
+			wrongPayloadHash, first.canonical).error
+		== Purple::SyncIssueError::RecordMismatch);
+	const auto wrongSequence = Purple::BuildConfigRecord({
+		"version = 1\nname = 'first'\n",
+		{}, std::nullopt, state.space, state.install, state.createdDevice,
+		u"macos"_q, u"Purple"_q, 2, 0,
+	});
+	CHECK(bool(wrongSequence));
+	CHECK(Purple::AppendIssuedConfigRecord(
+			state, wrongSequence.canonical).error
+		== Purple::SyncIssueError::RecordMismatch);
+	const auto changedMetadata = Purple::BuildConfigRecord({
+		"version = 1\nname = 'first'\n",
+		{}, std::nullopt, state.space, state.install, state.createdDevice,
+		u"macos"_q, u"Other"_q, 1, 0,
+	});
+	CHECK(bool(changedMetadata));
+	CHECK(Purple::AppendIssuedConfigRecord(
+			appended.state, changedMetadata.canonical).error
+		== Purple::SyncIssueError::RecordMismatch);
+	const auto foreignInstall = Purple::BuildConfigRecord({
+		"version = 1\nname = 'first'\n",
+		{}, std::nullopt, state.space,
+		u"in-"_q + QString(25, u'a') + u'e', state.createdDevice,
+		u"macos"_q, u"Purple"_q, 1, 0,
+	});
+	const auto foreignDevice = Purple::BuildConfigRecord({
+		"version = 1\nname = 'first'\n",
+		{}, std::nullopt, state.space, state.install,
+		u"device-b"_q, u"macos"_q, u"Purple"_q, 1, 0,
+	});
+	CHECK(bool(foreignInstall));
+	CHECK(bool(foreignDevice));
+	CHECK(Purple::AppendIssuedConfigRecord(
+			state, foreignInstall.canonical).error
+		== Purple::SyncIssueError::RecordMismatch);
+	CHECK(Purple::AppendIssuedConfigRecord(
+			state, foreignDevice.canonical).error
+		== Purple::SyncIssueError::RecordMismatch);
+	const auto saved = Purple::SerializeSyncLocalState(appended.state);
+	CHECK(bool(saved));
+	auto document = QJsonDocument::fromJson(saved.canonical).object();
+	auto streams = document.value(u"streams"_q).toObject();
+	auto config = streams.value(u"config"_q).toObject();
+	auto issued = config.value(u"issued_records"_q).toArray();
+	auto entry = issued[0].toObject();
+	entry.insert(u"future_entry"_q, true);
+	issued[0] = entry;
+	config.insert(u"issued_records"_q, issued);
+	streams.insert(u"config"_q, config);
+	document.insert(u"streams"_q, streams);
+	const auto withUnknown = Purple::ParseSyncLocalState(
+		QJsonDocument(document).toJson(QJsonDocument::Compact));
+	CHECK(bool(withUnknown));
+	const auto rewritten = Purple::SerializeSyncLocalState(withUnknown.state);
+	CHECK(bool(rewritten));
+	CHECK(QJsonDocument::fromJson(rewritten.canonical).object()
+		.value(u"streams"_q).toObject().value(u"config"_q).toObject()
+		.value(u"issued_records"_q).toArray()[0].toObject()
+		.value(u"future_entry"_q).toBool());
+	auto libraryLog = withUnknown.state;
+	libraryLog.library.seq = 1;
+	libraryLog.library.pendingSeq = 1;
+	libraryLog.library.ownHash = QString(64, u'a');
+	libraryLog.library.issuedRecords.push_back({
+		1, QString(64, u'b'), QJsonObject{ { u"future"_q, 4 } } });
+	const auto librarySaved = Purple::SerializeSyncLocalState(libraryLog);
+	CHECK(bool(librarySaved));
+	const auto libraryRead = Purple::ParseSyncLocalState(
+		librarySaved.canonical);
+	CHECK(bool(libraryRead));
+	CHECK(libraryRead.state.library.issuedRecords[0].preserved
+		.value(u"future"_q).toInt() == 4);
+	const auto malformed = [&](QJsonArray values) {
+		auto changed = document;
+		auto changedStreams = streams;
+		auto changedConfig = config;
+		changedConfig.insert(u"issued_records"_q, values);
+		changedStreams.insert(u"config"_q, changedConfig);
+		changed.insert(u"streams"_q, changedStreams);
+		CHECK(Purple::ParseSyncLocalState(
+			QJsonDocument(changed).toJson(QJsonDocument::Compact)).error
+			== Purple::SyncLocalError::InvalidIssuedRecords);
+	};
+	malformed(QJsonArray{ issued[0], issued[0] });
+	malformed(QJsonArray{ QJsonObject{ { u"seq"_q, 0 },
+		{ u"record_sha256"_q, entry.value(u"record_sha256"_q) } } });
+	malformed(QJsonArray{ QJsonObject{ { u"seq"_q, 2 },
+		{ u"record_sha256"_q, entry.value(u"record_sha256"_q) } } });
+	malformed(QJsonArray{ QJsonObject{ { u"seq"_q, 1 },
+		{ u"record_sha256"_q, QString(64, u'A') } } });
+	malformed(QJsonArray{ QJsonObject{ { u"seq"_q, 1 } } });
+	auto tooMany = QJsonArray();
+	for (auto i = 0; i != 33; ++i) {
+		tooMany.append(issued[0]);
+	}
+	malformed(tooMany);
+	auto confirmed = withUnknown.state;
+	confirmed.config.pendingSeq = 0;
+	confirmed.config.confirmedSeq = 1;
+	const auto second = Purple::BuildConfigRecord({
+		"version = 1\nname = 'second'\n",
+		{ first.version }, std::nullopt, state.space, state.install,
+		state.createdDevice, u"macos"_q, u"Purple"_q, 2, 0,
+	});
+	CHECK(bool(second));
+	confirmed.config.seq = 2;
+	confirmed.config.confirmedSeq = 2;
+	confirmed.config.ownHash = second.payloadHash;
+	CHECK(Purple::RecordConfirmedOwnConfigMessage(
+			confirmed, 100, first.canonical).error
+		== Purple::SyncOwnMessageError::RecordMismatch);
+	const auto adopted = Purple::AdoptIssuedOwnConfigMessage(
+		confirmed, 100, first.canonical);
+	CHECK(bool(adopted));
+	CHECK(adopted.changed);
+	CHECK(bool(Purple::CheckOwnConfigMessageDeletion(
+		adopted.state, 100, first.canonical)));
+	CHECK(!Purple::AdoptIssuedOwnConfigMessage(
+		adopted.state, 100, first.canonical).changed);
+	auto movedSpace = confirmed;
+	movedSpace.space = u"sp-"_q + QString(25, u'a') + u'e';
+	const auto oldSpaceAdopted = Purple::AdoptIssuedOwnConfigMessage(
+		movedSpace, 104, first.canonical);
+	CHECK(bool(oldSpaceAdopted));
+	CHECK(oldSpaceAdopted.changed);
+	CHECK(oldSpaceAdopted.state.ownMessages.back().space == state.space);
+	CHECK(bool(Purple::CheckOwnConfigMessageDeletion(
+		oldSpaceAdopted.state, 104, first.canonical)));
+	const auto otherSpaceRecord = Purple::BuildConfigRecord({
+		"version = 1\nname = 'first'\n",
+		{}, std::nullopt, movedSpace.space, state.install,
+		state.createdDevice, u"macos"_q, u"Purple"_q, 1, 0,
+	});
+	CHECK(bool(otherSpaceRecord));
+	CHECK(Purple::AdoptIssuedOwnConfigMessage(
+			movedSpace, 105, otherSpaceRecord.canonical).error
+		== Purple::SyncOwnMessageError::UnissuedRecord);
+	CHECK(Purple::AdoptIssuedOwnConfigMessage(
+			adopted.state, 100, second.canonical).error
+		== Purple::SyncOwnMessageError::UnissuedRecord);
+	auto conflictingId = confirmed;
+	const auto currentHead = Purple::RecordConfirmedOwnConfigMessage(
+		conflictingId, 100, second.canonical);
+	CHECK(bool(currentHead));
+	CHECK(Purple::AdoptIssuedOwnConfigMessage(
+			currentHead.state, 100, first.canonical).error
+		== Purple::SyncOwnMessageError::IdConflict);
+	CHECK(Purple::AdoptIssuedOwnConfigMessage(
+			confirmed, 101, changedMetadata.canonical).error
+		== Purple::SyncOwnMessageError::UnissuedRecord);
+	CHECK(Purple::AdoptIssuedOwnConfigMessage(
+			confirmed, 101, foreignInstall.canonical).error
+		== Purple::SyncOwnMessageError::RecordMismatch);
+	CHECK(Purple::AdoptIssuedOwnConfigMessage(
+			confirmed, 101, foreignDevice.canonical).error
+		== Purple::SyncOwnMessageError::RecordMismatch);
+	auto unlogged = confirmed;
+	unlogged.config.issuedRecords.clear();
+	CHECK(Purple::AdoptIssuedOwnConfigMessage(
+			unlogged, 102, first.canonical).error
+		== Purple::SyncOwnMessageError::UnissuedRecord);
+	auto notYetConfirmed = withUnknown.state;
+	notYetConfirmed.config.confirmedSeq = 0;
+	CHECK(Purple::AdoptIssuedOwnConfigMessage(
+			notYetConfirmed, 102, first.canonical).error
+		== Purple::SyncOwnMessageError::RecordMismatch);
+	CHECK(bool(Purple::RecordConfirmedOwnConfigMessage(
+		unlogged, 103, second.canonical)));
+	auto evict = confirmed;
+	evict.config.seq = 33;
+	evict.config.confirmedSeq = 32;
+	evict.config.pendingSeq = 33;
+	const auto thirtyThird = Purple::BuildConfigRecord({
+		"version = 1\nname = 'first'\n",
+		{}, std::nullopt, state.space, state.install, state.createdDevice,
+		u"macos"_q, u"Purple"_q, 33, 0,
+	});
+	CHECK(bool(thirtyThird));
+	evict.config.ownHash = thirtyThird.payloadHash;
+	evict.config.issuedRecords.clear();
+	for (auto seq = 1; seq <= 32; ++seq) {
+		evict.config.issuedRecords.push_back({
+			uint64_t(seq), QString(64, u'a') });
+	}
+	const auto evicted = Purple::AppendIssuedConfigRecord(
+		evict, thirtyThird.canonical);
+	CHECK(bool(evicted));
+	CHECK_EQ(evicted.state.config.issuedRecords.size(), size_t(32));
+	CHECK_EQ(evicted.state.config.issuedRecords.front().seq, uint64_t(2));
+	CHECK_EQ(evicted.state.config.issuedRecords.back().seq, uint64_t(33));
+}
+
 void TestConfigConfirmationTransition() {
 	Begin("config confirmation transition");
 	auto state = Purple::SyncLocalState();
@@ -10236,6 +10456,7 @@ int main() {
 	TestConfigRecordBuilder();
 	TestSyncLocalState();
 	TestOwnMessageLedger();
+	TestIssuedRecordAdoption();
 	TestConfigConfirmationTransition();
 	TestSyncSimulation();
 	TestConfigVersions();

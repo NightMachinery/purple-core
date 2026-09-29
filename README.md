@@ -125,6 +125,25 @@ rules about data are far easier to prove outside a running app than inside one.
   reports authoritative absence for the same ID. The caller persists every
   returned state and performs all Telegram reads and deletes; core does no I/O.
 
+  Each stream may also hold `issued_records`, an ordered log of at most 32
+  sequence and canonical-record SHA-256 pairs. Older state files load an empty
+  log; unknown members of its entries survive rewrites. After staging a
+  reserved config record, call `AppendIssuedConfigRecord` and persist its
+  returned state in the same state write as the reservation, before sending.
+  It validates the complete canonical config record and its install, creating
+  device, sequence and payload hash. A repeated identical append is harmless;
+  the oldest pair is evicted when the log reaches 32 entries.
+  `AdoptIssuedOwnConfigMessage` can add a discovered older config message to
+  the ledger only when its exact record hash remains in this log, its writer
+  matches this install and creating device, and its sequence is confirmed.
+  Adoption never deletes a message. Retirement still requires a ledger entry
+  and a fresh exact-record check through `CheckOwnConfigMessageDeletion`.
+  An exact issued record from the install's previous space can also be adopted
+  after a space move; an unissued record from any space cannot.
+  Existing current-head recording remains valid for state files that predate
+  the log. Library log data is parsed and preserved, but library issuance and
+  adoption await library payload validation.
+
 The platform publisher must build the complete envelope for the reserved
 sequence, atomically stage its bytes at
 `sync/pending/<stream>-<seq>.json`, durably persist the new state and hash,
