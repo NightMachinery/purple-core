@@ -30,6 +30,7 @@ constexpr auto kMaximumStateBytes = 4 * 1024 * 1024;
 constexpr auto kMaximumDeviceBytes = 256;
 constexpr auto kMaximumOwnMessages = 256;
 constexpr auto kMaximumIssuedRecords = 32;
+constexpr auto kBindingTokenBytes = 16;
 
 [[nodiscard]] SyncLocalParseResult Invalid(SyncLocalError error) {
 	return { SyncLocalStatus::Invalid, error, {} };
@@ -48,6 +49,19 @@ constexpr auto kMaximumIssuedRecords = 32;
 
 [[nodiscard]] bool ValidHash(const QString &value) {
 	if (value.size() != 64) {
+		return false;
+	}
+	for (const auto character : value) {
+		if (!((character >= u'0' && character <= u'9')
+			|| (character >= u'a' && character <= u'f'))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] bool ValidBindingToken(const QString &value) {
+	if (value.size() != 2 * kBindingTokenBytes) {
 		return false;
 	}
 	for (const auto character : value) {
@@ -433,6 +447,7 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 	const auto createdDevice = document.value(u"created_device"_q);
 	const auto space = document.value(u"space"_q);
 	const auto streams = document.value(u"streams"_q);
+	const auto bindingToken = document.value(u"binding_token"_q);
 	if (!install.isString() || !createdDevice.isString()
 		|| !space.isString() || !streams.isObject()) {
 		return Invalid(SyncLocalError::FieldType);
@@ -443,6 +458,11 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 	}
 	if (createdDevice.toString().toUtf8().size() > kMaximumDeviceBytes) {
 		return Invalid(SyncLocalError::InvalidValue);
+	}
+	if (!bindingToken.isUndefined()
+		&& (!bindingToken.isString()
+			|| !ValidBindingToken(bindingToken.toString()))) {
+		return Invalid(SyncLocalError::InvalidBindingToken);
 	}
 	const auto streamObjects = streams.toObject();
 	if (!streamObjects.contains(u"config"_q)
@@ -458,6 +478,7 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 	state.install = install.toString();
 	state.createdDevice = createdDevice.toString();
 	state.space = space.toString();
+	state.bindingToken = bindingToken.toString();
 	state.preserved = document;
 	auto error = SyncLocalError::None;
 	if (!ReadStream(config.toObject(), state.config, error)
@@ -479,6 +500,11 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 	}
 	if (state.version != 1) {
 		return { {}, SyncLocalStatus::Invalid, SyncLocalError::InvalidValue };
+	}
+	if (!state.bindingToken.isEmpty()
+		&& !ValidBindingToken(state.bindingToken)) {
+		return { {}, SyncLocalStatus::Invalid,
+			SyncLocalError::InvalidBindingToken };
 	}
 	for (const auto stream : { &state.config, &state.library }) {
 		if (stream->seq > kMaximumSafeInteger
@@ -522,6 +548,11 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 	document.insert(u"install"_q, state.install);
 	document.insert(u"created_device"_q, state.createdDevice);
 	document.insert(u"space"_q, state.space);
+	if (state.bindingToken.isEmpty()) {
+		document.remove(u"binding_token"_q);
+	} else {
+		document.insert(u"binding_token"_q, state.bindingToken);
+	}
 	auto streams = document.value(u"streams"_q).toObject();
 	auto config = streams.value(u"config"_q).toObject();
 	auto library = streams.value(u"library"_q).toObject();
@@ -556,6 +587,34 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 		return { {}, validated.status, validated.error };
 	}
 	return { canonical.canonical, SyncLocalStatus::Valid };
+}
+
+std::optional<QString> FormatSyncBindingToken(const QByteArray &entropy) {
+	if (entropy.size() != kBindingTokenBytes) {
+		return std::nullopt;
+	}
+	return QString::fromLatin1(entropy.toHex());
+}
+
+SyncAccountBindingVerdict CheckSyncAccountBinding(
+		const SyncLocalState &state,
+		const QByteArray &accountPrefToken) {
+	if (!SerializeSyncLocalState(state)) {
+		return SyncAccountBindingVerdict::InvalidState;
+	}
+	if (state.bindingToken.isEmpty()) {
+		return SyncAccountBindingVerdict::MissingStateToken;
+	}
+	if (accountPrefToken.isEmpty()) {
+		return SyncAccountBindingVerdict::MissingAccountToken;
+	}
+	if (!ValidBindingToken(QString::fromLatin1(accountPrefToken))
+		|| accountPrefToken.size() != 2 * kBindingTokenBytes) {
+		return SyncAccountBindingVerdict::InvalidAccountToken;
+	}
+	return (accountPrefToken == state.bindingToken.toLatin1())
+		? SyncAccountBindingVerdict::Bound
+		: SyncAccountBindingVerdict::Mismatch;
 }
 
 SyncIssueResult AppendIssuedConfigRecord(

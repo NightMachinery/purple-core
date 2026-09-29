@@ -9496,6 +9496,85 @@ void TestSyncLocalState() {
 		== Purple::SyncLocalError::SizeLimit);
 }
 
+void TestSyncAccountBinding() {
+	Begin("sync account binding");
+	CHECK(!Purple::FormatSyncBindingToken(QByteArray(15, '\0')));
+	CHECK(!Purple::FormatSyncBindingToken(QByteArray(17, '\0')));
+	const auto entropy = QByteArray::fromHex(
+		"00112233445566778899aabbccddeeff");
+	const auto token = Purple::FormatSyncBindingToken(entropy);
+	CHECK(token.has_value());
+	CHECK(*token == u"00112233445566778899aabbccddeeff"_q);
+	CHECK(Purple::FormatSyncBindingToken(QByteArray(16, char(0xff)))
+		== QString(32, u'f'));
+
+	auto state = Purple::SyncLocalState();
+	state.install = u"in-"_q + QString(26, u'a');
+	state.space = u"sp-"_q + QString(26, u'a');
+	state.createdDevice = u"device-a"_q;
+	state.preserved.insert(u"future_root"_q, 42);
+	const auto legacy = Purple::SerializeSyncLocalState(state);
+	CHECK(bool(legacy));
+	CHECK(!legacy.canonical.contains("binding_token"));
+	const auto legacyRead = Purple::ParseSyncLocalState(legacy.canonical);
+	CHECK(bool(legacyRead));
+	CHECK(legacyRead.state.bindingToken.isEmpty());
+	CHECK(Purple::SerializeSyncLocalState(legacyRead.state).canonical
+		== legacy.canonical);
+	CHECK(Purple::CheckSyncAccountBinding(legacyRead.state, token->toLatin1())
+		== Purple::SyncAccountBindingVerdict::MissingStateToken);
+
+	state.bindingToken = *token;
+	const auto saved = Purple::SerializeSyncLocalState(state);
+	CHECK(bool(saved));
+	const auto parsed = Purple::ParseSyncLocalState(saved.canonical);
+	CHECK(bool(parsed));
+	CHECK(parsed.state.bindingToken == *token);
+	CHECK(parsed.state.preserved.value(u"future_root"_q).toInt() == 42);
+	CHECK(Purple::CheckSyncAccountBinding(parsed.state, QByteArray())
+		== Purple::SyncAccountBindingVerdict::MissingAccountToken);
+	CHECK(Purple::CheckSyncAccountBinding(parsed.state, QByteArray(32, 'a'))
+		== Purple::SyncAccountBindingVerdict::Mismatch);
+	CHECK(Purple::CheckSyncAccountBinding(parsed.state, token->toUpper().toLatin1())
+		== Purple::SyncAccountBindingVerdict::InvalidAccountToken);
+	CHECK(Purple::CheckSyncAccountBinding(parsed.state, QByteArray(31, 'a'))
+		== Purple::SyncAccountBindingVerdict::InvalidAccountToken);
+	CHECK(Purple::CheckSyncAccountBinding(parsed.state, QByteArray(32, 'g'))
+		== Purple::SyncAccountBindingVerdict::InvalidAccountToken);
+	CHECK(Purple::CheckSyncAccountBinding(parsed.state, token->toLatin1())
+		== Purple::SyncAccountBindingVerdict::Bound);
+
+	auto moved = parsed.state;
+	moved.space = u"sp-"_q + QString(25, u'a') + u'e';
+	moved.install = u"in-"_q + QString(25, u'a') + u'e';
+	CHECK(bool(Purple::SerializeSyncLocalState(moved)));
+	CHECK(Purple::CheckSyncAccountBinding(moved, token->toLatin1())
+		== Purple::SyncAccountBindingVerdict::Bound);
+	CHECK(QJsonDocument::fromJson(
+			Purple::SerializeSyncLocalState(moved).canonical).object()
+		.value(u"future_root"_q).toInt() == 42);
+
+	const auto invalid = [&](const QJsonValue &value) {
+		auto document = QJsonDocument::fromJson(saved.canonical).object();
+		document.insert(u"binding_token"_q, value);
+		const auto parsed = Purple::ParseSyncLocalState(
+			QJsonDocument(document).toJson(QJsonDocument::Compact));
+		CHECK(parsed.error == Purple::SyncLocalError::InvalidBindingToken);
+	};
+	invalid(u""_q);
+	invalid(u"ABCDEF0123456789abcdef0123456789"_q);
+	invalid(u"abcdef0123456789abcdef012345678"_q);
+	invalid(1);
+	state.bindingToken = u"ABCDEF0123456789abcdef0123456789"_q;
+	CHECK(Purple::SerializeSyncLocalState(state).error
+		== Purple::SyncLocalError::InvalidBindingToken);
+	CHECK(Purple::CheckSyncAccountBinding(state, token->toLatin1())
+		== Purple::SyncAccountBindingVerdict::InvalidState);
+	state.bindingToken.clear();
+	state.preserved.insert(u"binding_token"_q, *token);
+	CHECK(!Purple::SerializeSyncLocalState(state).canonical.contains("binding_token"));
+}
+
 void TestOwnMessageLedger() {
 	Begin("own message ledger");
 	auto state = Purple::SyncLocalState();
@@ -10455,6 +10534,7 @@ int main() {
 	TestConfigPayload();
 	TestConfigRecordBuilder();
 	TestSyncLocalState();
+	TestSyncAccountBinding();
 	TestOwnMessageLedger();
 	TestIssuedRecordAdoption();
 	TestConfigConfirmationTransition();

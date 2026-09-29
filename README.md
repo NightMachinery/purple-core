@@ -96,6 +96,7 @@ rules about data are far easier to prove outside a running app than inside one.
   See `docs/sync-status.md` for the input and output contract.
 - `purple/purple_sync_local_state.{h,cpp}` - validates and writes versioned,
   device-local `sync/state.json` data: install, creation-device and space IDs;
+  an optional account binding token;
   per-stream issue, pending and confirmation counters and the hash for the
   highest issued payload; and config ancestry and per-writer seen sequences.
   Unknown JSON members survive rewrites. Reserving a publish returns a new
@@ -144,13 +145,24 @@ rules about data are far easier to prove outside a running app than inside one.
   the log. Library log data is parsed and preserved, but library issuance and
   adoption await library payload validation.
 
+  `FormatSyncBindingToken` formats exactly 16 platform-supplied secure random
+  bytes as 32 lowercase hex characters. The same token is stored in the
+  chosen account's local preferences and in `state.json` as `binding_token`.
+  An absent field loads as empty for older states, while a present empty or
+  malformed field is invalid. Writing an empty token omits the field.
+  `CheckSyncAccountBinding` compares a valid state with the account preference
+  bytes and reports bound, missing, malformed, or mismatched outcomes. The
+  future publisher must require `Bound` before publishing. The token stays
+  unchanged across space moves and install-ID changes; neither it nor the
+  device-local state stores a Telegram user ID.
+
 The platform publisher must build the complete envelope for the reserved
 sequence, atomically stage its bytes at
 `sync/pending/<stream>-<seq>.json`, durably persist the new state and hash,
 then upload. On restart, a pending state requires matching staged bytes;
 missing or mismatched bytes pause publishing and report corruption. The stage
 can be removed after confirmed read-back. The shared core performs no file or
-network I/O, and `state.json` contains no account binding. There is no older
+network I/O. There is no older
 `state.json` schema to migrate; partial version 1 files are rejected instead of
 guessing defaults.
 - `purple/purple_engine.{h,cpp}` - resolves a preset into a flat table of "for

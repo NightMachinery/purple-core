@@ -13,6 +13,7 @@ option) any later version.
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace Purple {
@@ -63,6 +64,7 @@ struct SyncLocalState {
 	QString install;
 	QString createdDevice;
 	QString space;
+	QString bindingToken;
 	SyncLocalStreamState config;
 	SyncLocalStreamState library;
 	SyncLocalConfigState configData;
@@ -89,6 +91,7 @@ enum class SyncLocalError {
 	InvalidConfig,
 	InvalidOwnMessages,
 	InvalidIssuedRecords,
+	InvalidBindingToken,
 };
 
 struct SyncLocalParseResult {
@@ -147,6 +150,15 @@ enum class SyncCloneVerdict {
 	RemoteAhead,
 	HashMismatch,
 	InvalidObservation,
+};
+
+enum class SyncAccountBindingVerdict {
+	Bound,
+	MissingStateToken,
+	MissingAccountToken,
+	InvalidAccountToken,
+	Mismatch,
+	InvalidState,
 };
 
 struct SyncConfirmation {
@@ -240,6 +252,11 @@ enum class SyncOwnMessagePresence {
 	const QByteArray &json);
 [[nodiscard]] SyncLocalWriteResult SerializeSyncLocalState(
 	const SyncLocalState &state);
+[[nodiscard]] std::optional<QString> FormatSyncBindingToken(
+	const QByteArray &entropy);
+[[nodiscard]] SyncAccountBindingVerdict CheckSyncAccountBinding(
+	const SyncLocalState &state,
+	const QByteArray &accountPrefToken);
 [[nodiscard]] SyncReservation ReserveSyncSeq(
 	const SyncLocalState &state,
 	SyncLocalStream stream,
