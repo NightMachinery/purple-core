@@ -11,6 +11,7 @@ option) any later version.
 #include <QtCore/QJsonObject>
 #include <QtCore/QString>
 
+#include <cstdint>
 #include <optional>
 
 namespace Purple {
@@ -62,6 +63,12 @@ struct SyncEnvelopeWriteResult {
 [[nodiscard]] bool IsSyncInstallId(const QString &value);
 [[nodiscard]] std::optional<QString> FormatSyncSpaceId(
 	const QByteArray &entropy);
+[[nodiscard]] std::optional<QString> FormatTimeOrderedSyncSpaceId(
+	uint64_t serverMillis,
+	const QByteArray &randomTail);
+[[nodiscard]] std::optional<int> CompareSyncSpaceIds(
+	const QString &a,
+	const QString &b);
 [[nodiscard]] std::optional<QString> FormatSyncInstallId(
 	const QByteArray &entropy);
 [[nodiscard]] SyncEnvelopeParseResult ParseSyncEnvelope(

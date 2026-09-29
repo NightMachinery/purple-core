@@ -8607,6 +8607,48 @@ void TestSyncIdFormatting() {
 	}
 }
 
+void TestTimeOrderedSyncSpaceIds() {
+	Begin("time ordered sync space ids");
+	const auto tail = QByteArray::fromHex("060708090a0b0c0d0e0f");
+	const auto vector = Purple::FormatTimeOrderedSyncSpaceId(
+		0x000102030405ULL, tail);
+	CHECK(vector == u"sp-aaaqeayeaudaocajbifqydiob4"_q);
+	CHECK(Purple::IsSyncSpaceId(*vector));
+	const auto earlier = Purple::FormatTimeOrderedSyncSpaceId(
+		1, QByteArray(10, char(0xff)));
+	const auto later = Purple::FormatTimeOrderedSyncSpaceId(
+		2, QByteArray(10, char(0)));
+	CHECK(earlier.has_value());
+	CHECK(later.has_value());
+	CHECK(Purple::CompareSyncSpaceIds(*earlier, *later) == -1);
+	CHECK(Purple::CompareSyncSpaceIds(*later, *earlier) == 1);
+	CHECK(Purple::CompareSyncSpaceIds(*earlier, *earlier) == 0);
+	const auto lowTail = Purple::FormatTimeOrderedSyncSpaceId(
+		2, QByteArray(10, char(0)));
+	const auto highTail = Purple::FormatTimeOrderedSyncSpaceId(
+		2, QByteArray(10, char(0xff)));
+	CHECK(Purple::CompareSyncSpaceIds(*lowTail, *highTail) == -1);
+	const auto lexicalLow = Purple::FormatSyncSpaceId(
+		QByteArray::fromHex("c8000000000000000000000000000000"));
+	const auto lexicalHigh = Purple::FormatSyncSpaceId(
+		QByteArray::fromHex("d0000000000000000000000000000000"));
+	CHECK(*lexicalLow > *lexicalHigh);
+	CHECK(Purple::CompareSyncSpaceIds(*lexicalLow, *lexicalHigh) == -1);
+	CHECK(!Purple::FormatTimeOrderedSyncSpaceId(0, tail));
+	CHECK(!Purple::FormatTimeOrderedSyncSpaceId(
+		uint64_t(1) << 48, tail));
+	CHECK(!Purple::FormatTimeOrderedSyncSpaceId(
+		(uint64_t(1) << 48) + 1, tail));
+	CHECK(!Purple::FormatTimeOrderedSyncSpaceId(1, QByteArray(9, 'a')));
+	CHECK(!Purple::FormatTimeOrderedSyncSpaceId(1, QByteArray(11, 'a')));
+	CHECK(!Purple::CompareSyncSpaceIds(u"invalid"_q, *vector));
+	CHECK(!Purple::CompareSyncSpaceIds(*vector, u"in-"_q
+		+ QString(26, u'a')));
+	CHECK(!Purple::CompareSyncSpaceIds(
+		u"sp-"_q + QString(25, u'a') + u'b', *vector));
+	CHECK(Purple::IsSyncSpaceId(u"sp-"_q + QString(26, u'a')));
+}
+
 void TestSyncEnvelope() {
 	Begin("sync envelope");
 	const auto space = u"sp-"_q + QString(26, u'a');
@@ -9745,6 +9787,7 @@ void TestSyncSimulation() {
 int main() {
 	TestSyncJson();
 	TestSyncIdFormatting();
+	TestTimeOrderedSyncSpaceIds();
 	TestSyncEnvelope();
 	TestConfigPayload();
 	TestConfigRecordBuilder();

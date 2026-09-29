@@ -51,7 +51,11 @@ rules about data are far easier to prove outside a running app than inside one.
   hash; it preserves unknown JSON members at every level. Its ID formatters
   encode exactly 16 caller-supplied entropy bytes as lowercase unpadded
   RFC 4648 base32 with `in-` or `sp-` prefixes; the core does not generate
-  randomness. Writing recomputes the payload hash and emits canonical JSON.
+  randomness. `FormatTimeOrderedSyncSpaceId` places a caller-supplied trusted
+  server-time estimate in milliseconds before a caller-supplied secure random
+  tail, while `FormatSyncSpaceId` keeps formatting any 16 bytes. Valid space
+  IDs can be compared by decoded bytes with `CompareSyncSpaceIds`. Writing
+  recomputes the payload hash and emits canonical JSON.
   Invalid records report a reason, while a higher major or unsupported encoding
   has a separate outcome. Config records are capped at 256 KiB and library
   records at 4 MiB, including the full document bytes. The caller must

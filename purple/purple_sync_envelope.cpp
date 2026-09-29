@@ -138,6 +138,33 @@ struct Validation {
 	return QString::fromLatin1(result);
 }
 
+[[nodiscard]] std::optional<QByteArray> DecodeId(
+		const QString &value,
+		const char *prefix) {
+	if (!ValidId(value, prefix)) {
+		return std::nullopt;
+	}
+	auto decoded = QByteArray();
+	decoded.reserve(16);
+	auto buffer = uint32_t(0);
+	auto bits = 0;
+	const auto encoded = value.toLatin1();
+	for (auto index = 3; index != encoded.size(); ++index) {
+		const auto character = encoded[index];
+		const auto digit = (character >= 'a' && character <= 'z')
+			? character - 'a' : character - '2' + 26;
+		buffer = (buffer << 5) | uint32_t(digit);
+		bits += 5;
+		if (bits >= 8) {
+			bits -= 8;
+			decoded.append(char((buffer >> bits) & 255));
+			buffer &= (uint32_t(1) << bits) - 1;
+		}
+	}
+	return (decoded.size() == 16 && buffer == 0)
+		? std::optional(decoded) : std::nullopt;
+}
+
 [[nodiscard]] bool ValidMetadata(const QJsonValue &value) {
 	if (!value.isString()) {
 		return false;
@@ -300,6 +327,40 @@ bool IsSyncInstallId(const QString &value) {
 
 std::optional<QString> FormatSyncSpaceId(const QByteArray &entropy) {
 	return FormatId(entropy, "sp-");
+}
+
+std::optional<QString> FormatTimeOrderedSyncSpaceId(
+		uint64_t serverMillis,
+		const QByteArray &randomTail) {
+	if (serverMillis == 0 || serverMillis >= (uint64_t(1) << 48)
+		|| randomTail.size() != 10) {
+		return std::nullopt;
+	}
+	auto bytes = QByteArray();
+	bytes.reserve(16);
+	for (auto shift = 40; shift >= 0; shift -= 8) {
+		bytes.append(char((serverMillis >> shift) & 255));
+	}
+	bytes.append(randomTail);
+	return FormatSyncSpaceId(bytes);
+}
+
+std::optional<int> CompareSyncSpaceIds(
+		const QString &a,
+		const QString &b) {
+	const auto left = DecodeId(a, "sp-");
+	const auto right = DecodeId(b, "sp-");
+	if (!left || !right) {
+		return std::nullopt;
+	}
+	for (auto index = 0; index != left->size(); ++index) {
+		const auto x = uint8_t((*left)[index]);
+		const auto y = uint8_t((*right)[index]);
+		if (x != y) {
+			return x < y ? -1 : 1;
+		}
+	}
+	return 0;
 }
 
 std::optional<QString> FormatSyncInstallId(const QByteArray &entropy) {
