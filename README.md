@@ -65,6 +65,27 @@ rules about data are far easier to prove outside a running app than inside one.
   Arbitrary non-UTF-8 settings bytes cannot be represented by a JSON string.
   Without the parent records, inspection cannot prove that lineage is the
   complete union of their histories; it verifies membership and structure.
+- `purple/purple_sync_local_state.{h,cpp}` - validates and writes versioned,
+  device-local `sync/state.json` data: install, creation-device and space IDs;
+  per-stream issue, pending and confirmation counters and the hash for the
+  highest issued payload; and config ancestry and per-writer seen sequences.
+  Unknown JSON members survive rewrites. Reserving a publish returns a new
+  state with a higher `seq` and `pending_seq`, while confirmation clears pending
+  only after a matching own record is read back. Pure clone checks report a
+  changed device ID, an observed own sequence ahead of local state, or a
+  different hash at the same sequence. They require the caller to supply a
+  validated own record or an authoritative absence result; unresolved discovery
+  leaves the publish gate closed.
+
+The platform publisher must build the complete envelope for the reserved
+sequence, atomically stage its bytes at
+`sync/pending/<stream>-<seq>.json`, durably persist the new state and hash,
+then upload. On restart, a pending state requires matching staged bytes;
+missing or mismatched bytes pause publishing and report corruption. The stage
+can be removed after confirmed read-back. The shared core performs no file or
+network I/O, and `state.json` contains no account binding. There is no older
+`state.json` schema to migrate; partial version 1 files are rejected instead of
+guessing defaults.
 - `purple/purple_engine.{h,cpp}` - resolves a preset into a flat table of "for
   this list, show and notify are these", and answers what that means for one
   chat. Resolution runs once per config or preset change, never per repaint.

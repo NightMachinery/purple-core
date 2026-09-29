@@ -188,7 +188,7 @@ struct Validation {
 	if (!space.isString()) {
 		return Invalid(SyncEnvelopeError::FieldType);
 	}
-	if (!ValidId(space.toString(), "sp-")) {
+	if (!IsSyncSpaceId(space.toString())) {
 		return Invalid(SyncEnvelopeError::InvalidId);
 	}
 	const auto writer = document.value(u"writer"_q);
@@ -206,7 +206,7 @@ struct Validation {
 	if (!install.isString()) {
 		return Invalid(SyncEnvelopeError::FieldType);
 	}
-	if (!ValidId(install.toString(), "in-")) {
+	if (!IsSyncInstallId(install.toString())) {
 		return Invalid(SyncEnvelopeError::InvalidId);
 	}
 	for (const auto field : { u"device"_q, u"platform"_q, u"app"_q }) {
@@ -263,6 +263,14 @@ struct Validation {
 }
 
 } // namespace
+
+bool IsSyncSpaceId(const QString &value) {
+	return ValidId(value, "sp-");
+}
+
+bool IsSyncInstallId(const QString &value) {
+	return ValidId(value, "in-");
+}
 
 SyncEnvelopeParseResult ParseSyncEnvelope(const QByteArray &json) {
 	if (json.size() > kLibraryBytes) {

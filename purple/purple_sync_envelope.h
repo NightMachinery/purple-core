@@ -9,6 +9,7 @@ option) any later version.
 
 #include <QtCore/QByteArray>
 #include <QtCore/QJsonObject>
+#include <QtCore/QString>
 
 namespace Purple {
 
@@ -55,6 +56,8 @@ struct SyncEnvelopeWriteResult {
 	}
 };
 
+[[nodiscard]] bool IsSyncSpaceId(const QString &value);
+[[nodiscard]] bool IsSyncInstallId(const QString &value);
 [[nodiscard]] SyncEnvelopeParseResult ParseSyncEnvelope(
 	const QByteArray &json);
 [[nodiscard]] SyncEnvelopeWriteResult SerializeSyncEnvelope(

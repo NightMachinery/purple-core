@@ -22,6 +22,7 @@ option) any later version.
 #include "purple/purple_state.h"
 #include "purple/purple_sync_json.h"
 #include "purple/purple_sync_envelope.h"
+#include "purple/purple_sync_local_state.h"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QJsonArray>
@@ -8924,12 +8925,228 @@ void TestConfigPayload() {
 		== Purple::ConfigPayloadError::InvalidEnvelope);
 }
 
+void TestSyncLocalState() {
+	Begin("sync local state");
+	const auto install = u"in-"_q + QString(26, u'a');
+	const auto otherInstall = u"in-"_q + QString(25, u'a') + u'e';
+	const auto space = u"sp-"_q + QString(26, u'a');
+	const auto hashA = QString(64, u'a');
+	const auto hashB = QString(64, u'b');
+	auto state = Purple::SyncLocalState();
+	state.install = install;
+	state.createdDevice = u"device-1"_q;
+	state.space = space;
+	const auto first = Purple::MakeConfigVersion("version = 1\n", {});
+	const auto second = Purple::MakeConfigVersion("version = 1\n[premium]\n",
+		{ *first });
+	CHECK(first.has_value());
+	CHECK(second.has_value());
+	state.configData.base = second->key;
+	state.configData.baseLineage = { first->key };
+	state.configData.equiv = { first->key };
+	state.configData.pending = second->key;
+	state.configData.seenSeq[otherInstall] = 7;
+	state.preserved = QJsonObject{
+		{ u"future_root"_q, QJsonObject{ { u"kept"_q, true } } },
+		{ u"streams"_q, QJsonObject{
+			{ u"future_stream"_q, QJsonArray{ 1, 2 } },
+			{ u"config"_q, QJsonObject{
+				{ u"future_config"_q, u"intact"_q },
+			} },
+			{ u"library"_q, QJsonObject{
+				{ u"future_library"_q, 9 },
+			} },
+		} },
+	};
+	const auto serialized = Purple::SerializeSyncLocalState(state);
+	CHECK(bool(serialized));
+	CHECK(!serialized.canonical.contains("account"));
+	const auto parsed = Purple::ParseSyncLocalState(serialized.canonical);
+	CHECK(bool(parsed));
+	CHECK(parsed.state.install == install);
+	CHECK(parsed.state.configData.base == second->key);
+	CHECK(parsed.state.configData.baseLineage == state.configData.baseLineage);
+	CHECK_EQ(parsed.state.configData.seenSeq.at(otherInstall), uint64_t(7));
+	const auto rewritten = Purple::SerializeSyncLocalState(parsed.state);
+	CHECK(bool(rewritten));
+	CHECK(rewritten.canonical == serialized.canonical);
+	const auto full = QJsonDocument::fromJson(rewritten.canonical).object();
+	CHECK(full.value(u"future_root"_q).toObject()
+		.value(u"kept"_q).toBool());
+	const auto streams = full.value(u"streams"_q).toObject();
+	CHECK_EQ(streams.value(u"future_stream"_q).toArray().size(), 2);
+	CHECK(streams.value(u"config"_q).toObject()
+		.value(u"future_config"_q).toString() == u"intact"_q);
+	CHECK_EQ(streams.value(u"library"_q).toObject()
+		.value(u"future_library"_q).toInt(), 9);
+
+	const auto reserved = Purple::ReserveSyncSeq(
+		parsed.state, Purple::SyncLocalStream::Config, hashA);
+	CHECK(bool(reserved));
+	CHECK_EQ(reserved.seq, uint64_t(1));
+	CHECK_EQ(reserved.state.config.pendingSeq, uint64_t(1));
+	CHECK_EQ(reserved.state.config.confirmedSeq, uint64_t(0));
+	CHECK(reserved.state.config.ownHash == hashA);
+	const auto pendingBytes = Purple::SerializeSyncLocalState(reserved.state);
+	CHECK(bool(pendingBytes));
+	CHECK(QJsonDocument::fromJson(pendingBytes.canonical).object()
+		.value(u"streams"_q).toObject().value(u"config"_q).toObject()
+		.value(u"future_config"_q).toString() == u"intact"_q);
+	const auto restored = Purple::ParseSyncLocalState(pendingBytes.canonical);
+	CHECK(bool(restored));
+	CHECK_EQ(restored.state.config.pendingSeq, uint64_t(1));
+	CHECK(restored.state.config.ownHash == hashA);
+	const auto unresolved = Purple::OwnRecordObservation();
+	const auto absent = Purple::OwnRecordObservation{
+		Purple::OwnRecordObservationKind::Absent,
+	};
+	const auto ownOne = Purple::OwnRecordObservation{
+		Purple::OwnRecordObservationKind::Present,
+		1,
+		hashA,
+	};
+	CHECK(Purple::CheckSyncClone(restored.state, u"device-1"_q,
+		Purple::SyncLocalStream::Config, unresolved)
+		== Purple::SyncCloneVerdict::PendingReconcile);
+	CHECK(Purple::CheckSyncClone(restored.state, u"device-2"_q,
+		Purple::SyncLocalStream::Config, unresolved)
+		== Purple::SyncCloneVerdict::DeviceMismatch);
+	CHECK(Purple::CheckSyncClone(restored.state, u"device-2"_q,
+		Purple::SyncLocalStream::Config, absent)
+		== Purple::SyncCloneVerdict::DeviceMismatch);
+	CHECK(Purple::CheckSyncClone(restored.state, u"device-1"_q,
+		Purple::SyncLocalStream::Config, absent)
+		== Purple::SyncCloneVerdict::NoClone);
+	CHECK(Purple::CheckSyncClone(restored.state, QString(),
+		Purple::SyncLocalStream::Config, ownOne)
+		== Purple::SyncCloneVerdict::NoClone);
+	auto unidentified = restored.state;
+	unidentified.createdDevice.clear();
+	CHECK(Purple::CheckSyncClone(unidentified, u"device-2"_q,
+		Purple::SyncLocalStream::Config, unresolved)
+		== Purple::SyncCloneVerdict::PendingReconcile);
+	CHECK(Purple::CheckSyncClone(restored.state, u"device-1"_q,
+		Purple::SyncLocalStream::Config, { Purple::OwnRecordObservationKind::Present,
+			2, hashB }) == Purple::SyncCloneVerdict::RemoteAhead);
+	CHECK(Purple::CheckSyncClone(restored.state, u"device-1"_q,
+		Purple::SyncLocalStream::Config, { Purple::OwnRecordObservationKind::Present,
+			1, hashB }) == Purple::SyncCloneVerdict::HashMismatch);
+	CHECK(Purple::CheckSyncClone(restored.state, u"device-1"_q,
+		Purple::SyncLocalStream::Config, { Purple::OwnRecordObservationKind::Present,
+			1, u"bad"_q }) == Purple::SyncCloneVerdict::InvalidObservation);
+	const auto premature = Purple::ConfirmSyncReadBack(restored.state,
+		u"device-1"_q, Purple::SyncLocalStream::Config, unresolved);
+	CHECK(!premature.changed);
+	CHECK_EQ(premature.state.config.pendingSeq, uint64_t(1));
+	const auto confirmed = Purple::ConfirmSyncReadBack(restored.state,
+		u"device-1"_q, Purple::SyncLocalStream::Config, ownOne);
+	CHECK(confirmed.changed);
+	CHECK(confirmed.verdict == Purple::SyncCloneVerdict::NoClone);
+	CHECK_EQ(confirmed.state.config.seq, uint64_t(1));
+	CHECK_EQ(confirmed.state.config.pendingSeq, uint64_t(0));
+	CHECK_EQ(confirmed.state.config.confirmedSeq, uint64_t(1));
+	CHECK(confirmed.state.config.ownHash == hashA);
+	const auto conflicting = Purple::ConfirmSyncReadBack(restored.state,
+		u"device-1"_q, Purple::SyncLocalStream::Config, {
+			Purple::OwnRecordObservationKind::Present, 1, hashB });
+	CHECK(!conflicting.changed);
+	CHECK(conflicting.verdict == Purple::SyncCloneVerdict::HashMismatch);
+	CHECK_EQ(conflicting.state.config.pendingSeq, uint64_t(1));
+	const auto repeated = Purple::ConfirmSyncReadBack(confirmed.state,
+		u"device-1"_q, Purple::SyncLocalStream::Config, ownOne);
+	CHECK(!repeated.changed);
+	const auto secondReserve = Purple::ReserveSyncSeq(confirmed.state,
+		Purple::SyncLocalStream::Config, hashB);
+	CHECK(bool(secondReserve));
+	CHECK_EQ(secondReserve.seq, uint64_t(2));
+	CHECK_EQ(secondReserve.state.config.confirmedSeq, uint64_t(1));
+	const auto stale = Purple::ConfirmSyncReadBack(secondReserve.state,
+		u"device-1"_q, Purple::SyncLocalStream::Config, ownOne);
+	CHECK(!stale.changed);
+	CHECK(stale.verdict == Purple::SyncCloneVerdict::NoClone);
+	CHECK_EQ(stale.state.config.pendingSeq, uint64_t(2));
+	CHECK(Purple::CheckSyncClone(secondReserve.state, u"device-1"_q,
+		Purple::SyncLocalStream::Config, {
+			Purple::OwnRecordObservationKind::Present, 1, hashB })
+		== Purple::SyncCloneVerdict::NoClone);
+	const auto thirdReserve = Purple::ReserveSyncSeq(secondReserve.state,
+		Purple::SyncLocalStream::Config, hashA);
+	CHECK(bool(thirdReserve));
+	CHECK_EQ(thirdReserve.seq, uint64_t(3));
+	CHECK_EQ(thirdReserve.state.config.pendingSeq, uint64_t(3));
+	const auto libraryReserve = Purple::ReserveSyncSeq(confirmed.state,
+		Purple::SyncLocalStream::Library, hashB);
+	CHECK(bool(libraryReserve));
+	CHECK_EQ(libraryReserve.state.library.pendingSeq, uint64_t(1));
+	CHECK_EQ(libraryReserve.state.config.pendingSeq, uint64_t(0));
+	CHECK(Purple::ReserveSyncSeq(confirmed.state,
+		Purple::SyncLocalStream::Config, u"bad"_q).error
+		== Purple::SyncReservationError::InvalidHash);
+	auto exhausted = confirmed.state;
+	exhausted.config.seq = 9007199254740991ULL;
+	exhausted.config.confirmedSeq = exhausted.config.seq;
+	CHECK(Purple::ReserveSyncSeq(exhausted,
+		Purple::SyncLocalStream::Config, hashB).error
+		== Purple::SyncReservationError::SequenceExhausted);
+
+	const auto invalid = [&](QJsonObject document, Purple::SyncLocalError error) {
+		const auto bytes = QJsonDocument(document).toJson(QJsonDocument::Compact);
+		const auto result = Purple::ParseSyncLocalState(bytes);
+		CHECK(result.status == Purple::SyncLocalStatus::Invalid);
+		CHECK(result.error == error);
+	};
+	auto changed = full;
+	changed.remove(u"streams"_q);
+	invalid(changed, Purple::SyncLocalError::MissingField);
+	changed = full;
+	changed.insert(u"install"_q, u"in-"_q + QString(25, u'a') + u'b');
+	invalid(changed, Purple::SyncLocalError::InvalidId);
+	changed = full;
+	changed.insert(u"version"_q, 2);
+	CHECK(Purple::ParseSyncLocalState(
+		QJsonDocument(changed).toJson(QJsonDocument::Compact)).status
+		== Purple::SyncLocalStatus::NewerVersion);
+	changed = full;
+	auto changedStreams = streams;
+	auto changedConfig = streams.value(u"config"_q).toObject();
+	changedConfig.insert(u"seq"_q, 1);
+	changedStreams.insert(u"config"_q, changedConfig);
+	changed.insert(u"streams"_q, changedStreams);
+	invalid(changed, Purple::SyncLocalError::InvalidCounters);
+	changedConfig.insert(u"pending_seq"_q, 1);
+	changedConfig.insert(u"confirmed_seq"_q, 1);
+	changedStreams.insert(u"config"_q, changedConfig);
+	changed.insert(u"streams"_q, changedStreams);
+	invalid(changed, Purple::SyncLocalError::InvalidCounters);
+	changedConfig.insert(u"pending_seq"_q, 2);
+	changedConfig.insert(u"confirmed_seq"_q, 0);
+	changedStreams.insert(u"config"_q, changedConfig);
+	changed.insert(u"streams"_q, changedStreams);
+	invalid(changed, Purple::SyncLocalError::InvalidCounters);
+	changedConfig.insert(u"pending_seq"_q, 1);
+	changedConfig.insert(u"confirmed_seq"_q, 0);
+	changedStreams.insert(u"config"_q, changedConfig);
+	changed.insert(u"streams"_q, changedStreams);
+	invalid(changed, Purple::SyncLocalError::InvalidHash);
+	changed = full;
+	changedConfig = streams.value(u"config"_q).toObject();
+	changedConfig.insert(u"seen_seq"_q, QJsonObject{ { u"bad"_q, 1 } });
+	changedStreams.insert(u"config"_q, changedConfig);
+	changed.insert(u"streams"_q, changedStreams);
+	invalid(changed, Purple::SyncLocalError::InvalidConfig);
+	CHECK(Purple::ParseSyncLocalState("{\"version\":1,\"version\":1}").error
+		== Purple::SyncLocalError::InvalidJson);
+	CHECK(Purple::ParseSyncLocalState(QByteArray(4 * 1024 * 1024 + 1, ' ')).error
+		== Purple::SyncLocalError::SizeLimit);
+}
+
 } // namespace
 
 int main() {
 	TestSyncJson();
 	TestSyncEnvelope();
 	TestConfigPayload();
+	TestSyncLocalState();
 	TestConfigVersions();
 	TestConfigClassification();
 	TestPersianKeyboardToEnglish();
