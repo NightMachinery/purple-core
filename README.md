@@ -82,6 +82,12 @@ rules about data are far easier to prove outside a running app than inside one.
   The builder keeps the exact key, direct parents and lineage while changing
   the writer metadata and sequence. Supplying both modes, mismatched file
   bytes, or malformed ancestry fails without emitting a record.
+- `purple/purple_sync_status.{h,cpp}` - derives the shared status, attention
+  tier and primary action from engine facts. Off and manual pause take priority
+  over active sync; the remaining statuses follow the UI precedence from choice
+  through up to date. The engine decides when a waiting or failed change is due
+  for a notice, and each client localizes labels and deduplicates notices.
+  See `docs/sync-status.md` for the input and output contract.
 - `purple/purple_sync_local_state.{h,cpp}` - validates and writes versioned,
   device-local `sync/state.json` data: install, creation-device and space IDs;
   per-stream issue, pending and confirmation counters and the hash for the

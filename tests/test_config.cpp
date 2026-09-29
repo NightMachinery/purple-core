@@ -23,6 +23,7 @@ option) any later version.
 #include "purple/purple_sync_json.h"
 #include "purple/purple_sync_envelope.h"
 #include "purple/purple_sync_local_state.h"
+#include "purple/purple_sync_status.h"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QJsonArray>
@@ -33,6 +34,7 @@ option) any later version.
 
 #include <cstdio>
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -10033,9 +10035,122 @@ void TestSyncSimulation() {
 		== Purple::SyncCloneVerdict::NoClone);
 }
 
+void TestSyncStatus() {
+	Begin("sync status");
+	using Status = Purple::SyncStatus;
+	using Tier = Purple::SyncAttentionTier;
+	using Action = Purple::SyncPrimaryAction;
+	using Problem = Purple::SyncProblem;
+	const auto ordered = std::array{
+		Status::NeedsChoice,
+		Status::PausedForProblem,
+		Status::UpdateReady,
+		Status::NotSyncingFileError,
+		Status::CantSync,
+		Status::WaitingForConnection,
+		Status::Syncing,
+		Status::UpToDate,
+	};
+	const auto withStatus = [](int index) {
+		auto facts = Purple::SyncStatusFacts();
+		facts.enabled = true;
+		switch (index) {
+		case 0: facts.needsChoice = true; break;
+		case 1: facts.problem = Problem::AccountSignedOut; break;
+		case 2: facts.updateReady = true; break;
+		case 3: facts.fileError = true; break;
+		case 4: facts.cantSync = true; break;
+		case 5: facts.waitingForConnection = true; break;
+		case 6: facts.syncing = true; break;
+		case 7: break;
+		}
+		return facts;
+	};
+	for (auto higher = 0; higher != int(ordered.size()); ++higher) {
+		for (auto lower = higher + 1; lower != int(ordered.size()); ++lower) {
+			auto facts = withStatus(higher);
+			const auto additional = withStatus(lower);
+			facts.needsChoice |= additional.needsChoice;
+			if (additional.problem != Problem::None) {
+				facts.problem = additional.problem;
+			}
+			facts.updateReady |= additional.updateReady;
+			facts.fileError |= additional.fileError;
+			facts.cantSync |= additional.cantSync;
+			facts.waitingForConnection |= additional.waitingForConnection;
+			facts.syncing |= additional.syncing;
+			CHECK(Purple::ResolveSyncStatus(facts).status == ordered[higher]);
+		}
+		auto facts = withStatus(higher);
+		facts.enabled = false;
+		CHECK(Purple::ResolveSyncStatus(facts).status == Status::Off);
+		facts.enabled = true;
+		facts.manuallyPaused = true;
+		CHECK(Purple::ResolveSyncStatus(facts).status == Status::ManuallyPaused);
+	}
+	const auto check = [](const Purple::SyncStatusFacts &facts,
+			Status status, Tier tier, Action action) {
+		const auto result = Purple::ResolveSyncStatus(facts);
+		CHECK(result.status == status);
+		CHECK(result.tier == tier);
+		CHECK(result.primaryAction == action);
+	};
+	auto facts = Purple::SyncStatusFacts();
+	check(facts, Status::Off, Tier::StatusOnly, Action::TurnOn);
+	facts.enabled = true;
+	check(facts, Status::UpToDate, Tier::StatusOnly, Action::None);
+	facts.syncing = true;
+	check(facts, Status::Syncing, Tier::StatusOnly, Action::None);
+	facts.syncing = false;
+	facts.waitingForConnection = true;
+	check(facts, Status::WaitingForConnection, Tier::StatusOnly,
+		Action::None);
+	facts.attentionDue = true;
+	check(facts, Status::WaitingForConnection, Tier::Notice,
+		Action::OpenDetails);
+	facts.waitingForConnection = false;
+	facts.cantSync = true;
+	facts.attentionDue = false;
+	check(facts, Status::CantSync, Tier::StatusOnly,
+		Action::OpenDetails);
+	facts.attentionDue = true;
+	check(facts, Status::CantSync, Tier::Notice,
+		Action::OpenDetails);
+	facts.cantSync = false;
+	facts.fileError = true;
+	facts.attentionDue = false;
+	check(facts, Status::NotSyncingFileError, Tier::StatusOnly,
+		Action::OpenDetails);
+	facts.attentionDue = true;
+	check(facts, Status::NotSyncingFileError, Tier::Notice,
+		Action::OpenDetails);
+	facts.fileError = false;
+	facts.updateReady = true;
+	check(facts, Status::UpdateReady, Tier::Notice,
+		Action::ReviewUpdate);
+	facts.updateReady = false;
+	facts.needsChoice = true;
+	check(facts, Status::NeedsChoice, Tier::Card,
+		Action::ChooseSettings);
+	facts.needsChoice = false;
+	for (const auto [problem, action] : std::array{
+			std::pair(Problem::AccountSignedOut, Action::ChooseAccount),
+			std::pair(Problem::OwnMessageDeleted, Action::KeepSyncing),
+			std::pair(Problem::NewerClientNeeded, Action::UpdateClient),
+			std::pair(Problem::Other, Action::OpenDetails),
+		}) {
+		facts.problem = problem;
+		check(facts, Status::PausedForProblem, Tier::Card, action);
+	}
+	facts.problem = Problem::None;
+	facts.manuallyPaused = true;
+	check(facts, Status::ManuallyPaused, Tier::StatusOnly, Action::Resume);
+}
+
 } // namespace
 
 int main() {
+	TestSyncStatus();
 	TestSyncJson();
 	TestSyncIdFormatting();
 	TestTimeOrderedSyncSpaceIds();
