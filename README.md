@@ -34,6 +34,17 @@ rules about data are far easier to prove outside a running app than inside one.
   head's sequence watermark only after its outcome is durably handled. When a
   lineage is truncated, both direct parents stay, newest first, followed by
   the newest remaining ancestors.
+- `purple/purple_sync_json.{h,cpp}` - validates and canonicalizes JSON for
+  account-backed sync. It preserves every member, including unknown members,
+  sorts object names by raw UTF-16 code units, emits compact UTF-8 with RFC 8785
+  string escaping, and rejects duplicate decoded names and invalid Unicode.
+  Numbers must have an exact mathematical value in the safe integer range
+  `[-9007199254740991, 9007199254740991]`. Valid integer spellings such as
+  `1.0`, `1e0`, and `-0` are accepted and emitted as `1`, `1`, and `0`. Fractions
+  and larger values are rejected before floating-point rounding. Inputs are
+  limited to 4 MiB and 128 levels of nesting. The result includes an error
+  kind and byte offset on failure; callers must check it before hashing or
+  interpreting the JSON.
 - `purple/purple_engine.{h,cpp}` - resolves a preset into a flat table of "for
   this list, show and notify are these", and answers what that means for one
   chat. Resolution runs once per config or preset change, never per repaint.

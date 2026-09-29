@@ -19,6 +19,7 @@ option) any later version.
 #include "purple/purple_settings.h"
 #include "purple/purple_splice.h"
 #include "purple/purple_state.h"
+#include "purple/purple_sync_json.h"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QStringList>
@@ -8480,9 +8481,82 @@ void TestConfigClassification() {
 	CHECK(!classify(fpA, { head(b, u"other"_q) }).inputValid);
 }
 
+void TestSyncJson() {
+	Begin("sync json");
+	const auto canonical = [](const QByteArray &input, const QByteArray &expected) {
+		const auto result = Purple::CanonicalizeSyncJson(input);
+		CHECK(bool(result));
+		CHECK(result.canonical == expected);
+	};
+	const auto rejects = [](const QByteArray &input, Purple::SyncJsonErrorKind kind) {
+		const auto result = Purple::CanonicalizeSyncJson(input);
+		CHECK(!result);
+		CHECK(result.error == kind);
+		CHECK(result.canonical.isEmpty());
+	};
+	canonical(
+		" { \"z\" : [ true, null, {\"b\":2,\"a\":1} ], \"a\":false } ",
+		"{\"a\":false,\"z\":[true,null,{\"a\":1,\"b\":2}]}");
+	canonical(
+		"{\"a\":false,\"z\":[true,null,{\"a\":1,\"b\":2}]}",
+		"{\"a\":false,\"z\":[true,null,{\"a\":1,\"b\":2}]}");
+	canonical(
+		"{\"\\ue000\":1,\"\\ud83d\\ude00\":2}",
+		QByteArray("{\"") + "\xf0\x9f\x98\x80" + "\":2,\"\xee\x80\x80\":1}");
+	canonical(
+		"[\"\\/\\u0000\\b\\f\\n\\r\\t\\\\\\\"\",\"\\u00e9\"]",
+		QByteArray("[\"/\\u0000\\b\\f\\n\\r\\t\\\\\\\"\",\"") + "\xc3\xa9" + "\"]");
+	canonical(
+		"[0,-0,1.0,1e0,10e-1,900719925474099100e-2]",
+		"[0,0,1,1,1,9007199254740991]");
+	const auto normalized = Purple::CanonicalizeSyncJson(
+		"{\"\\ud83d\\ude00\":1.0,\"a\":-0}");
+	CHECK(bool(normalized));
+	const auto normalizedAgain = Purple::CanonicalizeSyncJson(normalized.canonical);
+	CHECK(bool(normalizedAgain));
+	CHECK(normalizedAgain.canonical == normalized.canonical);
+	canonical("-0e999999999999999999999999", "0");
+	canonical("-9007199254740991", "-9007199254740991");
+	canonical(
+		"[1.000,100e-2,90071992547409910e-1]",
+		"[1,1,9007199254740991]");
+	rejects("{\"a\":1,\"\\u0061\":2}", Purple::SyncJsonErrorKind::DuplicateKey);
+	rejects("\"\\ud800\"", Purple::SyncJsonErrorKind::InvalidUnicode);
+	rejects("\"\\udc00\"", Purple::SyncJsonErrorKind::InvalidUnicode);
+	rejects("\"\\ud800\\u0041\"", Purple::SyncJsonErrorKind::InvalidUnicode);
+	rejects(
+		QByteArray("\"") + "\xc0\xaf" + "\"",
+		Purple::SyncJsonErrorKind::InvalidUtf8);
+	rejects(
+		QByteArray("\"") + "\xed\xa0\x80" + "\"",
+		Purple::SyncJsonErrorKind::InvalidUtf8);
+	rejects(
+		QByteArray("\"") + "\xf4\x90\x80\x80" + "\"",
+		Purple::SyncJsonErrorKind::InvalidUtf8);
+	rejects("1.0000000000000001", Purple::SyncJsonErrorKind::NonInteger);
+	rejects("9007199254740992", Purple::SyncJsonErrorKind::NumberRange);
+	rejects("-9007199254740992", Purple::SyncJsonErrorKind::NumberRange);
+	rejects("90071992547409920e-1", Purple::SyncJsonErrorKind::NumberRange);
+	rejects("1e999999999999999999999999", Purple::SyncJsonErrorKind::NumberRange);
+	rejects("1e-999999999999999999999999", Purple::SyncJsonErrorKind::NonInteger);
+	for (const auto input : {
+		"", "00", "+1", "1.", "1e", "01", "[1,]", "{\"x\":}",
+		"true false", "\"a\nb\""
+	}) {
+		rejects(input, Purple::SyncJsonErrorKind::Syntax);
+	}
+	const auto duplicate = Purple::CanonicalizeSyncJson("{\"a\":1,\"\\u0061\":2}");
+	CHECK_EQ(duplicate.offset, 7);
+	rejects(QByteArray(130, '[') + "0" + QByteArray(130, ']'),
+		Purple::SyncJsonErrorKind::DepthLimit);
+	rejects(QByteArray(4 * 1024 * 1024 + 1, ' '),
+		Purple::SyncJsonErrorKind::SizeLimit);
+}
+
 } // namespace
 
 int main() {
+	TestSyncJson();
 	TestConfigVersions();
 	TestConfigClassification();
 	TestPersianKeyboardToEnglish();
