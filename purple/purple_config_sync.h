@@ -79,4 +79,33 @@ struct ConfigClassification {
 	const ConfigSyncState &state,
 	const std::vector<ConfigHead> &remoteHeads);
 
+enum class ConfigSyncVerdict {
+	Invalid,
+	Pending,
+	Conflict,
+	Choose,
+	UpdateReady,
+	Adopt,
+	Empty,
+	LocalChanges,
+	UpToDate,
+};
+
+struct ConfigSyncPlan {
+	ConfigSyncVerdict verdict = ConfigSyncVerdict::Invalid;
+	ConfigClassification classification;
+	std::vector<ConfigHead> offered;
+	std::vector<ConfigHead> same;
+};
+
+[[nodiscard]] ConfigSyncPlan PlanConfigSync(
+	const QString &localFp,
+	const ConfigSyncState &state,
+	const std::vector<ConfigHead> &remoteHeads);
+
+[[nodiscard]] std::optional<ConfigSyncState> AdoptConfigHeads(
+	const ConfigSyncState &state,
+	const QString &localFp,
+	const std::vector<ConfigHead> &heads);
+
 } // namespace Purple

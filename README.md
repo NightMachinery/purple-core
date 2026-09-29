@@ -34,6 +34,16 @@ rules about data are far easier to prove outside a running app than inside one.
   head's sequence watermark only after its outcome is durably handled. When a
   lineage is truncated, both direct parents stay, newest first, followed by
   the newest remaining ancestors.
+  `PlanConfigSync` turns the local fingerprint, config state and remote heads
+  into one verdict (Invalid, Pending, Conflict, Choose, UpdateReady, Adopt,
+  Empty, LocalChanges or UpToDate) with the heads to offer and the heads that
+  already match the file. A device that has not joined plans with an empty
+  install and empty config data, so joining and daily use share one decision.
+  `AdoptConfigHeads` records heads whose content equals the local file,
+  replacing the base when its content differs and otherwise growing the
+  equivalent keys, and raises the seen sequences. See
+  [`docs/config-sync.md`](docs/config-sync.md) for the precedence, the head
+  ordering and every refusal.
 - `purple/purple_sync_json.{h,cpp}` - validates and canonicalizes JSON for
   account-backed sync. It preserves every member, including unknown members,
   sorts object names by raw UTF-16 code units, emits compact UTF-8 with RFC 8785

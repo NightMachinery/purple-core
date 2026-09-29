@@ -8492,6 +8492,388 @@ void TestConfigClassification() {
 	CHECK(!classify(fpA, { head(b, u"other"_q) }).inputValid);
 }
 
+[[nodiscard]] std::vector<QString> HeadKeys(
+		const std::vector<Purple::ConfigHead> &heads) {
+	auto result = std::vector<QString>();
+	for (const auto &head : heads) {
+		result.push_back(head.key);
+	}
+	return result;
+}
+
+[[nodiscard]] std::vector<QString> HeadInstalls(
+		const std::vector<Purple::ConfigHead> &heads) {
+	auto result = std::vector<QString>();
+	for (const auto &head : heads) {
+		result.push_back(head.install);
+	}
+	return result;
+}
+
+void TestConfigSyncPlanner() {
+	Begin("config sync planner");
+	using Verdict = Purple::ConfigSyncVerdict;
+	const auto a = *Purple::MakeConfigVersion("A", {});
+	const auto b = *Purple::MakeConfigVersion("B", { a });
+	const auto c = *Purple::MakeConfigVersion("C", { a });
+	const auto revert = *Purple::MakeConfigVersion("A", { b });
+	const auto stranger = *Purple::MakeConfigVersion("X", {});
+	const auto sameUnrelated = *Purple::MakeConfigVersion("B", {});
+	const auto fpA = Purple::SettingsFingerprint("A");
+	const auto fpB = Purple::SettingsFingerprint("B");
+	const auto fpEdited = Purple::SettingsFingerprint("A edited");
+	const auto head = [](const Purple::ConfigVersion &version,
+			const QString &writer, uint64_t seq = 1) {
+		return Purple::ConfigHead{
+			u"space"_q, writer, seq, version.key, version.lineage };
+	};
+
+	auto preview = Purple::ConfigSyncState();
+	preview.space = u"space"_q;
+	const auto plan = [&](const QString &fp,
+			const Purple::ConfigSyncState &state,
+			std::vector<Purple::ConfigHead> heads) {
+		return Purple::PlanConfigSync(fp, state, heads);
+	};
+	const auto empty = plan(fpA, preview, {});
+	CHECK(empty.verdict == Verdict::Empty);
+	CHECK(empty.classification.inputValid);
+	CHECK(empty.offered.empty());
+	CHECK(empty.same.empty());
+	auto elsewhere = head(stranger, u"pc"_q);
+	elsewhere.space = u"other"_q;
+	CHECK(plan(fpA, preview, { elsewhere }).verdict == Verdict::Empty);
+	const auto joinSame = plan(fpA, preview, { head(a, u"pc"_q) });
+	CHECK(joinSame.verdict == Verdict::Adopt);
+	CHECK(HeadKeys(joinSame.same) == std::vector<QString>({ a.key }));
+	CHECK(joinSame.offered.empty());
+	const auto joinDifferent = plan(fpA, preview, {
+		head(stranger, u"pc"_q) });
+	CHECK(joinDifferent.verdict == Verdict::Choose);
+	CHECK(HeadKeys(joinDifferent.offered)
+		== std::vector<QString>({ stranger.key }));
+	const auto joinSplit = plan(fpA, preview, {
+		head(b, u"pc"_q, 3), head(c, u"phone"_q, 5) });
+	CHECK(joinSplit.verdict == Verdict::Conflict);
+	CHECK(joinSplit.classification.split);
+	CHECK(HeadKeys(joinSplit.offered) == std::vector<QString>({
+		c.key, b.key }));
+	const auto joinMixed = plan(fpA, preview, {
+		head(a, u"pc"_q), head(stranger, u"phone"_q) });
+	CHECK(joinMixed.verdict == Verdict::Choose);
+	CHECK(HeadKeys(joinMixed.same) == std::vector<QString>({ a.key }));
+	CHECK(HeadKeys(joinMixed.offered)
+		== std::vector<QString>({ stranger.key }));
+	auto emptyWriter = head(stranger, QString());
+	CHECK(plan(fpA, preview, { emptyWriter }).verdict == Verdict::Choose);
+	auto notPreview = preview;
+	notPreview.seenSeq[u"pc"_q] = 1;
+	CHECK(plan(fpA, notPreview, {}).verdict == Verdict::Invalid);
+	CHECK(!plan(fpA, notPreview, {}).classification.inputValid);
+	notPreview = preview;
+	notPreview.base = a.key;
+	CHECK(plan(fpA, notPreview, {}).verdict == Verdict::Invalid);
+	notPreview = preview;
+	notPreview.pending = a.key;
+	CHECK(plan(fpA, notPreview, {}).verdict == Verdict::Invalid);
+	notPreview = preview;
+	notPreview.equiv = { a.key };
+	CHECK(plan(fpA, notPreview, {}).verdict == Verdict::Invalid);
+	notPreview = preview;
+	notPreview.space.clear();
+	CHECK(plan(fpA, notPreview, {}).verdict == Verdict::Invalid);
+	CHECK(!Purple::ClassifyConfig(fpA, preview, {}).inputValid);
+	CHECK(plan(u"bad"_q, preview, {}).verdict == Verdict::Invalid);
+
+	auto joined = preview;
+	joined.install = u"mine"_q;
+	CHECK(plan(fpA, joined, {}).verdict == Verdict::Empty);
+	CHECK(plan(fpA, joined, { head(a, u"mine"_q) }).verdict
+		== Verdict::Empty);
+	const auto firstJoin = plan(fpA, joined, { head(a, u"pc"_q) });
+	CHECK(firstJoin.verdict == Verdict::Adopt);
+	const auto adopted = Purple::AdoptConfigHeads(
+		joined,
+		fpA,
+		firstJoin.same);
+	CHECK(adopted.has_value());
+	CHECK_EQ(adopted->base, a.key);
+	CHECK(adopted->baseLineage.empty());
+	CHECK(adopted->equiv.empty());
+	CHECK_EQ(adopted->seenSeq.at(u"pc"_q), 1);
+	CHECK(plan(fpA, *adopted, { head(a, u"pc"_q) }).verdict
+		== Verdict::UpToDate);
+	const auto update = plan(fpA, *adopted, {
+		head(a, u"pc"_q), head(b, u"pc"_q, 2) });
+	CHECK(update.verdict == Verdict::UpdateReady);
+	CHECK(HeadKeys(update.offered) == std::vector<QString>({ b.key }));
+	const auto edited = plan(fpEdited, *adopted, { head(b, u"pc"_q, 2) });
+	CHECK(edited.verdict == Verdict::Conflict);
+	CHECK(HeadKeys(edited.offered) == std::vector<QString>({ b.key }));
+	CHECK(plan(fpEdited, *adopted, {}).verdict == Verdict::LocalChanges);
+	CHECK(plan(fpEdited, *adopted, { head(a, u"pc"_q) }).verdict
+		== Verdict::LocalChanges);
+	CHECK(plan(fpA, *adopted, {}).verdict == Verdict::UpToDate);
+	auto seenOnly = joined;
+	seenOnly.seenSeq[u"pc"_q] = 1;
+	CHECK(plan(fpA, seenOnly, { head(a, u"pc"_q) }).verdict
+		== Verdict::UpToDate);
+
+	auto state = joined;
+	state.base = a.key;
+	state.baseLineage = a.lineage;
+	auto invalidHead = head(b, u"broken"_q);
+	invalidHead.lineage = { u"garbage"_q };
+	auto pending = state;
+	pending.pending = b.key;
+	const auto invalid = plan(fpA, pending, {
+		invalidHead, head(sameUnrelated, u"phone"_q), head(c, u"pc"_q) });
+	CHECK(invalid.verdict == Verdict::Invalid);
+	CHECK(invalid.same.empty());
+	CHECK(invalid.offered.empty());
+	const auto waiting = plan(fpB, pending, {
+		head(sameUnrelated, u"phone"_q), head(c, u"pc"_q) });
+	CHECK(waiting.verdict == Verdict::Pending);
+	CHECK(HeadKeys(waiting.same)
+		== std::vector<QString>({ sameUnrelated.key }));
+	CHECK(waiting.offered.empty());
+	const auto conflict = plan(fpEdited, state, {
+		head(c, u"pc"_q), head(stranger, u"phone"_q) });
+	CHECK(conflict.verdict == Verdict::Conflict);
+	CHECK(HeadKeys(conflict.offered) == std::vector<QString>({
+		c.key, stranger.key }));
+	const auto aheadAndUnrelated = plan(fpA, state, {
+		head(b, u"pc"_q), head(stranger, u"phone"_q) });
+	CHECK(aheadAndUnrelated.verdict == Verdict::Conflict);
+	CHECK(aheadAndUnrelated.classification.split);
+	const auto elsewhereA = *Purple::MakeConfigVersion(
+		"A",
+		{ *Purple::MakeConfigVersion("E", {}) });
+	const auto choose = plan(fpA, state, {
+		head(b, u"pc"_q),
+		head(stranger, u"phone"_q),
+		head(elsewhereA, u"tv"_q),
+	});
+	CHECK(choose.verdict == Verdict::Choose);
+	CHECK(!choose.classification.split);
+	CHECK(HeadKeys(choose.offered) == std::vector<QString>({
+		b.key, stranger.key }));
+	CHECK(HeadKeys(choose.same) == std::vector<QString>({ elsewhereA.key }));
+	const auto sameContent = plan(fpA, state, {
+		head(sameUnrelated, u"phone"_q, 8), head(b, u"pc"_q) });
+	CHECK(sameContent.verdict == Verdict::Choose);
+	CHECK(HeadKeys(sameContent.offered) == std::vector<QString>({ b.key }));
+	const auto updateOverAdopt = plan(fpA, state, {
+		head(c, u"pc"_q), head(revert, u"phone"_q) });
+	CHECK(updateOverAdopt.verdict == Verdict::UpdateReady);
+	CHECK(HeadKeys(updateOverAdopt.offered)
+		== std::vector<QString>({ c.key }));
+	CHECK(HeadKeys(updateOverAdopt.same)
+		== std::vector<QString>({ revert.key }));
+	const auto adoptOverLocal = plan(fpB, state, {
+		head(sameUnrelated, u"phone"_q) });
+	CHECK(adoptOverLocal.verdict == Verdict::Adopt);
+	CHECK(HeadKeys(adoptOverLocal.same)
+		== std::vector<QString>({ sameUnrelated.key }));
+	const auto twoAhead = plan(fpA, state, {
+		head(b, u"pc"_q, 3), head(c, u"phone"_q, 5) });
+	CHECK(twoAhead.verdict == Verdict::Conflict);
+	CHECK(twoAhead.classification.split);
+	CHECK(HeadKeys(twoAhead.offered) == std::vector<QString>({
+		c.key, b.key }));
+
+	const auto p = *Purple::MakeConfigVersion("P", { a });
+	const auto q = *Purple::MakeConfigVersion("Q", { a });
+	const auto merged = *Purple::MakeConfigVersion("M", { p, q });
+	auto resolved = joined;
+	resolved.base = merged.key;
+	resolved.baseLineage = merged.lineage;
+	const auto behind = plan(Purple::SettingsFingerprint("M"), resolved, {
+		head(p, u"pc"_q), head(q, u"phone"_q) });
+	CHECK(behind.classification.split);
+	CHECK(behind.verdict == Verdict::UpToDate);
+	CHECK(behind.offered.empty());
+
+	const auto w = *Purple::MakeConfigVersion("W", {});
+	const auto z = *Purple::MakeConfigVersion("Z", { w });
+	const auto y = *Purple::MakeConfigVersion("Y", {});
+	const auto ordered = plan(fpA, preview, {
+		head(stranger, u"delta"_q, 4),
+		head(stranger, u"alpha"_q, 4),
+		head(y, u"bravo"_q, 9),
+		head(z, u"charlie"_q, 1),
+	});
+	CHECK(ordered.verdict == Verdict::Conflict);
+	CHECK(HeadInstalls(ordered.offered) == std::vector<QString>({
+		u"charlie"_q, u"bravo"_q, u"alpha"_q }));
+	const auto sameUpdate = plan(fpA, state, {
+		head(b, u"zulu"_q, 2), head(b, u"alpha"_q, 2), head(b, u"mike"_q, 7) });
+	CHECK(sameUpdate.verdict == Verdict::UpdateReady);
+	CHECK(HeadInstalls(sameUpdate.offered)
+		== std::vector<QString>({ u"mike"_q }));
+	const auto tiedUpdate = plan(fpA, state, {
+		head(b, u"zulu"_q, 2), head(b, u"alpha"_q, 2) });
+	CHECK(HeadInstalls(tiedUpdate.offered)
+		== std::vector<QString>({ u"alpha"_q }));
+	const auto later = *Purple::MakeConfigVersion("A", { stranger });
+	const auto sameOrder = plan(fpA, preview, {
+		head(a, u"zulu"_q, 2), head(a, u"alpha"_q, 2), head(later, u"mike"_q) });
+	CHECK(HeadInstalls(sameOrder.same) == std::vector<QString>({
+		u"mike"_q, u"alpha"_q, u"zulu"_q }));
+}
+
+void TestConfigAdoption() {
+	Begin("config adoption");
+	const auto a = *Purple::MakeConfigVersion("A", {});
+	const auto b = *Purple::MakeConfigVersion("B", { a });
+	const auto revert = *Purple::MakeConfigVersion("A", { b });
+	const auto sameUnrelated = *Purple::MakeConfigVersion("B", {});
+	const auto stranger = *Purple::MakeConfigVersion("X", {});
+	const auto fpA = Purple::SettingsFingerprint("A");
+	const auto fpB = Purple::SettingsFingerprint("B");
+	const auto head = [](const Purple::ConfigVersion &version,
+			const QString &writer, uint64_t seq = 1) {
+		return Purple::ConfigHead{
+			u"space"_q, writer, seq, version.key, version.lineage };
+	};
+	auto state = Purple::ConfigSyncState();
+	state.space = u"space"_q;
+	state.install = u"mine"_q;
+	state.base = a.key;
+	state.baseLineage = a.lineage;
+	state.equiv = { stranger.key };
+	state.seenSeq[u"pc"_q] = 10;
+
+	const auto replaced = Purple::AdoptConfigHeads(state, fpB, {
+		head(sameUnrelated, u"phone"_q, 7), head(b, u"pc"_q, 3) });
+	CHECK(replaced.has_value());
+	CHECK_EQ(replaced->base, b.key);
+	CHECK(replaced->baseLineage == b.lineage);
+	CHECK(replaced->equiv == std::vector<QString>({ sameUnrelated.key }));
+	CHECK_EQ(replaced->seenSeq.at(u"pc"_q), 10);
+	CHECK_EQ(replaced->seenSeq.at(u"phone"_q), 7);
+	CHECK_EQ(replaced->space, state.space);
+	CHECK_EQ(replaced->install, state.install);
+	CHECK(replaced->pending.isEmpty());
+
+	auto fresh = state;
+	fresh.base.clear();
+	fresh.baseLineage.clear();
+	fresh.equiv.clear();
+	const auto first = Purple::AdoptConfigHeads(fresh, fpA, {
+		head(a, u"pc"_q, 2), head(a, u"phone"_q, 4) });
+	CHECK(first.has_value());
+	CHECK_EQ(first->base, a.key);
+	CHECK(first->equiv.empty());
+	CHECK_EQ(first->seenSeq.at(u"phone"_q), 4);
+
+	const auto grown = Purple::AdoptConfigHeads(state, fpA, {
+		head(revert, u"phone"_q, 3),
+		head(revert, u"tablet"_q, 5),
+		head(a, u"pc"_q, 12),
+		head(revert, u"phone"_q, 6),
+	});
+	CHECK(grown.has_value());
+	CHECK_EQ(grown->base, a.key);
+	CHECK(grown->baseLineage == a.lineage);
+	CHECK(grown->equiv == std::vector<QString>({ revert.key, stranger.key }));
+	CHECK_EQ(grown->seenSeq.at(u"pc"_q), 12);
+	CHECK_EQ(grown->seenSeq.at(u"phone"_q), 6);
+	CHECK_EQ(grown->seenSeq.at(u"tablet"_q), 5);
+	CHECK(Purple::PlanConfigSync(fpA, *grown, {
+		head(revert, u"phone"_q, 6) }).verdict
+		== Purple::ConfigSyncVerdict::UpToDate);
+
+	auto chain = std::vector<Purple::ConfigVersion>();
+	auto heads = std::vector<Purple::ConfigHead>();
+	auto link = a;
+	for (auto index = 0; index != 20; ++index) {
+		link = *Purple::MakeConfigVersion(
+			"n" + QByteArray::number(index),
+			{ link });
+		chain.push_back(*Purple::MakeConfigVersion("A", { link }));
+		heads.push_back(head(
+			chain.back(),
+			u"writer%1"_q.arg(index),
+			uint64_t(index + 1)));
+	}
+	const auto capped = Purple::AdoptConfigHeads(state, fpA, heads);
+	CHECK(capped.has_value());
+	CHECK_EQ(capped->equiv.size(), 16);
+	CHECK_EQ(capped->equiv.front(), chain[19].key);
+	CHECK_EQ(capped->equiv.back(), chain[4].key);
+	CHECK(std::find(capped->equiv.begin(), capped->equiv.end(),
+		stranger.key) == capped->equiv.end());
+	CHECK_EQ(capped->seenSeq.size(), 21);
+	CHECK(Purple::ClassifyConfig(fpA, *capped, {}).inputValid);
+	const auto cappedFresh = Purple::AdoptConfigHeads(fresh, fpA, heads);
+	CHECK(cappedFresh.has_value());
+	CHECK_EQ(cappedFresh->base, chain[19].key);
+	CHECK(cappedFresh->baseLineage == chain[19].lineage);
+	CHECK_EQ(cappedFresh->equiv.size(), 16);
+	CHECK_EQ(cappedFresh->equiv.front(), chain[18].key);
+	CHECK_EQ(cappedFresh->equiv.back(), chain[3].key);
+
+	auto tied = state;
+	tied.equiv.clear();
+	for (auto index = 0; index != 16; ++index) {
+		tied.equiv.push_back(u"50."_q + Purple::SettingsFingerprint(
+			"tie" + QByteArray::number(index)));
+	}
+	auto sortedTies = tied.equiv;
+	std::sort(sortedTies.begin(), sortedTies.end());
+	const auto sameGeneration = Purple::ConfigHead{
+		u"space"_q,
+		u"pc"_q,
+		11,
+		u"50."_q + fpA,
+		{ a.key },
+	};
+	const auto tieBroken = Purple::AdoptConfigHeads(
+		tied,
+		fpA,
+		{ sameGeneration });
+	CHECK(tieBroken.has_value());
+	CHECK_EQ(tieBroken->equiv.size(), 16);
+	auto expectedTies = sortedTies;
+	expectedTies.push_back(sameGeneration.key);
+	std::sort(expectedTies.begin(), expectedTies.end());
+	expectedTies.pop_back();
+	CHECK(tieBroken->equiv == expectedTies);
+
+	CHECK(!Purple::AdoptConfigHeads(state, fpA, {}));
+	auto pending = state;
+	pending.pending = b.key;
+	CHECK(!Purple::AdoptConfigHeads(
+		pending,
+		fpA,
+		{ head(revert, u"pc"_q, 11) }));
+	auto preview = Purple::ConfigSyncState();
+	preview.space = u"space"_q;
+	CHECK(!Purple::AdoptConfigHeads(preview, fpA, { head(a, u"pc"_q) }));
+	CHECK(!Purple::AdoptConfigHeads(state, u"bad"_q, { head(a, u"pc"_q, 11) }));
+	auto broken = state;
+	broken.base = u"bad"_q;
+	CHECK(!Purple::AdoptConfigHeads(broken, fpA, { head(revert, u"pc"_q, 11) }));
+	broken = state;
+	broken.equiv = std::vector<QString>(17, stranger.key);
+	CHECK(!Purple::AdoptConfigHeads(broken, fpA, { head(revert, u"pc"_q, 11) }));
+	auto foreign = head(revert, u"pc"_q, 11);
+	foreign.space = u"other"_q;
+	CHECK(!Purple::AdoptConfigHeads(state, fpA, { foreign }));
+	CHECK(!Purple::AdoptConfigHeads(state, fpA, {
+		head(revert, u"pc"_q, 11), head(revert, u"mine"_q, 11) }));
+	CHECK(!Purple::AdoptConfigHeads(state, fpA, { head(revert, u"pc"_q, 0) }));
+	auto badKey = head(revert, u"pc"_q, 11);
+	badKey.key = u"3.bad"_q;
+	CHECK(!Purple::AdoptConfigHeads(state, fpA, { badKey }));
+	auto badLineage = head(revert, u"pc"_q, 11);
+	badLineage.lineage = { revert.key };
+	CHECK(!Purple::AdoptConfigHeads(state, fpA, { badLineage }));
+	CHECK(!Purple::AdoptConfigHeads(state, fpA, {
+		head(revert, u"pc"_q, 11), head(b, u"phone"_q, 2) }));
+}
+
 void TestSyncJson() {
 	Begin("sync json");
 	const auto canonical = [](const QByteArray &input, const QByteArray &expected) {
@@ -10799,6 +11181,8 @@ int main() {
 	TestSyncSimulation();
 	TestConfigVersions();
 	TestConfigClassification();
+	TestConfigSyncPlanner();
+	TestConfigAdoption();
 	TestPersianKeyboardToEnglish();
 	TestLists();
 	TestKinds();

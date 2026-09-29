@@ -10,6 +10,7 @@ option) any later version.
 #include "purple/purple_state.h"
 
 #include <algorithm>
+#include <initializer_list>
 #include <limits>
 #include <set>
 
@@ -100,91 +101,97 @@ constexpr auto kLineageLimit = 64;
 	});
 }
 
-} // namespace
-
-std::optional<ConfigVersionKey> ParseConfigVersionKey(
-		const QString &key) {
-	return ParseKey(key);
+[[nodiscard]] bool StateValid(
+		const QString &localFp,
+		const ConfigSyncState &state) {
+	return FingerprintValid(localFp)
+		&& !state.space.isEmpty()
+		&& (state.base.isEmpty()
+			|| ValidLineage(state.base, state.baseLineage))
+		&& (!state.base.isEmpty() || state.baseLineage.empty())
+		&& state.equiv.size() <= 16
+		&& (state.pending.isEmpty() || IsConfigVersionKey(state.pending))
+		&& std::all_of(state.equiv.begin(), state.equiv.end(),
+			[](const auto &key) { return IsConfigVersionKey(key); });
 }
 
-bool IsConfigVersionKey(const QString &key) {
-	return ParseConfigVersionKey(key).has_value();
+[[nodiscard]] bool Unjoined(const ConfigSyncState &state) {
+	return state.install.isEmpty()
+		&& !state.space.isEmpty()
+		&& state.base.isEmpty()
+		&& state.baseLineage.empty()
+		&& state.equiv.empty()
+		&& state.pending.isEmpty()
+		&& state.seenSeq.empty();
 }
 
-std::optional<ConfigVersion> MakeConfigVersion(
-		const QByteArray &text,
-		const std::vector<ConfigVersion> &parents) {
-	auto result = ConfigVersion();
-	auto generation = uint64_t(0);
-	auto ancestors = std::vector<QString>();
-	for (const auto &parent : parents) {
-		const auto key = ParseKey(parent.key);
-		if (!key || !ValidLineage(parent.key, parent.lineage)
-			|| key->generation == std::numeric_limits<uint64_t>::max()) {
-			return std::nullopt;
-		}
-		generation = std::max(generation, key->generation);
-		if (!Has(result.parents, parent.key)) {
-			result.parents.push_back(parent.key);
-			if (result.parents.size() > 2) {
-				return std::nullopt;
-			}
-			ancestors.push_back(parent.key);
-			for (const auto &ancestor : parent.lineage) {
-				if (!Has(ancestors, ancestor)) {
-					ancestors.push_back(ancestor);
-				}
-			}
+[[nodiscard]] QString Fingerprint(const QString &key) {
+	const auto parts = ParseKey(key);
+	return parts ? parts->fingerprint : QString();
+}
+
+[[nodiscard]] uint64_t Generation(const QString &key) {
+	const auto parts = ParseKey(key);
+	return parts ? parts->generation : 0;
+}
+
+[[nodiscard]] bool Precedes(const ConfigHead &a, const ConfigHead &b) {
+	const auto first = Generation(a.key);
+	const auto second = Generation(b.key);
+	if (first != second) {
+		return first > second;
+	} else if (a.seq != b.seq) {
+		return a.seq > b.seq;
+	} else if (a.install != b.install) {
+		return a.install < b.install;
+	}
+	return a.key < b.key;
+}
+
+[[nodiscard]] std::vector<ConfigHead> HeadsOf(
+		const ConfigClassification &classification,
+		std::initializer_list<ConfigHeadKind> kinds) {
+	auto result = std::vector<ConfigHead>();
+	for (const auto &outcome : classification.heads) {
+		if (std::find(kinds.begin(), kinds.end(), outcome.kind)
+			!= kinds.end()) {
+			result.push_back(outcome.head);
 		}
 	}
-	std::stable_sort(ancestors.begin(), ancestors.end(), [](const auto &a,
-			const auto &b) {
-		return ParseKey(a)->generation > ParseKey(b)->generation;
-	});
-	if (ancestors.size() > kLineageLimit) {
-		auto retained = result.parents;
-		std::stable_sort(retained.begin(), retained.end(), [](const auto &a,
-				const auto &b) {
-			return ParseKey(a)->generation > ParseKey(b)->generation;
-		});
-		for (const auto &ancestor : ancestors) {
-			if (retained.size() == kLineageLimit) {
-				break;
-			}
-			if (!Has(retained, ancestor)) {
-				retained.push_back(ancestor);
-			}
-		}
-		ancestors = std::move(retained);
-	}
-	result.lineage = std::move(ancestors);
-	result.key = QString::number(generation + 1)
-		+ u"."_q + SettingsFingerprint(text);
+	std::sort(result.begin(), result.end(), Precedes);
 	return result;
 }
 
-ConfigClassification ClassifyConfig(
+[[nodiscard]] std::vector<ConfigHead> Representatives(
+		const std::vector<ConfigHead> &sorted) {
+	auto result = std::vector<ConfigHead>();
+	auto fingerprints = std::vector<QString>();
+	for (const auto &head : sorted) {
+		const auto fp = Fingerprint(head.key);
+		if (!Has(fingerprints, fp)) {
+			fingerprints.push_back(fp);
+			result.push_back(head);
+		}
+	}
+	return result;
+}
+
+[[nodiscard]] ConfigClassification Classify(
 		const QString &localFp,
 		const ConfigSyncState &state,
-		const std::vector<ConfigHead> &remoteHeads) {
+		const std::vector<ConfigHead> &remoteHeads,
+		bool unjoined) {
 	auto result = ConfigClassification();
-	if (!FingerprintValid(localFp)
-		|| state.space.isEmpty()
-		|| state.install.isEmpty()
-		|| (!state.base.isEmpty()
-			&& !ValidLineage(state.base, state.baseLineage))
-		|| (state.base.isEmpty() && !state.baseLineage.empty())
-		|| state.equiv.size() > 16
-		|| (!state.pending.isEmpty() && !IsConfigVersionKey(state.pending))
-		|| std::any_of(state.equiv.begin(), state.equiv.end(),
-			[](const auto &key) { return !IsConfigVersionKey(key); })) {
+	if (!StateValid(localFp, state)
+		|| (state.install.isEmpty() && !unjoined)) {
 		result.inputValid = false;
 		return result;
 	}
 	auto selected = std::map<QString, ConfigHead>();
 	auto ambiguous = std::set<QString>();
 	for (const auto &head : remoteHeads) {
-		if (head.space != state.space || head.install == state.install) {
+		if (head.space != state.space
+			|| (!unjoined && head.install == state.install)) {
 			continue;
 		}
 		const auto seen = state.seenSeq.find(head.install);
@@ -259,6 +266,184 @@ ConfigClassification ClassifyConfig(
 			kind = ConfigHeadKind::Concurrent;
 		}
 		result.heads.push_back({ head, kind });
+	}
+	return result;
+}
+
+} // namespace
+
+std::optional<ConfigVersionKey> ParseConfigVersionKey(
+		const QString &key) {
+	return ParseKey(key);
+}
+
+bool IsConfigVersionKey(const QString &key) {
+	return ParseConfigVersionKey(key).has_value();
+}
+
+std::optional<ConfigVersion> MakeConfigVersion(
+		const QByteArray &text,
+		const std::vector<ConfigVersion> &parents) {
+	auto result = ConfigVersion();
+	auto generation = uint64_t(0);
+	auto ancestors = std::vector<QString>();
+	for (const auto &parent : parents) {
+		const auto key = ParseKey(parent.key);
+		if (!key || !ValidLineage(parent.key, parent.lineage)
+			|| key->generation == std::numeric_limits<uint64_t>::max()) {
+			return std::nullopt;
+		}
+		generation = std::max(generation, key->generation);
+		if (!Has(result.parents, parent.key)) {
+			result.parents.push_back(parent.key);
+			if (result.parents.size() > 2) {
+				return std::nullopt;
+			}
+			ancestors.push_back(parent.key);
+			for (const auto &ancestor : parent.lineage) {
+				if (!Has(ancestors, ancestor)) {
+					ancestors.push_back(ancestor);
+				}
+			}
+		}
+	}
+	std::stable_sort(ancestors.begin(), ancestors.end(), [](const auto &a,
+			const auto &b) {
+		return ParseKey(a)->generation > ParseKey(b)->generation;
+	});
+	if (ancestors.size() > kLineageLimit) {
+		auto retained = result.parents;
+		std::stable_sort(retained.begin(), retained.end(), [](const auto &a,
+				const auto &b) {
+			return ParseKey(a)->generation > ParseKey(b)->generation;
+		});
+		for (const auto &ancestor : ancestors) {
+			if (retained.size() == kLineageLimit) {
+				break;
+			}
+			if (!Has(retained, ancestor)) {
+				retained.push_back(ancestor);
+			}
+		}
+		ancestors = std::move(retained);
+	}
+	result.lineage = std::move(ancestors);
+	result.key = QString::number(generation + 1)
+		+ u"."_q + SettingsFingerprint(text);
+	return result;
+}
+
+ConfigClassification ClassifyConfig(
+		const QString &localFp,
+		const ConfigSyncState &state,
+		const std::vector<ConfigHead> &remoteHeads) {
+	return Classify(localFp, state, remoteHeads, false);
+}
+
+ConfigSyncPlan PlanConfigSync(
+		const QString &localFp,
+		const ConfigSyncState &state,
+		const std::vector<ConfigHead> &remoteHeads) {
+	auto result = ConfigSyncPlan();
+	const auto unjoined = Unjoined(state);
+	result.classification = Classify(localFp, state, remoteHeads, unjoined);
+	const auto &classification = result.classification;
+	const auto has = [&](ConfigHeadKind kind) {
+		return std::any_of(
+			classification.heads.begin(),
+			classification.heads.end(),
+			[&](const auto &outcome) { return outcome.kind == kind; });
+	};
+	if (!classification.inputValid || has(ConfigHeadKind::Invalid)) {
+		return result;
+	}
+	result.same = HeadsOf(classification, { ConfigHeadKind::Same });
+	const auto candidates = Representatives(HeadsOf(classification, {
+		ConfigHeadKind::Ahead,
+		ConfigHeadKind::Concurrent,
+		ConfigHeadKind::Unrelated,
+	}));
+	const auto split = classification.split && candidates.size() > 1;
+	const auto others = std::any_of(
+		remoteHeads.begin(),
+		remoteHeads.end(),
+		[&](const ConfigHead &head) {
+			return head.space == state.space
+				&& (unjoined || head.install != state.install);
+		});
+	if (!state.pending.isEmpty()) {
+		result.verdict = ConfigSyncVerdict::Pending;
+	} else if (has(ConfigHeadKind::Concurrent) || split) {
+		result.verdict = ConfigSyncVerdict::Conflict;
+		result.offered = candidates;
+	} else if (has(ConfigHeadKind::Unrelated)) {
+		result.verdict = ConfigSyncVerdict::Choose;
+		result.offered = candidates;
+	} else if (has(ConfigHeadKind::Ahead)) {
+		result.verdict = ConfigSyncVerdict::UpdateReady;
+		result.offered = {
+			HeadsOf(classification, { ConfigHeadKind::Ahead }).front(),
+		};
+	} else if (!result.same.empty()) {
+		result.verdict = ConfigSyncVerdict::Adopt;
+	} else if (state.base.isEmpty() && !others) {
+		result.verdict = ConfigSyncVerdict::Empty;
+	} else if (!state.base.isEmpty() && Fingerprint(state.base) != localFp) {
+		result.verdict = ConfigSyncVerdict::LocalChanges;
+	} else {
+		result.verdict = ConfigSyncVerdict::UpToDate;
+	}
+	return result;
+}
+
+std::optional<ConfigSyncState> AdoptConfigHeads(
+		const ConfigSyncState &state,
+		const QString &localFp,
+		const std::vector<ConfigHead> &heads) {
+	if (heads.empty()
+		|| !state.pending.isEmpty()
+		|| state.install.isEmpty()
+		|| !StateValid(localFp, state)) {
+		return std::nullopt;
+	}
+	for (const auto &head : heads) {
+		if (head.space != state.space
+			|| head.install == state.install
+			|| !head.seq
+			|| !ValidLineage(head.key, head.lineage)
+			|| Fingerprint(head.key) != localFp) {
+			return std::nullopt;
+		}
+	}
+	auto sorted = heads;
+	std::sort(sorted.begin(), sorted.end(), Precedes);
+	auto result = state;
+	auto equiv = std::vector<QString>();
+	if (Fingerprint(state.base) != localFp) {
+		result.base = sorted.front().key;
+		result.baseLineage = sorted.front().lineage;
+	} else {
+		equiv = state.equiv;
+	}
+	for (const auto &head : sorted) {
+		equiv.push_back(head.key);
+	}
+	std::sort(equiv.begin(), equiv.end(), [](const auto &a, const auto &b) {
+		const auto first = Generation(a);
+		const auto second = Generation(b);
+		return (first != second) ? (first > second) : (a < b);
+	});
+	equiv.erase(std::unique(equiv.begin(), equiv.end()), equiv.end());
+	equiv.erase(
+		std::remove(equiv.begin(), equiv.end(), result.base),
+		equiv.end());
+	if (equiv.size() > 16) {
+		equiv.resize(16);
+	}
+	result.equiv = std::move(equiv);
+	for (const auto &head : sorted) {
+		auto &seen = result.seenSeq[head.install];
+		seen = std::max(seen, head.seq);
 	}
 	return result;
 }
