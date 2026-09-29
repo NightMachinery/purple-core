@@ -24,6 +24,13 @@ struct ConfigVersion {
 	std::vector<QString> lineage;
 };
 
+struct ConfigVersionKey {
+	uint64_t generation = 0;
+	QString fingerprint;
+};
+
+[[nodiscard]] std::optional<ConfigVersionKey> ParseConfigVersionKey(
+	const QString &key);
 [[nodiscard]] bool IsConfigVersionKey(const QString &key);
 [[nodiscard]] std::optional<ConfigVersion> MakeConfigVersion(
 	const QByteArray &text,

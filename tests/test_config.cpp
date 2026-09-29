@@ -14,6 +14,7 @@ option) any later version.
 
 #include "purple/purple_engine.h"
 #include "purple/purple_config_sync.h"
+#include "purple/purple_config_payload.h"
 #include "purple/purple_passcode.h"
 #include "purple/purple_screentime.h"
 #include "purple/purple_settings.h"
@@ -8737,11 +8738,198 @@ void TestSyncEnvelope() {
 		Purple::SyncEnvelopeError::SizeLimit);
 }
 
+void TestConfigPayload() {
+	Begin("config payload");
+	const auto firstText = QByteArray(
+		"version = 1\n[premium]\nenabled_p = 'yes'\n");
+	const auto secondText = QByteArray("version = 1\nname = 'second'\n");
+	const auto thirdText = QByteArray("version = 1\nname = 'third'\n");
+	const auto root = Purple::MakeConfigVersion(firstText, {});
+	CHECK(root.has_value());
+	const auto second = Purple::MakeConfigVersion(secondText, { *root });
+	const auto third = Purple::MakeConfigVersion(thirdText, { *root });
+	CHECK(second.has_value());
+	CHECK(third.has_value());
+	const auto revert = Purple::MakeConfigVersion(firstText, { *second });
+	const auto merge = Purple::MakeConfigVersion(firstText, { *second, *third });
+	CHECK(revert.has_value());
+	CHECK(merge.has_value());
+	const auto parts = Purple::ParseConfigVersionKey(root->key);
+	CHECK(parts.has_value());
+	CHECK_EQ(parts->generation, uint64_t(1));
+	CHECK(parts->fingerprint == Purple::SettingsFingerprint(firstText));
+	CHECK(!Purple::ParseConfigVersionKey(u"01.bad"_q));
+
+	const auto payload = [](const Purple::ConfigVersion &version,
+			const QByteArray &text,
+			int schema = 1) {
+		auto parents = QJsonArray();
+		auto lineage = QJsonArray();
+		for (const auto &parent : version.parents) {
+			parents.append(parent);
+		}
+		for (const auto &ancestor : version.lineage) {
+			lineage.append(ancestor);
+		}
+		return QJsonObject{
+			{ u"schema"_q, schema },
+			{ u"key"_q, version.key },
+			{ u"parents"_q, parents },
+			{ u"lineage"_q, lineage },
+			{ u"warnings"_q, 9 },
+			{ u"text"_q, QString::fromUtf8(text) },
+			{ u"unknown"_q, QJsonObject{
+				{ u"nested"_q, QJsonArray{ true, u"kept"_q } },
+			} },
+		};
+	};
+	const auto document = [](const QJsonObject &body,
+			const QString &stream = u"config"_q) {
+		return QJsonObject{
+			{ u"purple_sync"_q, 1 },
+			{ u"stream"_q, stream },
+			{ u"space"_q, u"sp-"_q + QString(26, u'a') },
+			{ u"writer"_q, QJsonObject{
+				{ u"install"_q, u"in-"_q + QString(26, u'a') },
+				{ u"device"_q, u"phone"_q },
+				{ u"platform"_q, u"android"_q },
+				{ u"app"_q, u"Purple"_q },
+			} },
+			{ u"seq"_q, 1 },
+			{ u"at"_q, 0 },
+			{ u"payload"_q, body },
+		};
+	};
+	const auto inspect = [&](const QJsonObject &body) {
+		const auto write = Purple::SerializeSyncEnvelope(
+			Purple::SyncEnvelope{ document(body) });
+		CHECK(bool(write));
+		const auto envelope = Purple::ParseSyncEnvelope(write.canonical);
+		CHECK(bool(envelope));
+		return Purple::InspectConfigPayload(envelope);
+	};
+	const auto rejects = [&](const QJsonObject &body,
+			Purple::ConfigPayloadError error) {
+		const auto result = inspect(body);
+		CHECK(result.status == Purple::ConfigPayloadStatus::Invalid);
+		CHECK(result.error == error);
+	};
+	const auto rootPayload = payload(*root, firstText);
+	const auto inspectedRoot = inspect(rootPayload);
+	CHECK(bool(inspectedRoot));
+	CHECK(inspectedRoot.status == Purple::ConfigPayloadStatus::Valid);
+	CHECK(inspectedRoot.version.key == root->key);
+	CHECK(inspectedRoot.text == firstText);
+	CHECK_EQ(inspectedRoot.writerWarnings, uint64_t(9));
+	CHECK(!inspectedRoot.localWarnings.empty());
+	const auto inspectedRevert = inspect(payload(*revert, firstText));
+	CHECK(bool(inspectedRevert));
+	CHECK(inspectedRevert.version.parents == revert->parents);
+	CHECK(inspectedRevert.version.lineage == revert->lineage);
+	const auto inspectedMerge = inspect(payload(*merge, firstText));
+	CHECK(bool(inspectedMerge));
+	CHECK_EQ(inspectedMerge.version.parents.size(), size_t(2));
+	CHECK(inspectedMerge.version.lineage == merge->lineage);
+	const auto initial = Purple::SerializeSyncEnvelope(
+		Purple::SyncEnvelope{ document(rootPayload) });
+	const auto parsedEnvelope = Purple::ParseSyncEnvelope(initial.canonical);
+	CHECK(bool(parsedEnvelope));
+	CHECK(parsedEnvelope.envelope.document.value(u"payload"_q).toObject()
+		.value(u"unknown"_q).toObject()
+		.value(u"nested"_q).toArray().last().toString() == u"kept"_q);
+	const auto rewritten = Purple::SerializeSyncEnvelope(parsedEnvelope.envelope);
+	CHECK(bool(rewritten));
+	CHECK(rewritten.canonical == initial.canonical);
+
+	auto changed = rootPayload;
+	changed.remove(u"schema"_q);
+	rejects(changed, Purple::ConfigPayloadError::MissingField);
+	changed = rootPayload;
+	changed.insert(u"warnings"_q, u"nine"_q);
+	rejects(changed, Purple::ConfigPayloadError::FieldType);
+	changed.insert(u"warnings"_q, -1);
+	rejects(changed, Purple::ConfigPayloadError::InvalidValue);
+	changed = rootPayload;
+	changed.insert(u"key"_q, u"bad"_q);
+	rejects(changed, Purple::ConfigPayloadError::InvalidKey);
+	changed.insert(u"key"_q, root->key.left(root->key.size() - 1)
+		+ (root->key.back() == u'a' ? u"b"_q : u"a"_q));
+	rejects(changed, Purple::ConfigPayloadError::FingerprintMismatch);
+	changed = rootPayload;
+	changed.insert(u"parents"_q, QJsonArray{ root->key });
+	changed.insert(u"lineage"_q, QJsonArray{ root->key });
+	rejects(changed, Purple::ConfigPayloadError::InvalidAncestry);
+	changed = payload(*second, secondText);
+	changed.insert(u"lineage"_q, QJsonArray());
+	rejects(changed, Purple::ConfigPayloadError::InvalidAncestry);
+	changed.insert(u"parents"_q, QJsonArray{ root->key, root->key });
+	changed.insert(u"lineage"_q, QJsonArray{ root->key });
+	rejects(changed, Purple::ConfigPayloadError::InvalidAncestry);
+	changed.insert(u"parents"_q, QJsonArray{ root->key });
+	changed.insert(u"lineage"_q, QJsonArray{ root->key, root->key });
+	rejects(changed, Purple::ConfigPayloadError::InvalidAncestry);
+	changed.insert(u"lineage"_q, QJsonArray{ second->key });
+	rejects(changed, Purple::ConfigPayloadError::InvalidAncestry);
+	changed = payload(*second, secondText);
+	changed.insert(u"key"_q,
+		u"3."_q + Purple::SettingsFingerprint(secondText));
+	rejects(changed, Purple::ConfigPayloadError::InvalidAncestry);
+	changed.insert(u"parents"_q, QJsonArray());
+	changed.insert(u"lineage"_q, QJsonArray());
+	changed.insert(u"key"_q, second->key);
+	rejects(changed, Purple::ConfigPayloadError::InvalidAncestry);
+	changed = payload(*second, secondText);
+	auto oversizedLineage = QJsonArray();
+	for (auto generation = 1; generation <= 65; ++generation) {
+		oversizedLineage.append(QString::number(generation)
+			+ u"."_q + Purple::SettingsFingerprint(firstText));
+	}
+	changed.insert(u"lineage"_q, oversizedLineage);
+	rejects(changed, Purple::ConfigPayloadError::InvalidAncestry);
+	changed = rootPayload;
+	changed.insert(u"text"_q,
+		QString::fromUtf8(firstText).replace(u"\n"_q, u"\r\n"_q));
+	rejects(changed, Purple::ConfigPayloadError::FingerprintMismatch);
+	changed = rootPayload;
+	changed.insert(u"text"_q, u"version = ["_q);
+	const auto syntax = inspect(changed);
+	CHECK(syntax.error == Purple::ConfigPayloadError::FingerprintMismatch);
+	const auto broken = Purple::MakeConfigVersion("version = [", {});
+	CHECK(broken.has_value());
+	const auto parsedBroken = inspect(payload(*broken, "version = ["));
+	CHECK(parsedBroken.error == Purple::ConfigPayloadError::TomlSyntax);
+	CHECK(!parsedBroken.tomlError.isEmpty());
+	changed = rootPayload;
+	changed.insert(u"schema"_q, 2);
+	rejects(changed, Purple::ConfigPayloadError::SchemaMismatch);
+	const auto newerText = QByteArray("version = 2\n");
+	const auto newerVersion = Purple::MakeConfigVersion(newerText, {});
+	CHECK(newerVersion.has_value());
+	const auto newer = inspect(payload(*newerVersion, newerText, 2));
+	CHECK(bool(newer));
+	CHECK(newer.status == Purple::ConfigPayloadStatus::NewerSchema);
+	CHECK_EQ(newer.schema, 2);
+	CHECK(!newer.localWarnings.empty());
+	const auto libraryWrite = Purple::SerializeSyncEnvelope(
+		Purple::SyncEnvelope{ document(rootPayload, u"library"_q) });
+	CHECK(bool(libraryWrite));
+	const auto libraryEnvelope = Purple::ParseSyncEnvelope(libraryWrite.canonical);
+	CHECK(Purple::InspectConfigPayload(libraryEnvelope).error
+		== Purple::ConfigPayloadError::WrongStream);
+	auto invalidUtf8 = initial.canonical;
+	invalidUtf8.replace("\"config\"", QByteArray("\"") + "\xc0\xaf" + "\"");
+	const auto invalidEnvelope = Purple::ParseSyncEnvelope(invalidUtf8);
+	CHECK(invalidEnvelope.status == Purple::SyncEnvelopeStatus::Invalid);
+	CHECK(Purple::InspectConfigPayload(invalidEnvelope).error
+		== Purple::ConfigPayloadError::InvalidEnvelope);
+}
+
 } // namespace
 
 int main() {
 	TestSyncJson();
 	TestSyncEnvelope();
+	TestConfigPayload();
 	TestConfigVersions();
 	TestConfigClassification();
 	TestPersianKeyboardToEnglish();

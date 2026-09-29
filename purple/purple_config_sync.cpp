@@ -18,11 +18,6 @@ namespace {
 
 constexpr auto kLineageLimit = 64;
 
-struct KeyParts {
-	uint64_t generation = 0;
-	QString fingerprint;
-};
-
 [[nodiscard]] bool Decimal(const QString &value) {
 	if (value.isEmpty() || (value.size() > 1 && value.front() == u'0')) {
 		return false;
@@ -56,7 +51,7 @@ struct KeyParts {
 	return true;
 }
 
-[[nodiscard]] std::optional<KeyParts> ParseKey(const QString &key) {
+[[nodiscard]] std::optional<ConfigVersionKey> ParseKey(const QString &key) {
 	const auto dot = key.indexOf(u'.');
 	if (dot < 0 || !Decimal(key.left(dot))) {
 		return std::nullopt;
@@ -70,7 +65,7 @@ struct KeyParts {
 	if (!ok || !generation) {
 		return std::nullopt;
 	}
-	return KeyParts{ generation, fingerprint };
+	return ConfigVersionKey{ generation, fingerprint };
 }
 
 [[nodiscard]] bool ValidLineage(
@@ -107,8 +102,13 @@ struct KeyParts {
 
 } // namespace
 
+std::optional<ConfigVersionKey> ParseConfigVersionKey(
+		const QString &key) {
+	return ParseKey(key);
+}
+
 bool IsConfigVersionKey(const QString &key) {
-	return ParseKey(key).has_value();
+	return ParseConfigVersionKey(key).has_value();
 }
 
 std::optional<ConfigVersion> MakeConfigVersion(

@@ -56,6 +56,15 @@ rules about data are far easier to prove outside a running app than inside one.
   document name, and forwarding metadata. A newer major that uses JSON numbers
   outside version 1's safe-integer subset is unreadable by this parser rather
   than receiving the higher-major outcome.
+- `purple/purple_config_payload.{h,cpp}` - inspects a validated config envelope
+  before its settings file can be used. It checks the key against the exact
+  UTF-8 bytes represented by the JSON `text` string, validates direct parents
+  and bounded lineage, parses TOML again, and compares the declared schema to
+  the parsed version. It reports a newer schema separately from an invalid
+  record and returns locally computed warnings alongside the writer's count.
+  Arbitrary non-UTF-8 settings bytes cannot be represented by a JSON string.
+  Without the parent records, inspection cannot prove that lineage is the
+  complete union of their histories; it verifies membership and structure.
 - `purple/purple_engine.{h,cpp}` - resolves a preset into a flat table of "for
   this list, show and notify are these", and answers what that means for one
   chat. Resolution runs once per config or preset change, never per repaint.
