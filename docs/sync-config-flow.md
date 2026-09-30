@@ -118,7 +118,12 @@ and keeping this device's settings must publish without adopting, with parents
 equal as a set to the expected ones.
 
 `PlanSyncConfigPost(state, token, staged, inventory, local, request, now,
-writer)` returns one step:
+writer, queue)` returns one step. `queue` says whether the client's own
+Telegram send queue still holds an unsent settings record for this account,
+one that is still being sent or that failed and can be retried
+(`SyncConfigSendQueue::HoldsSyncRecord`), or not (`Empty`). A Check cannot see
+such a message, because it is not in Saved Messages yet, so only the client
+can report it.
 
 - Finish with a status: NeedsReview for a refused entry, a failed gate, an
   exhausted sequence, a clock at or before the epoch or a publish planner that
@@ -129,12 +134,23 @@ writer)` returns one step:
   Saved Messages; the client confirms it without posting.
 - Stage with the canonical record and the next config data; the client stages
   them, then calls `PlanSyncConfigStagedPost` with the new state.
+- Finish(StillSending) for a pending-only request whose staged record is not
+  in Saved Messages while the queue holds a settings record. Posting the staged
+  bytes again then would put a second copy in Saved Messages once the first
+  arrives. The client tells the person to wait for the earlier copy, or to
+  delete it if it failed, and Check again. ConfirmFound takes precedence: when
+  the staged record has already arrived, it is confirmed whatever the queue
+  says. The queue is ignored on every other path, since a new-content request
+  is refused while a record is staged and so never reposts.
 - Post with the staged bytes, for a pending-only request whose staged record is
-  not in Saved Messages.
+  not in Saved Messages and whose queue is Empty.
 
 `PlanSyncConfigStagedPost(state, token, own, staged)` returns Post when the
 publish planner agrees that the staged record was reconciled absent, and
-Finish(NeedsReview) otherwise.
+Finish(NeedsReview) otherwise. It takes no queue: a client calls it directly
+only right after staging a record it has just built, which no earlier send can
+hold, and the pending-only path reaches it through `PlanSyncConfigPost`, which
+has already refused a held queue.
 
 ## Clients without native state
 
@@ -195,7 +211,9 @@ a manual check that the tests still bite, mutate one rule at a time in a
 scratch copy and confirm the suite fails: let a pending-only request carry
 expectations, drop the expected-parents comparison from the gate, remove any
 stamp input, skip the stamp comparison in `PlanSyncConfigApply`, drop the
-seen-sequence rule from the commit check, or force `promiseKept`. Rules that
+seen-sequence rule from the commit check, force `promiseKept`, or drop the
+StillSending refusal from `PlanSyncConfigPost` (moving it ahead of
+ConfirmFound, or applying it on paths that do not repost, fails too). Rules that
 are redundant with an earlier check (the staged-bytes comparison for
 ConfirmFound, which `ReconcileOwnConfigInventory` already enforces) survive
 such a mutation by design.

@@ -181,6 +181,7 @@ struct Device {
 	SyncSettingsFile local = MakeSyncSettingsFile(
 		SyncSettingsFileStatus::Absent);
 	SyncConfigWriter writer = DesktopWriter();
+	SyncConfigSendQueue queue = SyncConfigSendQueue::Empty;
 	int64_t now = 1800000000;
 
 	void setLocal(const QByteArray &text) {
@@ -345,7 +346,8 @@ PublishRun Publish(
 		device.local,
 		request,
 		device.now,
-		device.writer);
+		device.writer,
+		device.queue);
 	switch (plan.step) {
 	case SyncConfigPostStep::Finish:
 		run.status = plan.status;
@@ -1425,7 +1427,8 @@ void TestFlowPublisher() {
 			.expectedParents = joined.expectedParents,
 		},
 		unbound.now,
-		unbound.writer);
+		unbound.writer,
+		SyncConfigSendQueue::HoldsSyncRecord);
 	CHECK(wrongToken.step == SyncConfigPostStep::Finish);
 	CHECK(wrongToken.status == Status::NeedsReview);
 
@@ -1490,7 +1493,8 @@ void TestFlowPublisher() {
 		device.local,
 		{ .pendingOnly = true },
 		device.now,
-		device.writer);
+		device.writer,
+		SyncConfigSendQueue::HoldsSyncRecord);
 	CHECK(found.step == SyncConfigPostStep::ConfirmFound);
 	CHECK(found.messageId == lost.messageId || found.messageId > 0);
 	CHECK(found.record == device.staged);
@@ -1524,9 +1528,23 @@ void TestFlowPublisher() {
 		MakeSyncSettingsFile(SyncSettingsFileStatus::Invalid),
 		{ .pendingOnly = true },
 		device.now,
-		device.writer);
+		device.writer,
+		SyncConfigSendQueue::Empty);
 	CHECK(staged.step == SyncConfigPostStep::Post);
 	CHECK(staged.record == device.staged);
+	const auto held = PlanSyncConfigPost(
+		*device.state,
+		device.token(),
+		device.staged,
+		cloud.inventory(),
+		MakeSyncSettingsFile(SyncSettingsFileStatus::Invalid),
+		{ .pendingOnly = true },
+		device.now,
+		device.writer,
+		SyncConfigSendQueue::HoldsSyncRecord);
+	CHECK(held.step == SyncConfigPostStep::Finish);
+	CHECK(held.status == Status::StillSending);
+	CHECK(held.record.isEmpty());
 	const auto emptyStage = PlanSyncConfigPost(
 		*device.state,
 		device.token(),
@@ -1535,7 +1553,8 @@ void TestFlowPublisher() {
 		device.local,
 		{ .pendingOnly = true },
 		device.now,
-		device.writer);
+		device.writer,
+		SyncConfigSendQueue::HoldsSyncRecord);
 	CHECK(emptyStage.step == SyncConfigPostStep::Finish);
 	CHECK(emptyStage.status == Status::NeedsReview);
 	const auto finished = Publish(device, cloud, { .pendingOnly = true });
@@ -1608,6 +1627,90 @@ void TestFlowPublisher() {
 	CHECK(Publish(device, cloud, LocalRequest(device, cloud)).status
 		== Status::InvalidSettings);
 	CHECK(device.state->config.pendingSeq == 0);
+}
+
+void TestFlowSendQueue() {
+	Begin("sync flow send queue");
+	using Status = SyncConfigPublishStatus;
+	using Queue = SyncConfigSendQueue;
+	auto cloud = Cloud();
+	auto device = Device('a');
+	device.setLocal(T0);
+	CHECK(Apply(device, cloud, Review(device, cloud), std::nullopt).status
+		== SyncConfigApplyStatus::Applied);
+
+	device.queue = Queue::HoldsSyncRecord;
+	const auto first = PublishLocal(device, cloud);
+	CHECK(first.status == Status::Confirmed && first.posts == 1);
+	CHECK(PublishLocal(device, cloud).status == Status::AlreadySynced);
+	auto run = Publish(device, cloud, SyncConfigPublishRequest());
+	CHECK(run.status == Status::NeedsReview && run.posts == 0);
+	run = Publish(device, cloud, { .pendingOnly = true });
+	CHECK(run.status == Status::NeedsReview && run.posts == 0);
+
+	device.queue = Queue::Empty;
+	device.setLocal(T1);
+	const auto queued = Publish(
+		device,
+		cloud,
+		LocalRequest(device, cloud),
+		PostMode::Fail);
+	CHECK(queued.status == Status::OutcomeUnknown && queued.posts == 1);
+	CHECK(device.state->config.pendingSeq != 0);
+	CHECK(Review(device, cloud).plan.verdict == ConfigSyncVerdict::Pending);
+
+	device.queue = Queue::HoldsSyncRecord;
+	const auto recordsBefore = cloud.records.size();
+	const auto stateBefore = device.stateBytes();
+	const auto stagedBefore = device.staged;
+	const auto held = Publish(device, cloud, { .pendingOnly = true });
+	CHECK(held.status == Status::StillSending);
+	CHECK(held.posts == 0);
+	CHECK(cloud.records.size() == recordsBefore);
+	CHECK(device.stateBytes() == stateBefore);
+	CHECK(device.staged == stagedBefore);
+	CHECK(Publish(device, cloud, LocalRequest(device, cloud)).status
+		== Status::NeedsReview);
+	auto incomplete = cloud;
+	incomplete.scanComplete = false;
+	CHECK(Publish(device, incomplete, { .pendingOnly = true }).status
+		== Status::Incomplete);
+	auto elsewhere = cloud;
+	auto early = MakeRemote('e', u"Linux"_q);
+	Post(
+		elsewhere,
+		early,
+		*FormatTimeOrderedSyncSpaceId(1, QByteArray(10, 'x')),
+		TB);
+	CHECK(Publish(device, elsewhere, { .pendingOnly = true }).status
+		== Status::NeedsReview);
+	CHECK(device.stateBytes() == stateBefore);
+
+	const auto arrived = cloud.add(queued.posted);
+	const auto confirmed = Publish(device, cloud, { .pendingOnly = true });
+	CHECK(confirmed.status == Status::Confirmed);
+	CHECK(confirmed.posts == 0);
+	CHECK(confirmed.messageId == arrived);
+	CHECK(device.state->config.pendingSeq == 0);
+	CHECK(Review(device, cloud).plan.verdict == ConfigSyncVerdict::UpToDate);
+
+	device.queue = Queue::Empty;
+	device.setLocal(TB);
+	const auto failed = Publish(
+		device,
+		cloud,
+		LocalRequest(device, cloud),
+		PostMode::Fail);
+	CHECK(failed.status == Status::OutcomeUnknown && failed.posts == 1);
+	device.queue = Queue::HoldsSyncRecord;
+	CHECK(Publish(device, cloud, { .pendingOnly = true }).status
+		== Status::StillSending);
+	device.queue = Queue::Empty;
+	const auto resent = Publish(device, cloud, { .pendingOnly = true });
+	CHECK(resent.status == Status::Confirmed && resent.posts == 1);
+	CHECK(resent.posted == failed.posted);
+	CHECK(device.state->config.pendingSeq == 0);
+	CHECK(Review(device, cloud).plan.verdict == ConfigSyncVerdict::UpToDate);
 }
 
 void TestFlowStamp() {
@@ -2193,6 +2296,7 @@ int main() {
 	TestFlowRechecks();
 	TestFlowJoinVariants();
 	TestFlowPublisher();
+	TestFlowSendQueue();
 	TestFlowStamp();
 	TestFlowCommitCheck();
 	TestFlowDescribe();

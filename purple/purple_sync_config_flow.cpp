@@ -766,7 +766,8 @@ SyncConfigPostPlan PlanSyncConfigPost(
 		const SyncSettingsFile &local,
 		const SyncConfigPublishRequest &request,
 		int64_t now,
-		const SyncConfigWriter &writer) {
+		const SyncConfigWriter &writer,
+		SyncConfigSendQueue queue) {
 	const auto entry = PlanSyncConfigPublishEntry(
 		request,
 		state.config.pendingSeq != 0);
@@ -810,6 +811,8 @@ SyncConfigPostPlan PlanSyncConfigPost(
 	if (entry == SyncConfigPublishEntry::FinishStaged) {
 		return stagedRecord.isEmpty()
 			? FinishPost(SyncConfigPublishStatus::NeedsReview)
+			: (queue == SyncConfigSendQueue::HoldsSyncRecord)
+			? FinishPost(SyncConfigPublishStatus::StillSending)
 			: PlanSyncConfigStagedPost(state, bindingToken, own, stagedRecord);
 	}
 	if (local.status != SyncSettingsFileStatus::Present

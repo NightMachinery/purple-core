@@ -263,6 +263,12 @@ enum class SyncConfigPublishStatus {
 	InvalidSettings,
 	OutcomeUnknown,
 	Cancelled,
+	StillSending,
+};
+
+enum class SyncConfigSendQueue {
+	Empty,
+	HoldsSyncRecord,
 };
 
 enum class SyncConfigPostStep {
@@ -294,7 +300,8 @@ struct SyncConfigWriter {
 	const SyncSettingsFile &local,
 	const SyncConfigPublishRequest &request,
 	int64_t now,
-	const SyncConfigWriter &writer);
+	const SyncConfigWriter &writer,
+	SyncConfigSendQueue queue);
 [[nodiscard]] SyncConfigPostPlan PlanSyncConfigStagedPost(
 	const SyncLocalState &state,
 	const QByteArray &bindingToken,
