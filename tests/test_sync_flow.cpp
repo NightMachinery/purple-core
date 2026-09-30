@@ -367,6 +367,20 @@ PublishRun Publish(
 			device.token(),
 			plan.own,
 			device.staged);
+		auto scoped = inventory;
+		SelectSyncSpaceIfEmpty(scoped, device.state->space);
+		const auto stateless = PlanSyncConfigStagedPost(
+			*device.state,
+			device.token(),
+			ReconcileOwnConfigInventory(
+				*device.state,
+				scoped,
+				scoped.accountUserId,
+				device.staged),
+			device.staged);
+		CHECK(stateless.step == staged.step);
+		CHECK(stateless.status == staged.status);
+		CHECK(stateless.record == staged.record);
 		if (staged.step != SyncConfigPostStep::Post) {
 			run.status = staged.status;
 			break;
@@ -1684,6 +1698,14 @@ void TestFlowStamp() {
 	CHECK(joined.state.install == fresh.state->install);
 	CHECK(joined.space == unbound.space);
 	CHECK(SyncConfigReviewStamp(bound) == SyncConfigReviewStamp(joined));
+	const auto preJoin = ReviewSyncConfigInventory(
+		cloud.inventory(),
+		nullptr,
+		{},
+		fresh.local);
+	CHECK(SyncConfigReviewStamp(preJoin) == SyncConfigReviewStamp(unbound));
+	CHECK(SyncConfigReviewStamp(SyncConfigJoinedReview(preJoin, *fresh.state))
+		== SyncConfigReviewStamp(joined));
 
 	auto lonely = Device('n');
 	lonely.setLocal(T0);

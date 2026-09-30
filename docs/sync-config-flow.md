@@ -136,6 +136,20 @@ writer)` returns one step:
 publish planner agrees that the staged record was reconciled absent, and
 Finish(NeedsReview) otherwise.
 
+## Clients without native state
+
+A client that calls the core statelessly (Android's JNI rebuilds the inventory
+on every call) cannot hold the shown review or the pre-stage own reconcile
+between calls. Two substitutions are equivalent and tested:
+
+- After a join, the expected stamp may be built from the fresh unlinked review
+  made just before joining (step 2 above, with the same file bytes) instead of
+  the shown review: their stamps were equal, and `SyncConfigJoinedReview`
+  changes only stamp inputs, identically in both.
+- After staging, the `own` passed to `PlanSyncConfigStagedPost` may be
+  reconciled again from the same inventory with the new state and the staged
+  bytes instead of reusing the one from before staging.
+
 ## Describe
 
 `DescribeSyncConfigReview(review, localPublishable)` returns a message, an
