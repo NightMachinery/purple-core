@@ -15,6 +15,8 @@ option) any later version.
 namespace Purple {
 namespace {
 
+constexpr auto kLargestRecordNumber = uint64_t(9007199254740991ULL);
+
 [[nodiscard]] bool HasConcurrent(const SyncConfigReview &review) {
 	const auto &heads = review.plan.classification.heads;
 	return std::any_of(heads.begin(), heads.end(), [](const auto &outcome) {
@@ -68,9 +70,10 @@ std::vector<SyncDeviceNameParts> SyncConfigDeviceNames(
 }
 
 bool SyncSettingsPublishable(
-		const SyncSettingsFile &file,
+		const SyncConfigReview &review,
 		const QString &device,
 		const SyncConfigWriter &writer) {
+	const auto &file = review.local;
 	if (file.status != SyncSettingsFileStatus::Present
 		|| file.text.isEmpty()) {
 		return false;
@@ -80,15 +83,22 @@ bool SyncSettingsPublishable(
 	if (!space || !install) {
 		return false;
 	}
+	const auto keep = PlanConfigChoice(
+		review.state,
+		review.plan,
+		std::nullopt);
 	const auto built = BuildConfigRecord({
 		.text = file.text,
+		.parents = (keep && keep->publish)
+			? keep->parents
+			: std::vector<ConfigVersion>(),
 		.space = *space,
 		.install = *install,
 		.device = device,
 		.platform = writer.platform,
 		.app = writer.app,
-		.seq = 1,
-		.at = 1,
+		.seq = kLargestRecordNumber,
+		.at = kLargestRecordNumber,
 	});
 	return built && built.canonical.size() <= kSyncConfigRecordMaximumBytes;
 }

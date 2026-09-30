@@ -593,7 +593,7 @@ SyncConfigAction ActionOf(const SyncConfigReview &review) {
 	return DescribeSyncConfigReview(
 		review,
 		SyncSettingsPublishable(
-			review.local,
+			review,
 			u"desktop:x"_q,
 			DesktopWriter())).action;
 }
@@ -602,9 +602,15 @@ SyncConfigMessage MessageOf(const SyncConfigReview &review) {
 	return DescribeSyncConfigReview(
 		review,
 		SyncSettingsPublishable(
-			review.local,
+			review,
 			u"desktop:x"_q,
 			DesktopWriter())).message;
+}
+
+bool FilePublishable(const SyncSettingsFile &file) {
+	auto review = SyncConfigReview();
+	review.local = file;
+	return SyncSettingsPublishable(review, u"desktop:x"_q, DesktopWriter());
 }
 
 void TestFlowBasics() {
@@ -1756,6 +1762,107 @@ void TestFlowPublisher() {
 	CHECK(device.state->config.pendingSeq == 0);
 }
 
+void TestFlowPublishableLineage() {
+	Begin("sync flow publishable with a long lineage");
+	using Status = SyncConfigPublishStatus;
+	const auto space = *FormatSyncSpaceId(QByteArray(16, 'l'));
+	auto cloud = Cloud();
+	auto b = MakeRemote('b', u"Android"_q);
+	auto last = Post(cloud, b, space, QByteArray("version = 1\n# chain 0\n"));
+	for (auto i = 1; i != 70; ++i) {
+		last = Post(
+			cloud,
+			b,
+			space,
+			QByteArray("version = 1\n# chain ") + QByteArray::number(i) + '\n',
+			{ last });
+	}
+	CHECK(last.lineage.size() == 64);
+	auto device = Device('a');
+	device.setLocal(T0);
+	const auto join = Review(device, cloud);
+	CHECK(join.plan.verdict == ConfigSyncVerdict::Choose);
+	CHECK(Apply(device, cloud, join, last.key).status
+		== SyncConfigApplyStatus::Applied);
+	CHECK(device.state->configData.baseLineage.size() == 64);
+
+	const auto padded = [](int size) {
+		auto text = QByteArray("version = 1\n");
+		const auto line = QByteArray("# ") + QByteArray(76, 'p') + '\n';
+		while (text.size() + line.size() < size) {
+			text += line;
+		}
+		return text + QByteArray(size - text.size() - 1, '#') + '\n';
+	};
+	device.setLocal(padded(200 * 1024));
+	auto review = Review(device, cloud);
+	CHECK(review.plan.verdict == ConfigSyncVerdict::LocalChanges);
+	const auto fits = [&](int size, bool withPlan) {
+		auto copy = withPlan ? review : SyncConfigReview();
+		copy.local = MakeSyncSettingsFile(
+			SyncSettingsFileStatus::Present,
+			padded(size));
+		return SyncSettingsPublishable(
+			copy,
+			device.state->createdDevice,
+			device.writer);
+	};
+	const auto largest = [&](bool withPlan) {
+		auto low = 200 * 1024;
+		auto high = kSyncSettingsMaximumBytes;
+		while (low < high) {
+			const auto middle = low + (high - low + 1) / 2;
+			if (fits(middle, withPlan)) {
+				low = middle;
+			} else {
+				high = middle - 1;
+			}
+		}
+		return low;
+	};
+	CHECK(fits(200 * 1024, true));
+	const auto withLineage = largest(true);
+	const auto alone = largest(false);
+	CHECK(alone > withLineage + 4000);
+	CHECK(!fits(withLineage + 1, true));
+
+	device.setLocal(padded(withLineage));
+	const auto edge = PlanSyncConfigPost(
+		*device.state,
+		device.token(),
+		device.staged,
+		cloud.inventory(),
+		device.local,
+		LocalRequest(device, cloud),
+		device.now,
+		device.writer,
+		device.queue);
+	CHECK(edge.step == SyncConfigPostStep::Stage);
+
+	device.setLocal(padded(alone));
+	const auto tooBig = Review(device, cloud);
+	CHECK(tooBig.plan.verdict == ConfigSyncVerdict::LocalChanges);
+	CHECK(MessageOf(tooBig) == SyncConfigMessage::NotPublishableInvalid);
+	CHECK(ActionOf(tooBig) == SyncConfigAction::None);
+	CHECK(Publish(device, cloud, LocalRequest(device, cloud)).status
+		== Status::InvalidSettings);
+	CHECK(device.state->config.pendingSeq == 0);
+
+	auto c = MakeRemote('c', u"Windows"_q);
+	auto split = cloud;
+	Post(split, c, space, TC);
+	const auto choose = Review(device, split);
+	CHECK(choose.plan.verdict == ConfigSyncVerdict::Choose
+		|| choose.plan.verdict == ConfigSyncVerdict::Conflict);
+	const auto keepable = SyncSettingsPublishable(
+		choose,
+		device.state->createdDevice,
+		device.writer);
+	CHECK(!keepable);
+	const auto choices = SyncConfigChoices(choose, keepable);
+	CHECK(choices.size() == 1 && choices.front().key.has_value());
+}
+
 void TestFlowSendQueue() {
 	Begin("sync flow send queue");
 	using Status = SyncConfigPublishStatus;
@@ -2103,37 +2210,18 @@ void TestFlowDescribe() {
 	CHECK(parts(u"Windows"_q, QString())
 		== (SyncDeviceNameParts{ u"Windows"_q, QString() }));
 
-	const auto writer = DesktopWriter();
-	const auto device = u"desktop:x"_q;
 	using File = SyncSettingsFileStatus;
-	CHECK(SyncSettingsPublishable(
-		MakeSyncSettingsFile(File::Present, T0),
-		device,
-		writer));
-	CHECK(!SyncSettingsPublishable(
-		MakeSyncSettingsFile(File::Present, QByteArray("not [valid")),
-		device,
-		writer));
-	CHECK(!SyncSettingsPublishable(
-		MakeSyncSettingsFile(File::Present, QByteArray()),
-		device,
-		writer));
-	CHECK(!SyncSettingsPublishable(
-		MakeSyncSettingsFile(File::Absent),
-		device,
-		writer));
-	CHECK(!SyncSettingsPublishable(
-		MakeSyncSettingsFile(File::Invalid),
-		device,
-		writer));
+	CHECK(FilePublishable(MakeSyncSettingsFile(File::Present, T0)));
+	CHECK(!FilePublishable(
+		MakeSyncSettingsFile(File::Present, QByteArray("not [valid"))));
+	CHECK(!FilePublishable(MakeSyncSettingsFile(File::Present, QByteArray())));
+	CHECK(!FilePublishable(MakeSyncSettingsFile(File::Absent)));
+	CHECK(!FilePublishable(MakeSyncSettingsFile(File::Invalid)));
 	auto big = QByteArray("version = 1\n");
 	while (big.size() < 250 * 1024) {
 		big += "# \"quoted\" padding line to grow the record\n";
 	}
-	CHECK(!SyncSettingsPublishable(
-		MakeSyncSettingsFile(File::Present, big),
-		device,
-		writer));
+	CHECK(!FilePublishable(MakeSyncSettingsFile(File::Present, big)));
 
 	auto failed = SyncConfigReview();
 	using Failure = std::pair<SyncConfigReviewStatus, Message>;
@@ -2424,6 +2512,7 @@ int main() {
 	TestFlowRechecks();
 	TestFlowJoinVariants();
 	TestFlowPublisher();
+	TestFlowPublishableLineage();
 	TestFlowSendQueue();
 	TestFlowStamp();
 	TestFlowCommitCheck();

@@ -39,7 +39,7 @@ struct SyncDeviceNameParts {
 	const std::vector<ConfigHead> &heads);
 
 [[nodiscard]] bool SyncSettingsPublishable(
-	const SyncSettingsFile &file,
+	const SyncConfigReview &review,
 	const QString &device,
 	const SyncConfigWriter &writer);
 [[nodiscard]] bool SyncChoicePublishes(

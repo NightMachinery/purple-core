@@ -188,9 +188,15 @@ published, else EmptyBound or EmptyUnbound with Publish, and
 LocalChangesEdited (the file differs from the base) or LocalChangesOwnStale
 with Publish changes; UpToDate to UpToDateAlone or UpToDateWith.
 
-`localPublishable` is `SyncSettingsPublishable(file, device, writer)`: a
-Present, non-empty file whose record, built with this device's id and writer,
-is valid and at most 256 KiB.
+`localPublishable` is `SyncSettingsPublishable(review, device, writer)`: the
+review's local file is Present and not empty, and the record that keeping it
+would post is valid and at most 256 KiB. That record is built the way the post
+builds it: with this device's id and writer, with the parents
+`PlanConfigChoice(review.state, review.plan, std::nullopt)` publishes with
+(none when that choice does not publish), and with the largest sequence and
+time a record can carry. The parents matter: two of them and a full 64-key
+lineage add about 6 KiB, so a file near the limit can fit on its own and still
+be too large to post.
 
 `SyncDeviceNameOf(platform, install)` gives the parts of a device name: the
 platform with whitespace simplified and cut to 32 characters, and the first 4
