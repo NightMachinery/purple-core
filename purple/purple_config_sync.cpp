@@ -610,66 +610,20 @@ std::optional<ConfigChoicePlan> PlanConfigChoice(
 		result.publish = true;
 		break;
 	case ConfigSyncVerdict::Choose:
-	case ConfigSyncVerdict::Conflict:
+	case ConfigSyncVerdict::Conflict: {
 		if (plan.offered.empty()) {
 			return std::nullopt;
-		} else if (chosenRemoteKey) {
-			const auto chosen = std::find_if(
-				plan.offered.begin(),
-				plan.offered.end(),
-				[&](const ConfigHead &head) {
-					return head.key == *chosenRemoteKey;
-				});
-			if (chosen == plan.offered.end()) {
-				return std::nullopt;
-			}
-			const auto fp = Fingerprint(chosen->key);
-			result.writeRemote = true;
-			result.write = *chosen;
-			result.adopt = carrying(fp);
-			result.seen = beside(result.adopt, false);
-			const auto unjoined = Unjoined(state);
-			auto next = Adopt(state, fp, result.adopt, unjoined);
-			if (!next) {
-				return std::nullopt;
-			}
-			for (const auto &head : result.seen) {
-				auto &seen = next->seenSeq[head.install];
-				seen = std::max(seen, head.seq);
-			}
-			auto heads = std::vector<ConfigHead>();
-			for (const auto &outcome : plan.classification.heads) {
-				heads.push_back(outcome.head);
-			}
-			const auto fresh = Plan(fp, *next, heads, plan.ownHead, unjoined);
-			if (fresh.verdict == ConfigSyncVerdict::LocalChanges
-				|| fresh.verdict == ConfigSyncVerdict::Choose
-				|| fresh.verdict == ConfigSyncVerdict::Conflict) {
-				const auto proposal = PlanConfigChoice(
-					*next,
-					fresh,
-					std::nullopt);
-				if (!proposal || !proposal->publish) {
-					return std::nullopt;
-				}
-				result.publish = true;
-				result.parents = proposal->parents;
-				const auto own = std::find_if(
-					result.parents.begin(),
-					result.parents.end(),
-					[&](const ConfigVersion &version) {
-						return version.key == chosen->key;
-					});
-				if (own != result.parents.end()) {
-					std::rotate(result.parents.begin(), own, own + 1);
-				}
-			}
-		} else {
+		}
+		const auto chosen = std::find_if(
+			plan.offered.begin(),
+			plan.offered.end(),
+			[&](const ConfigHead &head) {
+				return chosenRemoteKey && head.key == *chosenRemoteKey;
+			});
+		if (chosenRemoteKey && chosen == plan.offered.end()) {
+			return std::nullopt;
+		} else if (!chosenRemoteKey && plan.same.empty()) {
 			const auto &first = plan.offered.front();
-			result.adopt = plan.same;
-			if (!result.adopt.empty()) {
-				result.seen = beside(result.adopt, false);
-			}
 			result.publish = true;
 			result.parents.push_back(parent(first));
 			if (plan.offered.size() > 1) {
@@ -680,8 +634,53 @@ std::optional<ConfigChoicePlan> PlanConfigChoice(
 				result.parents.push_back(
 					ConfigVersion{ state.base, {}, state.baseLineage });
 			}
+			break;
 		}
-		break;
+		const auto fp = Fingerprint(chosenRemoteKey
+			? chosen->key
+			: plan.same.front().key);
+		if (chosenRemoteKey) {
+			result.writeRemote = true;
+			result.write = *chosen;
+		}
+		result.adopt = carrying(fp);
+		result.seen = beside(result.adopt, false);
+		const auto unjoined = Unjoined(state);
+		auto next = Adopt(state, fp, result.adopt, unjoined);
+		if (!next) {
+			return std::nullopt;
+		}
+		for (const auto &head : result.seen) {
+			auto &seen = next->seenSeq[head.install];
+			seen = std::max(seen, head.seq);
+		}
+		auto heads = std::vector<ConfigHead>();
+		for (const auto &outcome : plan.classification.heads) {
+			heads.push_back(outcome.head);
+		}
+		const auto fresh = Plan(fp, *next, heads, plan.ownHead, unjoined);
+		if (fresh.verdict == ConfigSyncVerdict::LocalChanges
+			|| fresh.verdict == ConfigSyncVerdict::Choose
+			|| fresh.verdict == ConfigSyncVerdict::Conflict) {
+			const auto proposal = PlanConfigChoice(*next, fresh, std::nullopt);
+			if (!proposal || !proposal->publish || !proposal->adopt.empty()) {
+				return std::nullopt;
+			}
+			result.publish = true;
+			result.parents = proposal->parents;
+			const auto own = std::find_if(
+				result.parents.begin(),
+				result.parents.end(),
+				[&](const ConfigVersion &version) {
+					return chosenRemoteKey && version.key == *chosenRemoteKey;
+				});
+			if (own != result.parents.end()) {
+				std::rotate(result.parents.begin(), own, own + 1);
+			}
+		} else if (!chosenRemoteKey) {
+			return std::nullopt;
+		}
+	} break;
 	default:
 		return std::nullopt;
 	}

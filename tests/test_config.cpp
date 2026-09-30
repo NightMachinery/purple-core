@@ -9098,8 +9098,30 @@ void TestConfigChoice() {
 	CHECK(keepMine.has_value());
 	CHECK(HeadKeys(keepMine->adopt) == std::vector<QString>({ elsewhereA.key }));
 	CHECK(parentKeys(*keepMine) == std::vector<QString>({
-		stranger.key, a.key }));
-	CHECK(Purple::MakeConfigVersion("A", keepMine->parents).has_value());
+		stranger.key, elsewhereA.key }));
+	const auto keptVersion = Purple::MakeConfigVersion(
+		"A",
+		keepMine->parents);
+	CHECK(keptVersion.has_value());
+	CHECK(keptVersion && std::find(
+		keptVersion->lineage.begin(),
+		keptVersion->lineage.end(),
+		a.key) != keptVersion->lineage.end());
+	const auto keptState = Purple::AdoptConfigHeads(
+		state,
+		fpA,
+		keepMine->adopt);
+	CHECK(keptState.has_value());
+	const auto afterKeep = Purple::PlanConfigSync(fpA, *keptState, {
+		head(stranger, u"pc"_q), head(elsewhereA, u"tv"_q, 3) });
+	CHECK(afterKeep.verdict == Verdict::Choose);
+	const auto keepAgain = Purple::PlanConfigChoice(
+		*keptState,
+		afterKeep,
+		std::nullopt);
+	CHECK(keepAgain && keepAgain->adopt.empty());
+	CHECK(keepAgain
+		&& parentKeys(*keepAgain) == parentKeys(*keepMine));
 	const auto conflict = Purple::PlanConfigSync(fpEdited, state, {
 		head(c, u"pc"_q) });
 	CHECK(conflict.verdict == Verdict::Conflict);

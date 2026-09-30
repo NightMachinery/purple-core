@@ -172,11 +172,14 @@ head, or from the base and base lineage.
     offered head descends from the base. That head then returns as an update.
 
   When R is among the parents it comes first.
-- **Choose or Conflict, keep local**: adopt `plan.same` (possibly none) and,
-  when it adopts any, list the `Stale` heads as seen, then publish with the
+- **Choose or Conflict, keep local**: with no `plan.same`, publish with the
   first two offered heads as parents. When only one head is offered, the base
   fills the second slot, unless the base is empty, is that head, or already
-  appears in that head's lineage.
+  appears in that head's lineage. With `plan.same`, adopt it, list the `Stale`
+  heads as seen, and publish exactly what a fresh check would then propose,
+  worked out as for a remote pick. The adoption can move the base to a newer
+  same-content version, and the fresh check then puts that version in the
+  base's slot.
 - **Invalid, Pending, UpToDate**: nothing to choose.
 
 `seen` lists heads the choice records without adopting them. The client
@@ -196,14 +199,15 @@ parent set that `MakeConfigVersion` would reject (for example a parent at the
 largest generation), so the client never stages a record the core cannot
 build.
 
-This gives the client a check it can rely on. After it writes R, adopts
-`adopt` and records `seen`, a fresh `PlanConfigSync` on the same inventory and
-own head returns LocalChanges, Choose or Conflict whenever the choice promised
-a publish. The fresh plan's `PlanConfigChoice(..., std::nullopt)` then
-publishes with the same set of parents without adopting anything, and when no
-publish was promised, it proposes none. A client that re-plans on the click
-before posting therefore posts exactly what the review promised, unless the
-inventory changed in between.
+This gives the client a check it can rely on. After it writes R (or keeps its
+text), adopts `adopt` and records `seen`, a fresh `PlanConfigSync` on the same
+inventory and own head returns LocalChanges, Choose or Conflict whenever a
+Choose or Conflict answer promised a publish. The fresh plan's
+`PlanConfigChoice(..., std::nullopt)` then publishes with the same set of
+parents without adopting anything, and when no publish was promised, it
+proposes none. A client that re-plans on the click before posting therefore
+posts exactly what the review promised, unless the inventory changed in
+between.
 
 Applying an update (UpdateReady) never publishes. A fresh check on the same
 heads right after it is UpToDate, or LocalChanges when the own head was
