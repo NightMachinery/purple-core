@@ -9858,6 +9858,11 @@ void TestConfigOwnHead() {
 // the head's text, the completion adopts the choice's heads and records its
 // seen heads, and a post happens only when the fresh plan on the same heads
 // proposes one (keeping this device's text, without adopting anything).
+// Every fourth run starts from the shape a review found: everyone at one
+// version B, one device that went to other settings and back to B's text on
+// its own history, and two devices that each changed B without seeing the
+// other. The first device must not be offered one change as an update while
+// the other stays hidden behind the same-content head.
 // The checks are the planner's promises:
 // - an update hides no other content: every other head is Stale, Same or an
 //   Ahead head carrying the offered content;
@@ -9947,13 +9952,36 @@ void TestConfigConvergence() {
 		return true;
 	};
 	for (run = 0; run != 400; ++run) {
-		const auto count = 2 + int(rng() % 4);
+		const auto shaped = (run % 4 == 0);
+		const auto count = shaped ? 4 : 2 + int(rng() % 4);
 		auto devices = std::vector<Device>(count);
 		for (auto i = 0; i != count; ++i) {
 			devices[i].install = u"in-%1"_q.arg(i);
 			devices[i].state.space = u"space"_q;
 			devices[i].state.install = devices[i].install;
 			devices[i].text = pool[rng() % 2];
+		}
+		if (shaped) {
+			const auto post = [&](
+					Device &device,
+					const QByteArray &text,
+					const std::vector<Purple::ConfigVersion> &parents) {
+				device.text = text;
+				publish(device, parents);
+				return Purple::ConfigVersion{
+					device.own->key,
+					{},
+					device.own->lineage };
+			};
+			const auto b = post(devices[0], pool[0], {});
+			for (auto i = 1; i != count; ++i) {
+				devices[i].state.base = b.key;
+				devices[i].state.baseLineage = b.lineage;
+				devices[i].state.seenSeq[devices[0].install] = 1;
+			}
+			post(devices[1], pool[0], { post(devices[1], pool[2], { b }) });
+			post(devices[2], pool[1], { b });
+			post(devices[3], pool[3], { b });
 		}
 		const auto inventory = [&] {
 			auto result = std::vector<Purple::ConfigHead>();

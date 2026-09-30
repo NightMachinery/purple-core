@@ -220,7 +220,11 @@ seeded random runs of two to five devices that often act on stale views of
 each other's heads: an update hides no other content and leaves at most
 LocalChanges behind it, a silent adoption does the same, every Choose or
 Conflict answer publishes what the fresh check proposes, no plan is Invalid,
-and the devices never all report UpToDate with different files.
+and the devices never all report UpToDate with different files. Every fourth
+run starts from the shape that once hid a change: everyone at one version, one
+device back at that version's text on a history of its own, and two devices
+that each changed it without seeing the other. The first device must then see
+a Conflict offering both changes, not an update offering one of them.
 
 ## DiffConfigText
 
