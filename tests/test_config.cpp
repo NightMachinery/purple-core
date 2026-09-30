@@ -9730,6 +9730,24 @@ void TestConfigOwnHead() {
 	CHECK(!sending.ownStale);
 	CHECK(!Purple::PlanConfigChoice(unposted, sending, std::nullopt));
 
+	const auto mine = *Purple::MakeConfigVersion("M", {});
+	const auto twin = *Purple::MakeConfigVersion(
+		"M",
+		{ *Purple::MakeConfigVersion("T", {}) });
+	auto equivalentOnly = at(installA, twin);
+	equivalentOnly.equiv = { mine.key };
+	CHECK(std::find(
+		twin.lineage.begin(),
+		twin.lineage.end(),
+		mine.key) == twin.lineage.end());
+	const auto equivalentOwn = Purple::PlanConfigSync(
+		fp("M"),
+		equivalentOnly,
+		{},
+		head(mine, installA, 1));
+	CHECK(equivalentOwn.verdict == Verdict::UpToDate);
+	CHECK(!equivalentOwn.ownStale);
+
 	const auto same = [](const Purple::ConfigSyncPlan &a,
 			const Purple::ConfigSyncPlan &b) {
 		return a.verdict == b.verdict

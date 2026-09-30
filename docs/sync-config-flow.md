@@ -217,14 +217,35 @@ never succeed, no after a settings, History or write failure.
 
 ## Tests
 
-`tests/test_sync_flow.cpp` runs the flows end to end on in-memory devices. As
-a manual check that the tests still bite, mutate one rule at a time in a
-scratch copy and confirm the suite fails: let a pending-only request carry
-expectations, drop the expected-parents comparison from the gate, remove any
-stamp input, skip the stamp comparison in `PlanSyncConfigApply`, drop the
-seen-sequence rule from the commit check, force `promiseKept`, or drop the
-StillSending refusal from `PlanSyncConfigPost` (moving it ahead of
-ConfirmFound, or applying it on paths that do not repost, fails too). Rules that
-are redundant with an earlier check (the staged-bytes comparison for
-ConfirmFound, which `ReconcileOwnConfigInventory` already enforces) survive
-such a mutation by design.
+`tests/test_sync_flow.cpp` runs the flows end to end on in-memory devices, and
+`tests/test_config.cpp` covers the planner underneath them. As a manual check
+that the tests still bite, mutate one rule at a time in a scratch copy and
+confirm the suite fails. Each of these must fail it:
+
+- let a pending-only request carry expectations;
+- drop the expected-parents comparison from the gate, or its refusal of a keep
+  that would adopt a head (a same-content head that appears after the choice
+  was applied leaves the parents unchanged, so only this rule stops the post);
+- remove any stamp input, or skip the stamp comparison in
+  `PlanSyncConfigApply`;
+- drop the seen-sequence rule from the commit check;
+- force `promiseKept`, or judge an update's promise by its publish instead of
+  its next verdict;
+- let the completion propose a publish whose keep would adopt a head, or skip
+  recording the choice's `seen` heads;
+- drop the full-record hash comparison from `ExtractSyncConfigHeads` (the
+  tampered record keeps the head's sequence, so only the hash differs);
+- drop the StillSending refusal from `PlanSyncConfigPost` (moving it ahead of
+  ConfirmFound, or applying it on paths that do not repost, fails too);
+- build the publishability record without the planned parents, or with a small
+  sequence and time;
+- set a bound review's state only after the inventory refusals, which loses
+  NeedsReviewWithPending;
+- in the planner: turn two `Ahead` contents beside a `Same` head back into an
+  update, leave out any of the heads a choice lists as seen (the `Same` heads
+  of an update, or the `Stale` heads of an update, an adoption or a pick), keep
+  this device's settings with the base from before adopting, or drop the
+  equivalent keys from the own head's staleness test.
+
+The staged-bytes comparison for ConfirmFound survives such a mutation by
+design: `ReconcileOwnConfigInventory` already enforces it.

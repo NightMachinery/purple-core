@@ -741,10 +741,18 @@ void TestFlowHeads() {
 		== SyncConfigHeadsStatus::NeedsReview);
 	CHECK(ambiguous.status == SyncAccountInventoryStatus::NeedsReview);
 
+	auto tamperer = b;
+	tamperer.seq = 1;
+	const auto swapped = BuildRemote(tamperer, space, TB3, { b1 });
+	const auto swappedHead = ParseSyncConfigHead(
+		ClassifySyncCandidate(101, swapped));
+	CHECK(swappedHead && swappedHead->head.seq == 2);
+	CHECK(swappedHead && swappedHead->head.install == b.install);
+	CHECK(swappedHead && swappedHead->head.space == space);
 	auto tampered = inventory;
 	for (auto &record : tampered.read->records) {
 		if (record.id == 101) {
-			record.bytes = BuildRemote(forked, space, TB3, { b1 });
+			record.bytes = swapped;
 		}
 	}
 	CHECK(ExtractSyncConfigHeads(tampered, space, QString()).status
@@ -1863,6 +1871,74 @@ void TestFlowPublishableLineage() {
 	CHECK(choices.size() == 1 && choices.front().key.has_value());
 }
 
+void TestFlowGateRefusesAdoption() {
+	Begin("sync flow gate refuses a keep that would adopt");
+	using Status = SyncConfigPublishStatus;
+	auto cloud = Cloud();
+	auto device = Device('a');
+	device.setLocal(T1);
+	CHECK(Apply(device, cloud, Review(device, cloud), std::nullopt).status
+		== SyncConfigApplyStatus::Applied);
+	CHECK(PublishLocal(device, cloud).status == Status::Confirmed);
+	device.setLocal(T0);
+	const auto v2 = PublishLocal(device, cloud);
+	CHECK(v2.status == Status::Confirmed);
+	const auto space = device.state->space;
+	auto b = MakeRemote('b', u"Android"_q);
+	const auto b1 = Post(cloud, b, space, TB);
+	const auto choose = Review(device, cloud);
+	CHECK(choose.plan.verdict == ConfigSyncVerdict::Choose);
+	const auto kept = Apply(device, cloud, choose, std::nullopt);
+	CHECK(kept.status == SyncConfigApplyStatus::Applied);
+	CHECK(kept.publishNeeded);
+	CHECK(SameSet(kept.expectedParents, { b1.key, v2.version.key }));
+	const auto request = SyncConfigPublishRequest{
+		.expectedFingerprint = kept.fingerprint,
+		.expectedParents = kept.expectedParents,
+	};
+	CHECK(Gate(device, cloud, request) == SyncConfigPublishGateStatus::Proceed);
+
+	auto c = MakeRemote('c', u"Windows"_q);
+	const auto c1 = Post(cloud, c, space, T0);
+	CHECK(c1.key != v2.version.key);
+	const auto late = Review(device, cloud);
+	CHECK(late.plan.verdict == ConfigSyncVerdict::Choose);
+	CHECK(Keys(late.plan.same) == std::vector<QString>{ c1.key });
+	const auto lateKeep = PlanConfigChoice(late.state, late.plan, std::nullopt);
+	CHECK(lateKeep && lateKeep->publish && !lateKeep->adopt.empty());
+	CHECK(lateKeep && SameSet(
+		SyncConfigVersionKeys(lateKeep->parents),
+		kept.expectedParents));
+	CHECK(Gate(device, cloud, request)
+		== SyncConfigPublishGateStatus::NeedsReview);
+	const auto recordsBefore = cloud.records.size();
+	const auto stateBefore = device.stateBytes();
+	const auto refused = Publish(device, cloud, request);
+	CHECK(refused.status == Status::NeedsReview && refused.posts == 0);
+	CHECK(cloud.records.size() == recordsBefore);
+	CHECK(device.stateBytes() == stateBefore);
+
+	const auto full = PlanSyncConfigApply(
+		late,
+		SyncConfigReviewStamp(late),
+		std::nullopt);
+	CHECK(full.status == SyncConfigApplyPlanStatus::Ready);
+	const auto adopting = CompleteSyncConfigApply(full, device.local);
+	CHECK(adopting.status == SyncConfigApplyCompletionStatus::Ready);
+	CHECK(adopting.adopted.has_value());
+	CHECK(adopting.publishNeeded);
+	CHECK(SameSet(adopting.expectedParents, kept.expectedParents));
+	auto stripped = full;
+	stripped.choice.adopt.clear();
+	stripped.choice.seen.clear();
+	const auto skipped = CompleteSyncConfigApply(stripped, device.local);
+	CHECK(skipped.status == SyncConfigApplyCompletionStatus::Ready);
+	CHECK(!skipped.adopted.has_value());
+	CHECK(skipped.nextVerdict == ConfigSyncVerdict::Choose);
+	CHECK(!skipped.publishNeeded);
+	CHECK(skipped.expectedParents.empty());
+}
+
 void TestFlowSendQueue() {
 	Begin("sync flow send queue");
 	using Status = SyncConfigPublishStatus;
@@ -2513,6 +2589,7 @@ int main() {
 	TestFlowJoinVariants();
 	TestFlowPublisher();
 	TestFlowPublishableLineage();
+	TestFlowGateRefusesAdoption();
 	TestFlowSendQueue();
 	TestFlowStamp();
 	TestFlowCommitCheck();
