@@ -1319,6 +1319,23 @@ void TestFlowRechecks() {
 	CHECK(ActionOf(pendingReview) == SyncConfigAction::FinishSending);
 	CHECK(Apply(device, cloud, pendingReview, std::nullopt).status
 		== SyncConfigApplyStatus::InvalidChoice);
+	auto garbage = cloud;
+	garbage.add(QByteArray("{\"not\":\"a record\"}"));
+	const auto unreadable = Review(device, garbage);
+	CHECK(unreadable.status == SyncConfigReviewStatus::NeedsReview);
+	CHECK(MessageOf(unreadable) == SyncConfigMessage::NeedsReviewWithPending);
+	auto forked = cloud;
+	auto twin = MakeRemote('t', u"Linux"_q);
+	Post(forked, twin, space, TB);
+	twin.seq = 0;
+	Post(forked, twin, space, TC);
+	const auto ambiguous = Review(device, forked);
+	CHECK(ambiguous.status == SyncConfigReviewStatus::NeedsReview);
+	CHECK(MessageOf(ambiguous) == SyncConfigMessage::NeedsReviewWithPending);
+	auto unboundViewer = Device('u');
+	unboundViewer.setLocal(T0);
+	CHECK(MessageOf(Review(unboundViewer, garbage))
+		== SyncConfigMessage::NeedsReview);
 	cloud.add(device.staged);
 	const auto foundPending = Review(device, cloud);
 	CHECK(foundPending.status == SyncConfigReviewStatus::Ready);

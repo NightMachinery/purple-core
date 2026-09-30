@@ -29,7 +29,9 @@ with Incomplete or NeedsReview when the inventory is not complete, needs
 review, has unreadable candidates or colliding message ids, or selects a space
 that cannot be published to. The client adds AccountUnavailable,
 AccountUnbound and StoreError from its own checks; they share the status enum
-so the describe step covers them.
+so the describe step covers them. A review made with a state carries that
+state's space and config data whatever its status, so a refused review still
+shows whether this device has a post waiting (see Describe).
 
 Without a state the review takes the selected space. With no selected space
 the verdict is Empty; otherwise the heads of every install in that space are

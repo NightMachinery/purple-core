@@ -394,6 +394,10 @@ SyncConfigReview ReviewSyncConfigInventory(
 	result.accountUserId = inventory.accountUserId;
 	result.bound = (state != nullptr);
 	result.local = local;
+	if (state) {
+		result.space = state->space;
+		result.state = SyncConfigStateOf(*state);
+	}
 	if (local.status == SyncSettingsFileStatus::Invalid) {
 		return Refuse(
 			std::move(result),
@@ -432,8 +436,6 @@ SyncConfigReview ReviewSyncConfigInventory(
 	}
 	auto scoped = inventory;
 	SelectSyncSpaceIfEmpty(scoped, state->space);
-	result.space = state->space;
-	result.state = SyncConfigStateOf(*state);
 	if (!scoped.directory.selectedSpace
 		|| *scoped.directory.selectedSpace != state->space) {
 		return Refuse(std::move(result), SyncConfigReviewStatus::NeedsReview);
