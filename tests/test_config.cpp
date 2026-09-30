@@ -41,6 +41,9 @@ option) any later version.
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <map>
+#include <random>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -9828,6 +9831,299 @@ void TestConfigOwnHead() {
 	return table[a.size()][b.size()];
 }
 
+// A randomized model of two to five devices sharing one space. Each device
+// holds a settings text, its sync state and its own newest head. A device
+// acts on a snapshot of everyone's heads that is refreshed only now and then,
+// so devices routinely decide on stale views, as they do when checks race
+// with posts. On each step one device either edits its text or checks and
+// acts on a random answer, the way the clients do: an update or a pick writes
+// the head's text, the completion adopts the choice's heads and records its
+// seen heads, and a post happens only when the fresh plan on the same heads
+// proposes one (keeping this device's text, without adopting anything).
+// The checks are the planner's promises:
+// - an update hides no other content: every other head is Stale, Same or an
+//   Ahead head carrying the offered content;
+// - right after an update or a silent adoption the same heads give UpToDate
+//   or LocalChanges, never a choice that would take the device back;
+// - a pick or a kept text publishes exactly what the fresh plan proposes;
+// - no plan is Invalid or Pending, and every offered answer is accepted;
+// - the devices never all report UpToDate while their texts differ.
+void TestConfigConvergence() {
+	Begin("config convergence simulation");
+	using Verdict = Purple::ConfigSyncVerdict;
+	using Kind = Purple::ConfigHeadKind;
+	struct Device {
+		QString install;
+		Purple::ConfigSyncState state;
+		QByteArray text;
+		std::optional<Purple::ConfigHead> own;
+		uint64_t seq = 0;
+	};
+	const QByteArray pool[] = { "c0", "c1", "c2", "c3" };
+	const auto fp = [](const QByteArray &text) {
+		return Purple::SettingsFingerprint(text);
+	};
+	const auto keyFp = [](const QString &key) {
+		return Purple::ParseConfigVersionKey(key)->fingerprint;
+	};
+	const auto keySet = [](const std::vector<Purple::ConfigVersion> &list) {
+		auto result = std::vector<QString>();
+		for (const auto &version : list) {
+			result.push_back(version.key);
+		}
+		std::sort(result.begin(), result.end());
+		return result;
+	};
+	auto texts = std::map<QString, QByteArray>();
+	auto failures = std::map<QString, int>();
+	auto verdicts = std::map<Verdict, int>();
+	auto rng = std::mt19937(20260930);
+	auto run = 0;
+	auto step = 0;
+	const auto fail = [&](const QString &what) {
+		if (!failures[what]++) {
+			std::printf("  first '%s' at run %d step %d\n",
+				qPrintable(what), run, step);
+		}
+	};
+	const auto publish = [&](Device &device,
+			const std::vector<Purple::ConfigVersion> &parents) {
+		const auto version = Purple::MakeConfigVersion(device.text, parents);
+		if (!version) {
+			fail(u"unbuildable publish"_q);
+			return;
+		}
+		texts[version->key] = device.text;
+		device.own = Purple::ConfigHead{
+			u"space"_q, device.install, ++device.seq,
+			version->key, version->lineage };
+		auto &state = device.state;
+		if (state.base.isEmpty() || keyFp(state.base) != fp(device.text)) {
+			state.equiv.clear();
+		}
+		state.base = version->key;
+		state.baseLineage = version->lineage;
+		state.equiv.erase(
+			std::remove(state.equiv.begin(), state.equiv.end(), version->key),
+			state.equiv.end());
+	};
+	const auto complete = [&](Device &device,
+			const Purple::ConfigChoicePlan &choice) {
+		auto next = device.state;
+		if (!choice.adopt.empty()) {
+			const auto adopted = Purple::AdoptConfigHeads(
+				device.state,
+				fp(device.text),
+				choice.adopt);
+			if (!adopted) {
+				fail(u"adoption refused"_q);
+				return false;
+			}
+			next = *adopted;
+		}
+		for (const auto &head : choice.seen) {
+			auto &seen = next.seenSeq[head.install];
+			seen = std::max(seen, head.seq);
+		}
+		device.state = next;
+		return true;
+	};
+	for (run = 0; run != 400; ++run) {
+		const auto count = 2 + int(rng() % 4);
+		auto devices = std::vector<Device>(count);
+		for (auto i = 0; i != count; ++i) {
+			devices[i].install = u"in-%1"_q.arg(i);
+			devices[i].state.space = u"space"_q;
+			devices[i].state.install = devices[i].install;
+			devices[i].text = pool[rng() % 2];
+		}
+		const auto inventory = [&] {
+			auto result = std::vector<Purple::ConfigHead>();
+			for (const auto &device : devices) {
+				if (device.own) {
+					result.push_back(*device.own);
+				}
+			}
+			return result;
+		};
+		auto snapshot = std::vector<Purple::ConfigHead>();
+		auto acted = std::vector<bool>(count, true);
+		for (step = 0; step != 90; ++step) {
+			const auto index = int(rng() % count);
+			if (acted[index] || rng() % 3 == 0) {
+				snapshot = inventory();
+				std::fill(acted.begin(), acted.end(), false);
+			}
+			acted[index] = true;
+			auto &device = devices[index];
+			if (rng() % 5 == 0) {
+				device.text = pool[rng() % 4];
+				continue;
+			}
+			const auto before = std::make_tuple(
+				device.text,
+				device.state.base,
+				device.state.seenSeq,
+				device.seq);
+			const auto &heads = snapshot;
+			const auto plan = Purple::PlanConfigSync(
+				fp(device.text),
+				device.state,
+				heads,
+				device.own);
+			++verdicts[plan.verdict];
+			switch (plan.verdict) {
+			case Verdict::Invalid:
+				fail(u"invalid plan"_q);
+				break;
+			case Verdict::Pending:
+				fail(u"pending plan"_q);
+				break;
+			case Verdict::UpToDate:
+				break;
+			case Verdict::Adopt: {
+				const auto choice = Purple::PlanConfigChoice(
+					device.state,
+					plan,
+					std::nullopt);
+				if (!choice) {
+					fail(u"adopt refused"_q);
+				} else if (complete(device, *choice)) {
+					const auto after = Purple::PlanConfigSync(
+						fp(device.text),
+						device.state,
+						heads,
+						device.own);
+					if (after.verdict != Verdict::UpToDate
+						&& after.verdict != Verdict::LocalChanges) {
+						fail(u"adoption leaves a choice"_q);
+					}
+				}
+			} break;
+			case Verdict::Empty:
+			case Verdict::LocalChanges: {
+				if (rng() % 4 == 0) {
+					break;
+				}
+				const auto choice = Purple::PlanConfigChoice(
+					device.state,
+					plan,
+					std::nullopt);
+				if (!choice || !choice->publish) {
+					fail(u"local publish refused"_q);
+				} else {
+					publish(device, choice->parents);
+				}
+			} break;
+			case Verdict::UpdateReady:
+			case Verdict::Choose:
+			case Verdict::Conflict: {
+				if (rng() % 4 == 0) {
+					break;
+				}
+				const auto update = (plan.verdict == Verdict::UpdateReady);
+				auto key = std::optional<QString>();
+				if (update || rng() % 2) {
+					key = plan.offered[rng() % plan.offered.size()].key;
+				}
+				const auto choice = Purple::PlanConfigChoice(
+					device.state,
+					plan,
+					key);
+				if (!choice) {
+					fail(u"offered answer refused"_q);
+					break;
+				}
+				if (update) {
+					const auto offered = keyFp(plan.offered.front().key);
+					for (const auto &outcome : plan.classification.heads) {
+						if (outcome.kind != Kind::Stale
+							&& outcome.kind != Kind::Same
+							&& !(outcome.kind == Kind::Ahead
+								&& keyFp(outcome.head.key) == offered)) {
+							fail(u"update hides a change"_q);
+						}
+					}
+				}
+				if (choice->writeRemote) {
+					device.text = texts[choice->write.key];
+				}
+				if (!complete(device, *choice)) {
+					break;
+				}
+				const auto fresh = Purple::PlanConfigSync(
+					fp(device.text),
+					device.state,
+					heads,
+					device.own);
+				const auto proposal = Purple::PlanConfigChoice(
+					device.state,
+					fresh,
+					std::nullopt);
+				const auto proposed = proposal
+					&& proposal->publish
+					&& proposal->adopt.empty()
+					&& (fresh.verdict == Verdict::Empty
+						|| fresh.verdict == Verdict::LocalChanges
+						|| fresh.verdict == Verdict::Choose
+						|| fresh.verdict == Verdict::Conflict);
+				if (update) {
+					if (fresh.verdict != Verdict::UpToDate
+						&& fresh.verdict != Verdict::LocalChanges) {
+						fail(u"update leaves a choice"_q);
+					}
+					break;
+				} else if (choice->publish != proposed) {
+					fail(key
+						? u"pick breaks its promise"_q
+						: u"keep breaks its promise"_q);
+				} else if (proposed
+					&& keySet(choice->parents) != keySet(proposal->parents)) {
+					fail(u"promised parents differ"_q);
+				}
+				if (proposed) {
+					publish(device, proposal->parents);
+				}
+			} break;
+			}
+			if (before == std::make_tuple(
+					device.text,
+					device.state.base,
+					device.state.seenSeq,
+					device.seq)) {
+				continue;
+			}
+			const auto everyone = inventory();
+			auto allUpToDate = true;
+			auto sameText = true;
+			for (const auto &other : devices) {
+				const auto check = Purple::PlanConfigSync(
+					fp(other.text),
+					other.state,
+					everyone,
+					other.own);
+				if (check.verdict == Verdict::Invalid) {
+					fail(u"invalid state"_q);
+				}
+				allUpToDate &= (check.verdict == Verdict::UpToDate);
+				sameText &= (other.text == devices.front().text);
+			}
+			if (allUpToDate && !sameText) {
+				fail(u"silent divergence"_q);
+			}
+		}
+	}
+	for (const auto &[what, count] : failures) {
+		Report(false, u"%1: %2 times"_q.arg(what).arg(count), __LINE__);
+	}
+	CHECK(failures.empty());
+	CHECK(verdicts[Verdict::UpdateReady] > 100);
+	CHECK(verdicts[Verdict::Conflict] > 100);
+	CHECK(verdicts[Verdict::Choose] > 100);
+	CHECK(verdicts[Verdict::Adopt] > 100);
+	CHECK(verdicts[Verdict::LocalChanges] > 100);
+}
+
 void TestConfigDiff() {
 	Begin("config diff");
 	using Kind = Purple::ConfigDiffLineKind;
@@ -13120,6 +13416,7 @@ int main() {
 	TestConfigChoice();
 	TestConfigChoiceSettles();
 	TestConfigOwnHead();
+	TestConfigConvergence();
 	TestConfigDiff();
 	TestConfigChangeSummary();
 	TestPersianKeyboardToEnglish();
