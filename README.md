@@ -121,6 +121,15 @@ rules about data are far easier to prove outside a running app than inside one.
   same inventory checks and no visible space. The caller must exclude
   forwarded copies, or set `original` false, and provide the full-record hash
   of supported records after exact validation.
+- `purple/purple_sync_inventory.{h,cpp}` - the client-independent half of a
+  Saved Messages inventory: which history messages are sync candidates, when a
+  newest-first history scan is complete or stalled, how downloaded bytes are
+  classified, when a candidate read is complete, needs review or is
+  incomplete, how the read becomes directory candidates and an inventory
+  status, and what this install's own config records say about its local
+  state (absent, present, found pending, or a clone). Clients keep only the
+  Telegram requests and downloads. See
+  [`docs/sync-inventory.md`](docs/sync-inventory.md).
 - `purple/purple_config_payload.{h,cpp}` - inspects a validated config envelope
   before its settings file can be used. It checks the key against the exact
   UTF-8 bytes represented by the JSON `text` string, validates direct parents

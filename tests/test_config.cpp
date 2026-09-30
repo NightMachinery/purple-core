@@ -24,9 +24,11 @@ option) any later version.
 #include "purple/purple_sync_json.h"
 #include "purple/purple_sync_envelope.h"
 #include "purple/purple_sync_directory.h"
+#include "purple/purple_sync_inventory.h"
 #include "purple/purple_sync_local_state.h"
 #include "purple/purple_sync_status.h"
 
+#include <QtCore/QCryptographicHash>
 #include <QtCore/QDateTime>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QJsonArray>
@@ -12418,6 +12420,521 @@ void TestSyncPublishPlanner() {
 
 } // namespace
 
+void TestSyncInventory() {
+	Begin("sync inventory");
+	using Page = Purple::SyncHistoryPageStatus;
+	using Status = Purple::SyncCandidateStatus;
+	using Read = Purple::SyncCandidateReadStatus;
+	using Inventory = Purple::SyncAccountInventoryStatus;
+	using Own = Purple::SyncOwnInventoryStatus;
+	using Envelope = Purple::SyncEnvelopeStatus;
+
+	CHECK_EQ(Purple::kSyncHistoryPageSize, 100);
+	CHECK_EQ(Purple::kSyncRecordMaximumBytes, 4 * 1024 * 1024);
+	CHECK_EQ(Purple::SyncRecordCaptionTag(), u"#purplesync"_q);
+	CHECK_EQ(Purple::SyncSettingsRecordFileName(),
+		u"Purple settings sync.json"_q);
+	CHECK_EQ(Purple::SyncPlaylistsRecordFileName(),
+		u"Purple playlists sync.json"_q);
+
+	auto pages = Purple::SyncHistoryPages();
+	CHECK_EQ(pages.offset(), 0);
+	CHECK(pages.Add({ { 100, true }, { 99, false }, { 98, true } })
+		== Page::More);
+	CHECK_EQ(pages.offset(), 98);
+	CHECK_EQ(pages.count(), uint64_t(3));
+	CHECK(pages.candidates() == std::vector<int32_t>({ 100, 98 }));
+	CHECK(pages.Add({ { 98, true } }) == Page::Stalled);
+	CHECK(pages.Add({ { 97, true }, { 97, true } }) == Page::Stalled);
+	CHECK(pages.Add({ { 50, true }, { 60, true } }) == Page::Stalled);
+	CHECK(pages.Add({ { 0, true } }) == Page::Stalled);
+	CHECK(pages.Add({ { -5, true } }) == Page::Stalled);
+	CHECK(pages.Add({ { 97, true }, { 120, true } }) == Page::Stalled);
+	CHECK_EQ(pages.offset(), 98);
+	CHECK_EQ(pages.count(), uint64_t(3));
+	CHECK(pages.candidates() == std::vector<int32_t>({ 100, 98 }));
+	CHECK(pages.Add({ { 97, false }, { 1, true } }) == Page::More);
+	CHECK_EQ(pages.offset(), 1);
+	CHECK_EQ(pages.count(), uint64_t(5));
+	CHECK(pages.candidates() == std::vector<int32_t>({ 100, 98, 1 }));
+	CHECK(pages.Add({}) == Page::Complete);
+	CHECK_EQ(pages.count(), uint64_t(5));
+	auto top = Purple::SyncHistoryPages();
+	const auto maxId = int64_t(std::numeric_limits<int32_t>::max());
+	CHECK(top.Add({ { maxId + 1, true } }) == Page::Stalled);
+	CHECK(top.Add({ { maxId, true } }) == Page::More);
+	CHECK_EQ(top.offset(), std::numeric_limits<int32_t>::max());
+	CHECK(top.Add({}) == Page::Complete);
+	CHECK(Purple::SyncHistoryPages().Add({}) == Page::Complete);
+
+	auto meta = Purple::SyncHistoryMessageMeta{
+		.isMessage = true,
+		.isDocument = true,
+		.caption = u"#purplesync"_q,
+	};
+	CHECK(Purple::IsSyncHistoryCandidate(meta));
+	meta.caption = u"Settings #purplesync from the laptop"_q;
+	CHECK(Purple::IsSyncHistoryCandidate(meta));
+	meta.caption = u"#PurpleSync"_q;
+	CHECK(!Purple::IsSyncHistoryCandidate(meta));
+	meta.caption = QString();
+	CHECK(!Purple::IsSyncHistoryCandidate(meta));
+	meta.fileNames = { u"Purple settings sync.json"_q };
+	CHECK(Purple::IsSyncHistoryCandidate(meta));
+	meta.fileNames = { u"Purple playlists sync.json"_q };
+	CHECK(Purple::IsSyncHistoryCandidate(meta));
+	meta.fileNames = { u"settings.toml"_q };
+	CHECK(!Purple::IsSyncHistoryCandidate(meta));
+	meta.fileNames = { u"purple settings sync.json"_q };
+	CHECK(!Purple::IsSyncHistoryCandidate(meta));
+	meta.fileNames = { u"notes.json"_q, u"Purple settings sync.json"_q };
+	CHECK(Purple::IsSyncHistoryCandidate(meta));
+	meta.caption = u"#purplesync"_q;
+	auto forwarded = meta;
+	forwarded.forwarded = true;
+	CHECK(!Purple::IsSyncHistoryCandidate(forwarded));
+	auto service = meta;
+	service.isMessage = false;
+	CHECK(!Purple::IsSyncHistoryCandidate(service));
+	auto photo = meta;
+	photo.isDocument = false;
+	CHECK(!Purple::IsSyncHistoryCandidate(photo));
+
+	const auto space = *Purple::FormatSyncSpaceId(QByteArray(16, 's'));
+	const auto install = *Purple::FormatSyncInstallId(QByteArray(16, 'i'));
+	const auto other = *Purple::FormatSyncInstallId(QByteArray(16, 'o'));
+	const auto device = u"desktop:"_q + install;
+	const auto userId = uint64_t(777);
+	const auto textA = QByteArray("version = 1\n# a\n");
+	const auto textB = QByteArray("version = 1\n# b\n");
+	const auto textC = QByteArray("version = 1\n# c\n");
+	const auto build = [&](
+			const QByteArray &text,
+			uint64_t seq,
+			const QString &writer,
+			const QString &writerDevice) {
+		const auto built = Purple::BuildConfigRecord({
+			.text = text,
+			.space = space,
+			.install = writer,
+			.device = writerDevice,
+			.platform = u"macOS"_q,
+			.app = u"Purple"_q,
+			.seq = seq,
+			.at = 1700000000 + seq,
+		});
+		CHECK(bool(built));
+		return built;
+	};
+	const auto sha = [](const QByteArray &bytes) {
+		return QString::fromLatin1(QCryptographicHash::hash(
+			bytes,
+			QCryptographicHash::Sha256).toHex());
+	};
+	const auto ownA = build(textA, 1, install, device);
+	const auto otherB = build(textB, 1, other, u"android-1"_q);
+
+	const auto valid = Purple::ClassifySyncCandidate(7, ownA.canonical);
+	CHECK(valid.status == Status::Valid);
+	CHECK_EQ(valid.id, 7);
+	CHECK(valid.bytes == ownA.canonical);
+	CHECK(valid.header.has_value() && valid.header->seq == 1);
+	CHECK(valid.envelopeError == Purple::SyncEnvelopeError::None);
+	CHECK(valid.configError == Purple::ConfigPayloadError::None);
+	CHECK_EQ(valid.documentId, uint64_t(0));
+
+	const auto envelopeOf = [&](const QString &stream,
+			const QJsonObject &payload) {
+		return Purple::SerializeSyncEnvelope(Purple::SyncEnvelope{
+			QJsonObject{
+				{ u"purple_sync"_q, 1 },
+				{ u"stream"_q, stream },
+				{ u"space"_q, space },
+				{ u"writer"_q, QJsonObject{
+					{ u"install"_q, other },
+					{ u"device"_q, u"android-1"_q },
+					{ u"platform"_q, u"Android"_q },
+					{ u"app"_q, u"Purple"_q },
+				} },
+				{ u"seq"_q, 3 },
+				{ u"at"_q, 0 },
+				{ u"payload"_q, payload },
+			},
+		}).canonical;
+	};
+	const auto payloadOf = [](const Purple::ConfigVersion &version,
+			const QByteArray &text,
+			int schema) {
+		return QJsonObject{
+			{ u"schema"_q, schema },
+			{ u"key"_q, version.key },
+			{ u"parents"_q, QJsonArray() },
+			{ u"lineage"_q, QJsonArray() },
+			{ u"warnings"_q, 0 },
+			{ u"text"_q, QString::fromUtf8(text) },
+		};
+	};
+	const auto newerText = QByteArray("version = 2\n");
+	const auto newerRecord = envelopeOf(
+		u"config"_q,
+		payloadOf(*Purple::MakeConfigVersion(newerText, {}), newerText, 2));
+	CHECK(!newerRecord.isEmpty());
+	const auto newer = Purple::ClassifySyncCandidate(8, newerRecord);
+	CHECK(newer.status == Status::NewerSchema);
+	CHECK(newer.header.has_value());
+	const auto wrongKey = Purple::ClassifySyncCandidate(9, envelopeOf(
+		u"config"_q,
+		payloadOf(*Purple::MakeConfigVersion(textB, {}), textA, 1)));
+	CHECK(wrongKey.status == Status::Invalid);
+	CHECK(wrongKey.header.has_value());
+	CHECK(wrongKey.configError != Purple::ConfigPayloadError::None);
+	const auto libraryRecord = envelopeOf(
+		u"library"_q,
+		QJsonObject{ { u"items"_q, QJsonArray() } });
+	const auto library = Purple::ClassifySyncCandidate(10, libraryRecord);
+	CHECK(library.status == Status::UnsupportedLibrary);
+	CHECK(library.header.has_value());
+	auto future = QJsonDocument::fromJson(ownA.canonical).object();
+	future.insert(u"stream"_q, u"library.0"_q);
+	const auto futureRecord = Purple::ClassifySyncCandidate(
+		11,
+		QJsonDocument(future).toJson(QJsonDocument::Compact));
+	CHECK(futureRecord.status == Status::UnsupportedStream);
+	CHECK(futureRecord.header.has_value());
+	auto encoded = QJsonDocument::fromJson(ownA.canonical).object();
+	encoded.insert(u"encoding"_q, u"gzip+base64"_q);
+	const auto encodedRecord = Purple::ClassifySyncCandidate(
+		12,
+		QJsonDocument(encoded).toJson(QJsonDocument::Compact));
+	CHECK(encodedRecord.status == Status::UnsupportedEncoding);
+	CHECK(encodedRecord.header.has_value());
+	auto major = QJsonDocument::fromJson(ownA.canonical).object();
+	major.insert(u"purple_sync"_q, 2);
+	CHECK(Purple::ClassifySyncCandidate(
+		13,
+		QJsonDocument(major).toJson(QJsonDocument::Compact)).status
+			== Status::NewerMajor);
+	const auto garbage = Purple::ClassifySyncCandidate(14, "not json");
+	CHECK(garbage.status == Status::Invalid);
+	CHECK(!garbage.header.has_value());
+	CHECK(garbage.envelopeError != Purple::SyncEnvelopeError::None);
+	const auto oversized = Purple::ClassifySyncCandidate(
+		15,
+		QByteArray(Purple::kSyncRecordMaximumBytes + 1, ' '));
+	CHECK(oversized.status == Status::Oversized);
+	CHECK(oversized.bytes.isEmpty());
+	CHECK(!oversized.header.has_value());
+	CHECK(Purple::ClassifySyncCandidate(
+		16,
+		QByteArray(Purple::kSyncRecordMaximumBytes, ' ')).status
+			== Status::Invalid);
+
+	const auto record = [](Status status, bool header) {
+		auto result = Purple::SyncCandidateRecord{ .status = status };
+		if (header) {
+			result.header = Purple::SyncEnvelopeHeader();
+		}
+		return result;
+	};
+	const auto aggregate = [](
+			const std::vector<Purple::SyncCandidateRecord> &records) {
+		return Purple::AggregateSyncCandidateRead(records);
+	};
+	CHECK(aggregate({}) == Read::Complete);
+	CHECK(aggregate({ valid, valid }) == Read::Complete);
+	CHECK(aggregate({ valid, library, futureRecord, encodedRecord })
+		== Read::Complete);
+	for (const auto status : {
+		Status::UnsupportedStream,
+		Status::UnsupportedEncoding,
+		Status::UnsupportedLibrary,
+	}) {
+		CHECK(aggregate({ record(status, true) }) == Read::Complete);
+		CHECK(aggregate({ record(status, false) }) == Read::NeedsReview);
+	}
+	for (const auto status : {
+		Status::NewerSchema,
+		Status::NewerMajor,
+		Status::Invalid,
+		Status::Vanished,
+		Status::Changed,
+		Status::Oversized,
+	}) {
+		CHECK(aggregate({ valid, record(status, true) }) == Read::NeedsReview);
+	}
+	for (const auto status : {
+		Status::RequestFailed,
+		Status::Inaccessible,
+		Status::Cancelled,
+	}) {
+		CHECK(aggregate({ record(status, false) }) == Read::Incomplete);
+		CHECK(aggregate({ record(Status::Invalid, false), record(status, false) })
+			== Read::Incomplete);
+		CHECK(aggregate({ record(status, false), record(Status::Invalid, false) })
+			== Read::Incomplete);
+	}
+
+	const auto directoryOf = [](Purple::SyncCandidateRecord value) {
+		value.documentId = 44;
+		value.editDate = 55;
+		return Purple::SyncDirectoryCandidateOf(value);
+	};
+	const auto validCandidate = directoryOf(valid);
+	CHECK(validCandidate.status == Envelope::Valid);
+	CHECK(validCandidate.payloadValidated);
+	CHECK_EQ(validCandidate.messageId, int64_t(7));
+	CHECK_EQ(validCandidate.documentId, uint64_t(44));
+	CHECK_EQ(validCandidate.editDate, uint64_t(55));
+	CHECK(validCandidate.original);
+	CHECK_EQ(validCandidate.recordHash, sha(ownA.canonical));
+	CHECK(validCandidate.header.has_value());
+	const auto libraryCandidate = directoryOf(library);
+	CHECK(libraryCandidate.status == Envelope::Valid);
+	CHECK(!libraryCandidate.payloadValidated);
+	CHECK_EQ(libraryCandidate.recordHash, sha(libraryRecord));
+	CHECK(directoryOf(futureRecord).status == Envelope::UnsupportedStream);
+	CHECK(directoryOf(encodedRecord).status == Envelope::UnsupportedEncoding);
+	CHECK(directoryOf(record(Status::NewerMajor, false)).status
+		== Envelope::NewerMajor);
+	CHECK(directoryOf(newer).status == Envelope::Invalid);
+	CHECK(!directoryOf(newer).payloadValidated);
+	CHECK(!directoryOf(newer).recordHash.isEmpty());
+	CHECK(directoryOf(garbage).status == Envelope::Invalid);
+	CHECK(directoryOf(garbage).recordHash.isEmpty());
+	CHECK(directoryOf(oversized).recordHash.isEmpty());
+	for (const auto status : {
+		Status::Vanished,
+		Status::Changed,
+		Status::Inaccessible,
+		Status::RequestFailed,
+		Status::Cancelled,
+	}) {
+		CHECK(directoryOf(record(status, false)).status == Envelope::Invalid);
+	}
+
+	const auto scanOf = [](
+			const std::vector<Purple::SyncCandidateRecord> &records,
+			Purple::SyncHistoryScanStatus status
+				= Purple::SyncHistoryScanStatus::Complete) {
+		auto scan = Purple::SyncHistoryScanResult{ .status = status };
+		for (const auto &value : records) {
+			scan.candidateIds.push_back(value.id);
+		}
+		scan.scannedCount = records.size() + 3;
+		return scan;
+	};
+	const auto finish = [&](
+			std::vector<Purple::SyncCandidateRecord> records,
+			std::optional<Read> readStatus = std::nullopt,
+			Purple::SyncHistoryScanStatus scanStatus
+				= Purple::SyncHistoryScanStatus::Complete) {
+		for (auto &value : records) {
+			value.documentId = uint64_t(value.id) + 5000;
+		}
+		const auto status = readStatus.value_or(aggregate(records));
+		return Purple::FinishSyncAccountInventory(
+			userId,
+			scanOf(records, scanStatus),
+			Purple::SyncCandidateReadResult{
+				.status = status,
+				.records = std::move(records),
+			});
+	};
+	const auto unread = Purple::FinishSyncAccountInventory(
+		userId,
+		scanOf({}, Purple::SyncHistoryScanStatus::Cancelled),
+		std::nullopt);
+	CHECK(unread.status == Inventory::Incomplete);
+	CHECK_EQ(unread.accountUserId, userId);
+	CHECK(!unread.read.has_value());
+	CHECK(!unread.directory.complete);
+	CHECK(unread.scan.status == Purple::SyncHistoryScanStatus::Cancelled);
+	const auto empty = finish({});
+	CHECK(empty.status == Inventory::Complete);
+	CHECK(empty.directory.complete);
+	CHECK(empty.directory.canCreateSpace);
+	CHECK(!empty.directory.selectedSpace.has_value());
+	CHECK_EQ(empty.scan.scannedCount, uint64_t(3));
+	auto otherRecord = Purple::ClassifySyncCandidate(20, otherB.canonical);
+	const auto single = finish({ otherRecord });
+	CHECK(single.status == Inventory::Complete);
+	CHECK(single.directory.selectedSpace == space);
+	CHECK(single.directory.publishableSpace == space);
+	CHECK(single.read.has_value() && single.read->records.size() == 1);
+	const auto stalled = finish(
+		{ otherRecord },
+		std::nullopt,
+		Purple::SyncHistoryScanStatus::Stalled);
+	CHECK(stalled.status == Inventory::Incomplete);
+	CHECK(!stalled.directory.complete);
+	CHECK(finish({ otherRecord }, Read::Incomplete).status
+		== Inventory::Incomplete);
+	CHECK(!finish({ otherRecord }, Read::Incomplete).directory.complete);
+	CHECK(finish({ otherRecord, newer }).status == Inventory::NeedsReview);
+	auto invalidRecord = garbage;
+	invalidRecord.id = 21;
+	const auto unreadable = finish({ otherRecord, invalidRecord }, Read::Complete);
+	CHECK(unreadable.directory.unreadableCandidate);
+	CHECK(unreadable.status == Inventory::NeedsReview);
+	auto sameId = Purple::ClassifySyncCandidate(20, ownA.canonical);
+	const auto collision = finish({ otherRecord, sameId });
+	CHECK(collision.directory.messageIdCollision);
+	CHECK(collision.status == Inventory::NeedsReview);
+	const auto otherFork = Purple::ClassifySyncCandidate(
+		22,
+		build(textC, 1, other, u"android-1"_q).canonical);
+	const auto ambiguous = finish({ otherRecord, otherFork });
+	CHECK(ambiguous.directory.selectedSpace == space);
+	CHECK(!ambiguous.directory.publishableSpace.has_value());
+	CHECK(ambiguous.status == Inventory::NeedsReview);
+	auto opaque = library;
+	opaque.id = 23;
+	const auto opaqueOnly = finish({ opaque });
+	CHECK(opaqueOnly.directory.selectedSpace == space);
+	CHECK(!opaqueOnly.directory.canCreateSpace);
+	CHECK(opaqueOnly.status == Inventory::Complete);
+
+	auto state = Purple::SyncLocalState();
+	state.install = install;
+	state.createdDevice = device;
+	state.space = space;
+	CHECK(bool(Purple::SerializeSyncLocalState(state)));
+	const auto reconcile = [&](
+			const Purple::SyncLocalState &local,
+			const Purple::SyncAccountInventoryResult &inventory,
+			const QByteArray &staged = {},
+			uint64_t user = 777) {
+		return Purple::ReconcileOwnConfigInventory(
+			local,
+			inventory,
+			user,
+			staged);
+	};
+	CHECK(reconcile(state, single, {}, 0).status == Own::NeedsReview);
+	CHECK(reconcile(state, single, {}, userId + 1).status == Own::NeedsReview);
+	CHECK(reconcile(state, stalled).status == Own::Incomplete);
+	CHECK(reconcile(state, unread).status == Own::Incomplete);
+	CHECK(reconcile(state, finish({ otherRecord }, Read::Incomplete)).status
+		== Own::Incomplete);
+	CHECK(reconcile(state, ambiguous).status == Own::NeedsReview);
+	CHECK(reconcile(state, empty).status == Own::NeedsReview);
+	auto emptySelected = empty;
+	emptySelected.directory.selectedSpace = space;
+	emptySelected.directory.publishableSpace = space;
+	const auto absent = reconcile(state, emptySelected);
+	CHECK(absent.status == Own::Absent);
+	CHECK(absent.observation.kind == Purple::OwnRecordObservationKind::Absent);
+	CHECK(absent.cloneVerdict == Purple::SyncCloneVerdict::NoClone);
+	CHECK(!absent.pendingMessageId.has_value());
+	CHECK(reconcile(state, single).status == Own::Absent);
+	auto broken = state;
+	broken.install = u"not an install"_q;
+	CHECK(reconcile(broken, single).status == Own::NeedsReview);
+	auto elsewhere = state;
+	elsewhere.space = *Purple::FormatSyncSpaceId(QByteArray(16, 'e'));
+	CHECK(reconcile(elsewhere, single).status == Own::NeedsReview);
+
+	const auto reserved = Purple::ReserveSyncSeq(
+		state,
+		Purple::SyncLocalStream::Config,
+		ownA.payloadHash);
+	CHECK(bool(reserved));
+	CHECK_EQ(reserved.seq, uint64_t(1));
+	const auto issued = Purple::AppendIssuedConfigRecord(
+		reserved.state,
+		ownA.canonical);
+	CHECK(bool(issued));
+	const auto pending = issued.state;
+	CHECK_EQ(pending.config.pendingSeq, uint64_t(1));
+	const auto confirmed = Purple::ConfirmSyncReadBack(
+		pending,
+		device,
+		Purple::SyncLocalStream::Config,
+		{ Purple::OwnRecordObservationKind::Present, 1, ownA.payloadHash });
+	CHECK(confirmed.verdict == Purple::SyncCloneVerdict::NoClone);
+	const auto posted = confirmed.state;
+	CHECK_EQ(posted.config.pendingSeq, uint64_t(0));
+
+	auto ownFirst = Purple::ClassifySyncCandidate(30, ownA.canonical);
+	const auto present = reconcile(posted, finish({ otherRecord, ownFirst }));
+	CHECK(present.status == Own::Present);
+	CHECK(present.observation.kind
+		== Purple::OwnRecordObservationKind::Present);
+	CHECK_EQ(present.observation.seq, uint64_t(1));
+	CHECK_EQ(present.observation.payloadHash, ownA.payloadHash);
+	CHECK_EQ(present.head.messageId, 30);
+	CHECK_EQ(present.head.recordHash, sha(ownA.canonical));
+	CHECK(present.head.fresh);
+	CHECK(present.cloneVerdict == Purple::SyncCloneVerdict::NoClone);
+	CHECK(present.duplicateHeadMessageIds.empty());
+	auto ownLater = ownFirst;
+	ownLater.id = 34;
+	auto ownEarlier = ownFirst;
+	ownEarlier.id = 26;
+	const auto duplicated = reconcile(
+		posted,
+		finish({ ownLater, otherRecord, ownFirst, ownEarlier }));
+	CHECK(duplicated.status == Own::Present);
+	CHECK_EQ(duplicated.head.messageId, 26);
+	CHECK(duplicated.duplicateHeadMessageIds
+		== std::vector<int32_t>({ 30, 34 }));
+	CHECK(reconcile(state, finish({ ownFirst })).status
+		== Own::CloneDetected);
+	CHECK(reconcile(state, finish({ ownFirst })).cloneVerdict
+		== Purple::SyncCloneVerdict::RemoteAhead);
+	const auto ownSecond = Purple::ClassifySyncCandidate(
+		31,
+		build(textB, 2, install, device).canonical);
+	const auto ahead = reconcile(posted, finish({ ownFirst, ownSecond }));
+	CHECK(ahead.status == Own::CloneDetected);
+	CHECK(ahead.cloneVerdict == Purple::SyncCloneVerdict::RemoteAhead);
+	const auto rewritten = Purple::ClassifySyncCandidate(
+		32,
+		build(textB, 1, install, device).canonical);
+	const auto mismatch = reconcile(posted, finish({ rewritten }));
+	CHECK(mismatch.status == Own::CloneDetected);
+	CHECK(mismatch.cloneVerdict == Purple::SyncCloneVerdict::HashMismatch);
+	const auto impostor = Purple::ClassifySyncCandidate(
+		33,
+		build(textB, 2, install, u"desktop:someone-else"_q).canonical);
+	const auto clone = reconcile(posted, finish({ ownFirst, impostor }));
+	CHECK(clone.status == Own::CloneDetected);
+	CHECK(clone.cloneVerdict == Purple::SyncCloneVerdict::DeviceMismatch);
+	auto ownInvalid = ownFirst;
+	ownInvalid.status = Status::NewerSchema;
+	CHECK(reconcile(posted, finish({ ownInvalid }, Read::Complete)).status
+		== Own::NeedsReview);
+	auto ownZero = ownFirst;
+	ownZero.id = 0;
+	CHECK(reconcile(posted, finish({ ownZero })).status == Own::NeedsReview);
+
+	CHECK(reconcile(pending, emptySelected).status == Own::NeedsReview);
+	CHECK(reconcile(pending, emptySelected, ownA.canonical).status
+		== Own::Absent);
+	CHECK(reconcile(pending, emptySelected, rewritten.bytes).status
+		== Own::NeedsReview);
+	CHECK(reconcile(pending, emptySelected, ownSecond.bytes).status
+		== Own::NeedsReview);
+	CHECK(reconcile(pending, emptySelected, otherB.canonical).status
+		== Own::NeedsReview);
+	auto stagedLater = ownFirst;
+	stagedLater.id = 40;
+	auto stagedEarlier = ownFirst;
+	stagedEarlier.id = 35;
+	const auto found = reconcile(
+		pending,
+		finish({ stagedLater, otherRecord, stagedEarlier }),
+		ownA.canonical);
+	CHECK(found.status == Own::PendingFound);
+	CHECK(found.pendingMessageId == std::optional<int32_t>(35));
+	CHECK_EQ(found.head.messageId, 35);
+	CHECK(found.duplicateHeadMessageIds == std::vector<int32_t>({ 40 }));
+	CHECK(reconcile(pending, finish({ rewritten }), ownA.canonical).status
+		== Own::NeedsReview);
+	CHECK(reconcile(pending, finish({ otherRecord }), ownA.canonical).status
+		== Own::Absent);
+}
+
 int main() {
 	TestSyncStatus();
 	TestSyncJson();
@@ -12425,6 +12942,7 @@ int main() {
 	TestTimeOrderedSyncSpaceIds();
 	TestSyncEnvelope();
 	TestSyncDirectory();
+	TestSyncInventory();
 	TestConfigPayload();
 	TestConfigRecordBuilder();
 	TestSyncLocalState();
