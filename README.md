@@ -130,6 +130,19 @@ rules about data are far easier to prove outside a running app than inside one.
   state (absent, present, found pending, or a clone). Clients keep only the
   Telegram requests and downloads. See
   [`docs/sync-inventory.md`](docs/sync-inventory.md).
+- `purple/purple_sync_config_flow.{h,cpp}` - the settings sync flow between an
+  inventory and a change: the review of an inventory against local state and
+  `settings.toml`, head extraction, the review stamp that makes Apply refuse a
+  stale choice, the apply planner and its completion (adoption and the next
+  publish proposal), the check before committing new config data, and the
+  publish request gate and post planners that decide whether to finish, confirm
+  a found post, stage or post. Clients keep file I/O, History, their state
+  store and Telegram posting. See
+  [`docs/sync-config-flow.md`](docs/sync-config-flow.md).
+- `purple/purple_sync_config_describe.{h,cpp}` - which message, action and
+  devices a review or failed apply deserves, the choices a dialog offers,
+  device name parts, whether `settings.toml` can be published, and whether a
+  restore ends Undo. Clients supply the wording.
 - `purple/purple_config_payload.{h,cpp}` - inspects a validated config envelope
   before its settings file can be used. It checks the key against the exact
   UTF-8 bytes represented by the JSON `text` string, validates direct parents
@@ -325,6 +338,8 @@ notification mute decisions.
 `tests/test_config.cpp` compiles the core's translation units into a small
 harness and drives them against several hundred fixture documents - far too
 slow to iterate on through a full app build, which is the point.
+`tests/test_sync_flow.cpp` runs the settings sync flow end to end on in-memory
+devices; `run.sh` compiles the core once and runs both.
 
 ```sh
 QT_PREFIX=/path/to/qt tests/run.sh

@@ -53,6 +53,10 @@ enum class SyncHistoryPageStatus {
 
 class SyncHistoryPages final {
 public:
+	SyncHistoryPages() = default;
+	explicit SyncHistoryPages(int32_t offset) : _offset(offset) {
+	}
+
 	[[nodiscard]] SyncHistoryPageStatus Add(
 			const std::vector<SyncHistoryPageItem> &page) {
 		if (page.empty()) {

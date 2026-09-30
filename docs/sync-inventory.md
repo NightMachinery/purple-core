@@ -34,6 +34,9 @@ page. It returns Stalled, and keeps nothing from that page, when an id is not
 positive, exceeds the 32-bit range, is not below the current offset, or is not
 strictly below the previous id on the page. Only a Complete scan may be used
 to decide anything; a stalled, failed or cancelled scan is incomplete.
+A client that keeps no pager between pages (one stateless call per page)
+builds `SyncHistoryPages(offset)` from the previous page's offset, adds the one
+page, and keeps the running count and candidate ids itself.
 
 ## Records and the read
 
