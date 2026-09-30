@@ -348,6 +348,9 @@ constexpr auto kLineageLimit = 64;
 	} else if (has(ConfigHeadKind::Unrelated)) {
 		result.verdict = ConfigSyncVerdict::Choose;
 		result.offered = candidates;
+	} else if (candidates.size() > 1) {
+		result.verdict = ConfigSyncVerdict::Conflict;
+		result.offered = candidates;
 	} else if (has(ConfigHeadKind::Ahead)) {
 		result.verdict = ConfigSyncVerdict::UpdateReady;
 		result.offered = {
@@ -548,6 +551,25 @@ std::optional<ConfigChoicePlan> PlanConfigChoice(
 		}), result.end());
 		return result;
 	};
+	const auto beside = [&](
+			const std::vector<ConfigHead> &adopt,
+			bool withSame) {
+		auto result = std::vector<ConfigHead>();
+		for (const auto &outcome : plan.classification.heads) {
+			const auto adopted = std::any_of(
+				adopt.begin(),
+				adopt.end(),
+				[&](const ConfigHead &head) {
+					return head.install == outcome.head.install;
+				});
+			if (!adopted
+				&& (outcome.kind == ConfigHeadKind::Stale
+					|| (withSame && outcome.kind == ConfigHeadKind::Same))) {
+				result.push_back(outcome.head);
+			}
+		}
+		return result;
+	};
 	auto result = ConfigChoicePlan();
 	switch (plan.verdict) {
 	case ConfigSyncVerdict::UpdateReady:
@@ -559,12 +581,14 @@ std::optional<ConfigChoicePlan> PlanConfigChoice(
 		result.writeRemote = true;
 		result.write = plan.offered.front();
 		result.adopt = carrying(Fingerprint(result.write.key));
+		result.seen = beside(result.adopt, true);
 		break;
 	case ConfigSyncVerdict::Adopt:
 		if (chosenRemoteKey || plan.same.empty()) {
 			return std::nullopt;
 		}
 		result.adopt = plan.same;
+		result.seen = beside(result.adopt, false);
 		break;
 	case ConfigSyncVerdict::LocalChanges:
 		if (chosenRemoteKey
@@ -603,10 +627,15 @@ std::optional<ConfigChoicePlan> PlanConfigChoice(
 			result.writeRemote = true;
 			result.write = *chosen;
 			result.adopt = carrying(fp);
+			result.seen = beside(result.adopt, false);
 			const auto unjoined = Unjoined(state);
-			const auto next = Adopt(state, fp, result.adopt, unjoined);
+			auto next = Adopt(state, fp, result.adopt, unjoined);
 			if (!next) {
 				return std::nullopt;
+			}
+			for (const auto &head : result.seen) {
+				auto &seen = next->seenSeq[head.install];
+				seen = std::max(seen, head.seq);
 			}
 			auto heads = std::vector<ConfigHead>();
 			for (const auto &outcome : plan.classification.heads) {
@@ -638,6 +667,9 @@ std::optional<ConfigChoicePlan> PlanConfigChoice(
 		} else {
 			const auto &first = plan.offered.front();
 			result.adopt = plan.same;
+			if (!result.adopt.empty()) {
+				result.seen = beside(result.adopt, false);
+			}
 			result.publish = true;
 			result.parents.push_back(parent(first));
 			if (plan.offered.size() > 1) {

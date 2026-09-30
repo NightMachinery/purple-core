@@ -1124,6 +1124,116 @@ void TestFlowChooseUpdateAdoptConflict() {
 	CHECK(Review(device, cloud).plan.verdict == ConfigSyncVerdict::UpToDate);
 }
 
+void TestFlowUpdateBesideSame() {
+	Begin("sync flow update beside a same-content head");
+	using Status = SyncConfigPublishStatus;
+	auto cloud = Cloud();
+	auto device = Device('a');
+	device.setLocal(T0);
+	CHECK(Apply(device, cloud, Review(device, cloud), std::nullopt).status
+		== SyncConfigApplyStatus::Applied);
+	const auto base = PublishLocal(device, cloud);
+	CHECK(base.status == Status::Confirmed);
+	const auto space = device.state->space;
+	auto d = MakeRemote('d', u"Linux"_q);
+	auto e = MakeRemote('e', u"Android"_q);
+	auto f = MakeRemote('f', u"Windows"_q);
+	const auto z = Post(cloud, d, space, TC2, { base.version });
+	const auto s = Post(cloud, d, space, T0, { z });
+	const auto x = Post(cloud, e, space, TB, { base.version });
+	const auto quiet = cloud;
+	const auto y = Post(cloud, f, space, TC, { base.version });
+
+	const auto both = Review(device, cloud);
+	CHECK(both.plan.verdict == ConfigSyncVerdict::Conflict);
+	CHECK(SameSet(Keys(both.plan.offered), { x.key, y.key }));
+	CHECK(Keys(both.plan.same) == std::vector<QString>{ s.key });
+	CHECK(MessageOf(both) == SyncConfigMessage::ConflictSplitBound);
+	auto picker = device;
+	auto pickCloud = cloud;
+	const auto promise = PlanConfigChoice(both.state, both.plan, x.key);
+	const auto picked = Apply(picker, pickCloud, both, x.key);
+	CHECK(picked.status == SyncConfigApplyStatus::Applied);
+	CHECK(picker.local.text == TB);
+	CHECK(picked.promiseKept);
+	CHECK(picked.publishNeeded);
+	CHECK(promise && promise->publish && SameSet(
+		SyncConfigVersionKeys(promise->parents),
+		picked.expectedParents));
+	const auto resolved = PublishOwn(
+		picker,
+		pickCloud,
+		picked.fingerprint,
+		picked.expectedParents);
+	CHECK(resolved.status == Status::Confirmed);
+	CHECK(Review(picker, pickCloud).plan.verdict
+		== ConfigSyncVerdict::UpToDate);
+
+	const auto update = Review(device, quiet);
+	CHECK(update.plan.verdict == ConfigSyncVerdict::UpdateReady);
+	CHECK(Keys(update.plan.offered) == std::vector<QString>{ x.key });
+	CHECK(Keys(update.plan.same) == std::vector<QString>{ s.key });
+	const auto applied = Apply(device, quiet, update, x.key);
+	CHECK(applied.status == SyncConfigApplyStatus::Applied);
+	CHECK(applied.update);
+	CHECK(device.local.text == TB);
+	CHECK(applied.nextVerdict == ConfigSyncVerdict::UpToDate);
+	CHECK(!applied.publishNeeded);
+	CHECK(applied.promiseKept);
+	const auto &seen = device.state->configData.seenSeq;
+	CHECK(seen.contains(d.install) && seen.at(d.install) == 2);
+	const auto after = Review(device, quiet);
+	CHECK(after.plan.verdict == ConfigSyncVerdict::UpToDate);
+	CHECK(after.plan.offered.empty());
+
+	auto merged = Cloud();
+	auto keeper = Device('k');
+	keeper.setLocal(T0);
+	CHECK(Apply(keeper, merged, Review(keeper, merged), std::nullopt).status
+		== SyncConfigApplyStatus::Applied);
+	CHECK(PublishLocal(keeper, merged).status == Status::Confirmed);
+	const auto mergedSpace = keeper.state->space;
+	auto g = MakeRemote('g', u"Linux"_q);
+	const auto h = Post(merged, g, mergedSpace, TC);
+	const auto unrelated = Review(keeper, merged);
+	CHECK(unrelated.plan.verdict == ConfigSyncVerdict::Choose);
+	const auto kept = Apply(keeper, merged, unrelated, std::nullopt);
+	CHECK(kept.publishNeeded);
+	const auto m = PublishOwn(
+		keeper,
+		merged,
+		kept.fingerprint,
+		kept.expectedParents);
+	CHECK(m.status == Status::Confirmed);
+	auto j = MakeRemote('j', u"Windows"_q);
+	const auto j0 = Post(merged, j, mergedSpace, TB2);
+	const auto j1 = Post(merged, j, mergedSpace, TB3, { j0 });
+	const auto k2 = Post(merged, j, mergedSpace, T0, { j1 });
+	const auto same = Review(keeper, merged);
+	CHECK(same.plan.verdict == ConfigSyncVerdict::Adopt);
+	CHECK(Apply(keeper, merged, same, std::nullopt).status
+		== SyncConfigApplyStatus::Applied);
+	const auto &data = keeper.state->configData;
+	CHECK(data.base == k2.key);
+	CHECK(std::find(data.baseLineage.begin(), data.baseLineage.end(), h.key)
+		!= data.baseLineage.end());
+	const auto x2 = Post(merged, e, mergedSpace, TB, { k2 });
+	const auto overMerged = Review(keeper, merged);
+	CHECK(overMerged.plan.verdict == ConfigSyncVerdict::UpdateReady);
+	CHECK(Keys(overMerged.plan.offered) == std::vector<QString>{ x2.key });
+	const auto moved = Apply(keeper, merged, overMerged, x2.key);
+	CHECK(moved.status == SyncConfigApplyStatus::Applied);
+	CHECK(moved.nextVerdict == ConfigSyncVerdict::LocalChanges);
+	CHECK(moved.promiseKept);
+	CHECK(SameSet(moved.expectedParents, { x2.key, m.version.key }));
+	const auto ownStale = Review(keeper, merged);
+	CHECK(ownStale.plan.verdict == ConfigSyncVerdict::LocalChanges);
+	CHECK(ownStale.plan.ownStale);
+	CHECK(ownStale.plan.offered.empty());
+	CHECK(PublishLocal(keeper, merged).status == Status::Confirmed);
+	CHECK(Review(keeper, merged).plan.verdict == ConfigSyncVerdict::UpToDate);
+}
+
 void TestFlowRechecks() {
 	Begin("sync flow rechecks");
 	using Status = SyncConfigPublishStatus;
@@ -2293,6 +2403,7 @@ int main() {
 	TestFlowHeads();
 	TestFlowEmptyJoinAndLocalChanges();
 	TestFlowChooseUpdateAdoptConflict();
+	TestFlowUpdateBesideSame();
 	TestFlowRechecks();
 	TestFlowJoinVariants();
 	TestFlowPublisher();

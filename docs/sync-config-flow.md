@@ -92,11 +92,14 @@ After writing the file (for a remote choice) and reading it back,
 `CompleteSyncConfigApply(plan, file)` checks the file: the source text and
 fingerprint for a remote choice, the planned local fingerprint otherwise. It
 then adopts the choice's heads with `AdoptConfigHeads` (AdoptRefused when that
-fails), plans again on the adopted state and proposes the next publish: needed
-when the new verdict is Empty, LocalChanges, Choose or Conflict and keeping this
-device's settings publishes without adopting, with those parents as the
-expected parents. `promiseKept` is false when a remote choice promised a
-different publish than this proposal; clients log it.
+fails) and raises the seen sequences of the choice's `seen` heads; `adopted`
+holds the resulting state whenever either list is not empty. It plans again on
+that state and proposes the next publish: needed when the new verdict is Empty,
+LocalChanges, Choose or Conflict and keeping this device's settings publishes
+without adopting, with those parents as the expected parents. `promiseKept` is
+false when the next verdict breaks what the choice promised: after an update,
+anything but UpToDate or LocalChanges; after a remote Choose or Conflict pick,
+a different publish than this proposal. Clients log it.
 
 The client commits an adopted state with `CheckSyncConfigDataCommit(state,
 next)` before writing: InvalidTransition when anything is pending in the state

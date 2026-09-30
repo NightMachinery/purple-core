@@ -8674,6 +8674,14 @@ void TestConfigSyncPlanner() {
 		== std::vector<QString>({ c.key }));
 	CHECK(HeadKeys(updateOverAdopt.same)
 		== std::vector<QString>({ revert.key }));
+	const auto aheadBesideSame = plan(fpA, state, {
+		head(b, u"pc"_q, 3), head(c, u"phone"_q, 5), head(elsewhereA, u"tv"_q) });
+	CHECK(aheadBesideSame.verdict == Verdict::Conflict);
+	CHECK(!aheadBesideSame.classification.split);
+	CHECK(HeadKeys(aheadBesideSame.offered) == std::vector<QString>({
+		c.key, b.key }));
+	CHECK(HeadKeys(aheadBesideSame.same)
+		== std::vector<QString>({ elsewhereA.key }));
 	const auto adoptOverLocal = plan(fpB, state, {
 		head(sameUnrelated, u"phone"_q) });
 	CHECK(adoptOverLocal.verdict == Verdict::Adopt);
@@ -9136,6 +9144,137 @@ void TestConfigChoice() {
 	const auto limitLocal = Purple::PlanConfigSync(fpA, limitState, {});
 	CHECK(limitLocal.verdict == Verdict::LocalChanges);
 	CHECK(!Purple::PlanConfigChoice(limitState, limitLocal, std::nullopt));
+}
+
+void TestConfigChoiceSettles() {
+	Begin("config choice settles its heads");
+	using Verdict = Purple::ConfigSyncVerdict;
+	using Kind = Purple::ConfigHeadKind;
+	const auto version = [](const char *text,
+			std::vector<Purple::ConfigVersion> parents) {
+		return *Purple::MakeConfigVersion(text, parents);
+	};
+	const auto fp = [](const char *text) {
+		return Purple::SettingsFingerprint(text);
+	};
+	const auto head = [](const Purple::ConfigVersion &version,
+			const QString &writer, uint64_t seq = 1) {
+		return Purple::ConfigHead{
+			u"space"_q, writer, seq, version.key, version.lineage };
+	};
+	const auto settle = [](
+			Purple::ConfigSyncState state,
+			const QString &localFp,
+			const Purple::ConfigChoicePlan &choice) {
+		if (!choice.adopt.empty()) {
+			const auto adopted = Purple::AdoptConfigHeads(
+				state,
+				localFp,
+				choice.adopt);
+			if (!adopted) {
+				return std::optional<Purple::ConfigSyncState>();
+			}
+			state = *adopted;
+		}
+		for (const auto &head : choice.seen) {
+			auto &seen = state.seenSeq[head.install];
+			seen = std::max(seen, head.seq);
+		}
+		return std::make_optional(state);
+	};
+	const auto a = version("A", {});
+	const auto b = version("B", { a });
+	const auto c = version("C", { a });
+	const auto revert = version("A", { b });
+	auto state = Purple::ConfigSyncState();
+	state.space = u"space"_q;
+	state.install = u"mine"_q;
+	state.base = a.key;
+	state.baseLineage = a.lineage;
+
+	const auto sameHeads = std::vector<Purple::ConfigHead>{
+		head(c, u"pc"_q), head(revert, u"phone"_q) };
+	const auto update = Purple::PlanConfigSync(fp("A"), state, sameHeads);
+	CHECK(update.verdict == Verdict::UpdateReady);
+	const auto apply = Purple::PlanConfigChoice(state, update, c.key);
+	CHECK(apply.has_value());
+	CHECK(apply && HeadKeys(apply->adopt) == std::vector<QString>({ c.key }));
+	CHECK(apply && HeadInstalls(apply->seen)
+		== std::vector<QString>({ u"phone"_q }));
+	const auto updated = apply ? settle(state, fp("C"), *apply) : std::nullopt;
+	CHECK(updated.has_value());
+	CHECK(updated && Purple::PlanConfigSync(
+		fp("C"),
+		*updated,
+		sameHeads).verdict == Verdict::UpToDate);
+
+	const auto p = version("P", { a });
+	const auto q = version("Q", { a });
+	const auto k = version("A", { p, q });
+	auto merged = state;
+	merged.base = k.key;
+	merged.baseLineage = k.lineage;
+	merged.equiv = { a.key };
+	const auto x = version("X", { a });
+	const auto twinHeads = std::vector<Purple::ConfigHead>{
+		head(k, u"twin"_q), head(x, u"pc"_q) };
+	const auto beside = Purple::PlanConfigSync(fp("A"), merged, twinHeads);
+	CHECK(beside.verdict == Verdict::UpdateReady);
+	CHECK(ConfigKind(beside.classification, k.key) == Kind::Stale);
+	const auto overTwin = Purple::PlanConfigChoice(merged, beside, x.key);
+	CHECK(overTwin && HeadInstalls(overTwin->seen)
+		== std::vector<QString>({ u"twin"_q }));
+	const auto twinSettled = overTwin
+		? settle(merged, fp("X"), *overTwin)
+		: std::nullopt;
+	CHECK(twinSettled && Purple::PlanConfigSync(
+		fp("X"),
+		*twinSettled,
+		twinHeads).verdict == Verdict::UpToDate);
+
+	const auto stranger = version("S", {});
+	const auto edited = version("L", { stranger });
+	const auto dirtyHeads = std::vector<Purple::ConfigHead>{
+		head(p, u"pc"_q), head(edited, u"tv"_q) };
+	const auto dirty = Purple::PlanConfigSync(fp("L"), merged, dirtyHeads);
+	CHECK(dirty.verdict == Verdict::Adopt);
+	CHECK(ConfigKind(dirty.classification, p.key) == Kind::Stale);
+	const auto silent = Purple::PlanConfigChoice(merged, dirty, std::nullopt);
+	CHECK(silent && HeadInstalls(silent->seen)
+		== std::vector<QString>({ u"pc"_q }));
+	const auto silentSettled = silent
+		? settle(merged, fp("L"), *silent)
+		: std::nullopt;
+	CHECK(silentSettled && Purple::PlanConfigSync(
+		fp("L"),
+		*silentSettled,
+		dirtyHeads).verdict == Verdict::UpToDate);
+
+	const auto own = head(k, u"mine"_q, 4);
+	const auto pickHeads = std::vector<Purple::ConfigHead>{
+		head(p, u"pc"_q), head(stranger, u"tv"_q) };
+	const auto choose = Purple::PlanConfigSync(
+		fp("A"),
+		merged,
+		pickHeads,
+		own);
+	CHECK(choose.verdict == Verdict::Choose);
+	const auto pick = Purple::PlanConfigChoice(merged, choose, stranger.key);
+	CHECK(pick && pick->publish);
+	CHECK(pick && HeadInstalls(pick->seen)
+		== std::vector<QString>({ u"pc"_q }));
+	auto parents = std::vector<QString>();
+	for (const auto &parent : pick ? pick->parents
+			: std::vector<Purple::ConfigVersion>()) {
+		parents.push_back(parent.key);
+	}
+	CHECK(parents == std::vector<QString>({ stranger.key, k.key }));
+	const auto picked = pick ? settle(merged, fp("S"), *pick) : std::nullopt;
+	const auto afterPick = picked
+		? Purple::PlanConfigSync(fp("S"), *picked, pickHeads, own)
+		: Purple::ConfigSyncPlan();
+	CHECK(afterPick.verdict == Verdict::LocalChanges);
+	CHECK(afterPick.ownStale);
 }
 
 void TestConfigOwnHead() {
@@ -12957,6 +13096,7 @@ int main() {
 	TestConfigSyncPlanner();
 	TestConfigAdoption();
 	TestConfigChoice();
+	TestConfigChoiceSettles();
 	TestConfigOwnHead();
 	TestConfigDiff();
 	TestConfigChangeSummary();

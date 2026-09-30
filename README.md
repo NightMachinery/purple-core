@@ -47,9 +47,10 @@ rules about data are far easier to prove outside a running app than inside one.
   newest same-content version becomes the base, the lineages merge, the others
   become equivalent keys, and the seen sequences rise. `PlanConfigChoice` maps
   the user's choice for a verdict (apply the update, pick a remote version or
-  keep this device's text) to the file write, the heads to adopt and the
-  parents of any version to publish; after picking a remote version it
-  publishes exactly what a fresh check would then propose. See
+  keep this device's text) to the file write, the heads to adopt, the heads to
+  record as seen so that settings a choice replaced never come back as an
+  offer, and the parents of any version to publish; after picking a remote
+  version it publishes exactly what a fresh check would then propose. See
   [`docs/config-sync.md`](docs/config-sync.md) for the precedence, the head
   ordering, the parent rules and every refusal.
 - `purple/purple_config_diff.{h,cpp}` - compares two `settings.toml` texts

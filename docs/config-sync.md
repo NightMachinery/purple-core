@@ -71,7 +71,11 @@ The first matching verdict wins:
    other devices have not seen yet.
 4. **Choose**: some head is `Unrelated`: a first join with different settings,
    or a device with unrelated history.
-5. **UpdateReady**: some head is `Ahead`.
+5. **UpdateReady**: some head is `Ahead`. When the `Ahead` heads carry two or
+   more distinct contents, the verdict is Conflict instead and offers each of
+   them. The classification reports no split when a maximal head matches the
+   local file, yet those heads still changed the settings without seeing each
+   other, and an update offers only one head, so the others would stay hidden.
 6. **Adopt**: some head has the same content as the local file.
 7. **Empty**: the base is empty and no other install has any head in the
    space, whether or not its sequence was already seen. This is the only
@@ -131,26 +135,29 @@ are unchanged.
 review into the work the client performs. `chosenRemoteKey` names one offered
 head; `std::nullopt` means keep this device's text. The result says whether to
 write a head's text into the settings file (`writeRemote`, `write`), which
-heads to record afterwards with `AdoptConfigHeads` (`adopt`), and whether to
-publish (`publish`, `parents`). The client builds the published record from
-the current local text after any write, so publishing always means publishing
-the local text with these parents. A parent is `ConfigVersion{ key, {},
-lineage }` built from a head, or from the base and base lineage.
+heads to record afterwards with `AdoptConfigHeads` (`adopt`), which other heads
+to record as seen (`seen`, see below), and whether to publish (`publish`,
+`parents`). The client builds the published record from the current local text
+after any write, so publishing always means publishing the local text with
+these parents. A parent is `ConfigVersion{ key, {}, lineage }` built from a
+head, or from the base and base lineage.
 
 - **UpdateReady**: the key must be the one offered head; keeping the local
   text is not a choice here (the client offers Not now, which changes
-  nothing). Write that head, then adopt every head that is not `Stale` and
-  carries its content. Nothing is published.
-- **Adopt**: no key. Adopt `plan.same`. Nothing is written or published.
+  nothing). Write that head, adopt every head that is not `Stale` and carries
+  its content, and list every other head as seen. Nothing is published.
+- **Adopt**: no key. Adopt `plan.same` and list the `Stale` heads as seen.
+  Nothing is written or published.
 - **LocalChanges**: no key. Publish with the base as a parent, and the own
   head as the second parent when it is stale, so the other devices see this
   device's current settings supersede its old record.
 - **Empty**: no key. Publish with no parents.
-- **Choose or Conflict, remote key R** (one of the offered heads): write R and
-  adopt every head that is not `Stale` and carries R's content. Whether to
-  publish, and with which parents, is exactly what a fresh check would propose
-  right after that write and adoption. The core works this out by applying the
-  adoption and planning again on the same heads and own head.
+- **Choose or Conflict, remote key R** (one of the offered heads): write R,
+  adopt every head that is not `Stale` and carries R's content, and list the
+  `Stale` heads as seen. Whether to publish, and with which parents, is exactly
+  what a fresh check would propose right after that write, adoption and seen
+  record. The core works this out by applying them and planning again on the
+  same heads and own head.
   - One other offered content remains: the fresh check is Choose or Conflict,
     and keeping local there publishes with R and that content as parents. The
     other devices then see an ordinary update instead of a lasting conflict.
@@ -165,29 +172,44 @@ lineage }` built from a head, or from the base and base lineage.
     offered head descends from the base. That head then returns as an update.
 
   When R is among the parents it comes first.
-- **Choose or Conflict, keep local**: adopt `plan.same` (possibly none), then
-  publish with the first two offered heads as parents. When only one head is
-  offered, the base fills the second slot, unless the base is empty, is that
-  head, or already appears in that head's lineage.
+- **Choose or Conflict, keep local**: adopt `plan.same` (possibly none) and,
+  when it adopts any, list the `Stale` heads as seen, then publish with the
+  first two offered heads as parents. When only one head is offered, the base
+  fills the second slot, unless the base is empty, is that head, or already
+  appears in that head's lineage.
 - **Invalid, Pending, UpToDate**: nothing to choose.
+
+`seen` lists heads the choice records without adopting them. The client
+raises each one's install seen sequence to at least the head's sequence
+(`CompleteSyncConfigApply` does this), so the head stays out of later checks
+until that device posts again. Adopting a different content replaces the base
+lineage with the adopted heads' lineages. Without `seen`, a head this device
+had already accounted for would then come back as `Unrelated` on the next
+check and be offered as a choice that takes the device back: a `Same` head
+beside an update holds the settings the update just replaced, and a `Stale`
+head may be known only through the history the adoption dropped. Recording a
+head as seen claims nothing about it in later posts; its device still sees
+this device's versions as concurrent and decides for itself.
 
 A choice that does not fit the verdict returns nothing, and so does any
 parent set that `MakeConfigVersion` would reject (for example a parent at the
 largest generation), so the client never stages a record the core cannot
 build.
 
-This gives the client a check it can rely on. After it writes R and adopts
-`adopt`, a fresh `PlanConfigSync` on the same inventory and own head returns
-LocalChanges, Choose or Conflict whenever the choice promised a publish. The
-fresh plan's `PlanConfigChoice(..., std::nullopt)` then publishes with the
-same set of parents, and when no publish was promised, it proposes none. A
-client that re-plans on the click before posting therefore posts exactly what
-the review promised, unless the inventory changed in between.
+This gives the client a check it can rely on. After it writes R, adopts
+`adopt` and records `seen`, a fresh `PlanConfigSync` on the same inventory and
+own head returns LocalChanges, Choose or Conflict whenever the choice promised
+a publish. The fresh plan's `PlanConfigChoice(..., std::nullopt)` then
+publishes with the same set of parents without adopting anything, and when no
+publish was promised, it proposes none. A client that re-plans on the click
+before posting therefore posts exactly what the review promised, unless the
+inventory changed in between.
 
-Applying an update (UpdateReady) never publishes. When the own head was
-already stale, or the applied version descends an equivalent key rather than
-the base and so not the own record, the next check reports LocalChanges with
-the own head as the second parent.
+Applying an update (UpdateReady) never publishes. A fresh check on the same
+heads right after it is UpToDate, or LocalChanges when the own head was
+already stale or the applied version descends an equivalent key rather than
+the base (and so not the own record); that LocalChanges publishes with the own
+head as the second parent.
 
 ## DiffConfigText
 

@@ -622,8 +622,14 @@ SyncConfigApplyCompletion CompleteSyncConfigApply(
 			result.status = SyncConfigApplyCompletionStatus::AdoptRefused;
 			return result;
 		}
-		result.adopted = adopted;
 		next = *adopted;
+	}
+	for (const auto &head : plan.choice.seen) {
+		auto &seen = next.seenSeq[head.install];
+		seen = std::max(seen, head.seq);
+	}
+	if (!plan.choice.adopt.empty() || !plan.choice.seen.empty()) {
+		result.adopted = next;
 	}
 	const auto fresh = PlanConfigSync(
 		result.fingerprint,
@@ -641,11 +647,14 @@ SyncConfigApplyCompletion CompleteSyncConfigApply(
 			result.expectedParents = SyncConfigVersionKeys(proposal->parents);
 		}
 	}
-	result.promiseKept = !plan.choice.writeRemote
-		|| (plan.choice.publish == result.publishNeeded
-			&& SameSyncConfigKeySet(
-				SyncConfigVersionKeys(plan.choice.parents),
-				result.expectedParents));
+	result.promiseKept = (plan.verdict == ConfigSyncVerdict::UpdateReady)
+		? (fresh.verdict == ConfigSyncVerdict::UpToDate
+			|| fresh.verdict == ConfigSyncVerdict::LocalChanges)
+		: (!plan.choice.writeRemote
+			|| (plan.choice.publish == result.publishNeeded
+				&& SameSyncConfigKeySet(
+					SyncConfigVersionKeys(plan.choice.parents),
+					result.expectedParents)));
 	result.status = SyncConfigApplyCompletionStatus::Ready;
 	return result;
 }

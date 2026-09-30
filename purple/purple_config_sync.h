@@ -115,6 +115,7 @@ struct ConfigChoicePlan {
 	bool writeRemote = false;
 	ConfigHead write;
 	std::vector<ConfigHead> adopt;
+	std::vector<ConfigHead> seen;
 	bool publish = false;
 	std::vector<ConfigVersion> parents;
 };
