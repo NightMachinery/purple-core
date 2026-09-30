@@ -1939,6 +1939,108 @@ void TestFlowGateRefusesAdoption() {
 	CHECK(skipped.expectedParents.empty());
 }
 
+void TestFlowLastGood() {
+	Begin("sync flow while running the last good settings");
+	using Status = SyncConfigPublishStatus;
+	using File = SyncSettingsFileStatus;
+	auto cloud = Cloud();
+	auto device = Device('a');
+	device.setLocal(T0);
+	CHECK(Apply(device, cloud, Review(device, cloud), std::nullopt).status
+		== SyncConfigApplyStatus::Applied);
+	const auto v1 = PublishLocal(device, cloud);
+	CHECK(v1.status == Status::Confirmed);
+	const auto space = device.state->space;
+
+	const auto broken = QByteArray("version = 1\nname = \"unclosed\n");
+	const auto running = MakeSyncSettingsFile(File::Present, broken, true);
+	CHECK(running.usingLastGood);
+	CHECK(running.status == File::Present && running.text == broken);
+	CHECK(!MakeSyncSettingsFile(File::Present, broken).usingLastGood);
+	CHECK(!SameSyncSettingsFile(
+		MakeSyncSettingsFile(File::Present, T1, true),
+		MakeSyncSettingsFile(File::Present, T1)));
+	CHECK(MakeSyncSettingsFile(File::Absent, {}, true).usingLastGood);
+	CHECK(MakeSyncSettingsFile(File::Invalid, {}, true).usingLastGood);
+
+	device.setLocal(T1);
+	const auto request = LocalRequest(device, cloud);
+	const auto post = [&] {
+		return PlanSyncConfigPost(
+			*device.state,
+			device.token(),
+			device.staged,
+			cloud.inventory(),
+			device.local,
+			request,
+			device.now,
+			device.writer,
+			device.queue);
+	};
+	CHECK(post().step == SyncConfigPostStep::Stage);
+	device.local = MakeSyncSettingsFile(File::Present, T1, true);
+	CHECK(post().step == SyncConfigPostStep::Finish);
+	CHECK(post().status == Status::InvalidSettings);
+	CHECK(!SyncSettingsPublishable(
+		Review(device, cloud),
+		device.state->createdDevice,
+		device.writer));
+
+	device.setLocal(T1);
+	const auto queued = Publish(device, cloud, request, PostMode::Fail);
+	CHECK(queued.status == Status::OutcomeUnknown);
+	device.local = running;
+	const auto pausedPending = Review(device, cloud);
+	CHECK(pausedPending.status == SyncConfigReviewStatus::UsingLastGood);
+	CHECK(MessageOf(pausedPending) == SyncConfigMessage::UsingLastGood);
+	const auto finished = Publish(device, cloud, { .pendingOnly = true });
+	CHECK(finished.status == Status::Confirmed && finished.posts == 1);
+	device.setLocal(T1);
+	CHECK(Review(device, cloud).plan.verdict == ConfigSyncVerdict::UpToDate);
+
+	auto b = MakeRemote('b', u"Android"_q);
+	const auto b1 = Post(cloud, b, space, TB, { finished.version });
+	const auto update = Review(device, cloud);
+	CHECK(update.plan.verdict == ConfigSyncVerdict::UpdateReady);
+	device.local = running;
+	const auto paused = Review(device, cloud);
+	CHECK(paused.status == SyncConfigReviewStatus::UsingLastGood);
+	CHECK(paused.bound);
+	CHECK(paused.state.base == finished.version.key);
+	CHECK(MessageOf(paused) == SyncConfigMessage::UsingLastGood);
+	CHECK(ActionOf(paused) == SyncConfigAction::None);
+	CHECK(SyncConfigChoices(paused, true).empty());
+	const auto stateBefore = device.stateBytes();
+	CHECK(Apply(device, cloud, update, b1.key).status
+		== SyncConfigApplyStatus::NeedsRecheck);
+	CHECK(Apply(device, cloud, paused, b1.key).status
+		== SyncConfigApplyStatus::NeedsReview);
+	CHECK(device.local.text == broken && device.local.usingLastGood);
+	CHECK(device.stateBytes() == stateBefore);
+
+	device.local = MakeSyncSettingsFile(File::Absent, {}, true);
+	CHECK(Review(device, cloud).status == SyncConfigReviewStatus::UsingLastGood);
+	CHECK(Apply(device, cloud, update, b1.key).status
+		== SyncConfigApplyStatus::NeedsRecheck);
+	CHECK(device.local.status == File::Absent);
+	device.local = MakeSyncSettingsFile(File::Invalid, {}, true);
+	CHECK(Review(device, cloud).status == SyncConfigReviewStatus::UsingLastGood);
+	device.removeLocal();
+	CHECK(Review(device, cloud).status == SyncConfigReviewStatus::Ready);
+	CHECK(device.stateBytes() == stateBefore);
+
+	auto newcomer = Device('n');
+	newcomer.local = MakeSyncSettingsFile(File::Absent, {}, true);
+	const auto unbound = Review(newcomer, cloud);
+	CHECK(unbound.status == SyncConfigReviewStatus::UsingLastGood);
+	CHECK(!unbound.bound);
+	CHECK(Apply(newcomer, cloud, unbound, b1.key).status
+		== SyncConfigApplyStatus::NeedsReview);
+	CHECK(!newcomer.state);
+	newcomer.removeLocal();
+	CHECK(Review(newcomer, cloud).status == SyncConfigReviewStatus::Ready);
+}
+
 void TestFlowSendQueue() {
 	Begin("sync flow send queue");
 	using Status = SyncConfigPublishStatus;
@@ -2312,6 +2414,7 @@ void TestFlowDescribe() {
 		{ SyncConfigReviewStatus::AccountUnbound, Message::AccountUnbound },
 		{ SyncConfigReviewStatus::StoreError, Message::StoreError },
 		{ SyncConfigReviewStatus::InvalidSettings, Message::InvalidSettings },
+		{ SyncConfigReviewStatus::UsingLastGood, Message::UsingLastGood },
 	};
 	for (const auto &[status, message] : failures) {
 		failed.status = status;
@@ -2590,6 +2693,7 @@ int main() {
 	TestFlowPublisher();
 	TestFlowPublishableLineage();
 	TestFlowGateRefusesAdoption();
+	TestFlowLastGood();
 	TestFlowSendQueue();
 	TestFlowStamp();
 	TestFlowCommitCheck();

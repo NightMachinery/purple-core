@@ -75,7 +75,8 @@ bool SyncSettingsPublishable(
 		const SyncConfigWriter &writer) {
 	const auto &file = review.local;
 	if (file.status != SyncSettingsFileStatus::Present
-		|| file.text.isEmpty()) {
+		|| file.text.isEmpty()
+		|| file.usingLastGood) {
 		return false;
 	}
 	const auto space = FormatSyncSpaceId(QByteArray(16, '\0'));
@@ -150,6 +151,8 @@ SyncConfigDescription DescribeSyncConfigReview(
 		return Say(Message::StoreError);
 	case SyncConfigReviewStatus::InvalidSettings:
 		return Say(Message::InvalidSettings);
+	case SyncConfigReviewStatus::UsingLastGood:
+		return Say(Message::UsingLastGood);
 	}
 	const auto &plan = review.plan;
 	switch (plan.verdict) {

@@ -10,10 +10,13 @@ its sync state store, Telegram posting and the wording.
 Terms used below:
 
 - **Local file** is `SyncSettingsFile`: the status of `settings.toml`
-  (Present, Absent or Invalid), its bytes and its fingerprint. The client reads
-  the file (at most 256 KiB, a regular file, not a symlink) and builds the value
-  with `MakeSyncSettingsFile`, which gives an absent file the fingerprint of
-  empty bytes and turns an oversized Present into Invalid.
+  (Present, Absent or Invalid), its bytes, its fingerprint and
+  `usingLastGood`. The client reads the file (at most 256 KiB, a regular file,
+  not a symlink) and builds the value with `MakeSyncSettingsFile(status, text,
+  usingLastGood)`, which gives an absent file the fingerprint of empty bytes
+  and turns an oversized Present into Invalid. `usingLastGood` is true when the
+  settings in effect come from the client's last-good copy rather than from
+  `settings.toml` (see Running from the last-good copy).
 - **Review** is `ReviewSyncConfigInventory(inventory, state, staged, local)`:
   the pure evaluation of one inventory against this device's sync state (null
   when the device has not joined), its staged record and the local file.
@@ -24,14 +27,16 @@ Terms used below:
 
 ## Review
 
-The review refuses with InvalidSettings when the local file is Invalid, and
-with Incomplete or NeedsReview when the inventory is not complete, needs
-review, has unreadable candidates or colliding message ids, or selects a space
-that cannot be published to. The client adds AccountUnavailable,
-AccountUnbound and StoreError from its own checks; they share the status enum
-so the describe step covers them. A review made with a state carries that
-state's space and config data whatever its status, so a refused review still
-shows whether this device has a post waiting (see Describe).
+The review refuses with UsingLastGood when the local file has `usingLastGood`
+set, before any other check, bound or not. It refuses with InvalidSettings
+when the local file is Invalid, and with Incomplete or NeedsReview when the
+inventory is not complete, needs review, has unreadable candidates or
+colliding message ids, or selects a space that cannot be published to. The
+client adds AccountUnavailable, AccountUnbound and StoreError from its own
+checks; they share the status enum so the describe step covers them. A review
+made with a state carries that state's space and config data whatever its
+status, so a refused review still shows whether this device has a post waiting
+(see Describe).
 
 Without a state the review takes the selected space. With no selected space
 the verdict is Empty; otherwise the heads of every install in that space are
@@ -134,7 +139,9 @@ can report it.
   exhausted sequence, a clock at or before the epoch or a publish planner that
   does not reserve; the own reconcile's Incomplete, CloneDetected or
   NeedsReview; AlreadySynced; InvalidSettings for an absent, empty, invalid or
-  oversized (over 256 KiB as a record) local file.
+  oversized (over 256 KiB as a record) local file, or one with `usingLastGood`
+  set. A pending-only request still finishes with `usingLastGood` set, because
+  it sends bytes staged earlier and reads nothing from the file.
 - ConfirmFound with a message id and bytes when the staged record is already in
   Saved Messages; the client confirms it without posting.
 - Stage with the canonical record and the next config data; the client stages
@@ -175,13 +182,14 @@ between calls. Two substitutions are equivalent and tested:
 
 `DescribeSyncConfigReview(review, localPublishable)` returns a message, an
 action, device names, a record time and a count of other devices. Every review
-failure status has its own message; NeedsReview with a pending key on a bound
-device is NeedsReviewWithPending. A Ready review maps its verdict: Invalid to
+failure status has its own message, with no action (UsingLastGood gives the
+UsingLastGood message); NeedsReview with a pending key on a bound device is
+NeedsReviewWithPending. A Ready review maps its verdict: Invalid to
 InvalidRecords; Pending to Pending with Finish sending; Choose and Conflict to
 ChooseBound, ChooseUnbound, ConflictConcurrent, ConflictSplitBound or
 ConflictSplitUnbound (`SyncConfigChooseMessage`) with Choose and the offered
-devices; UpdateReady to UpdateReady with Review update, its device and time, or
-UpdateMissing when the record is gone; Adopt to AdoptBound, or AdoptUnbound
+devices; UpdateReady to UpdateReady with Review update, its device and time,
+or UpdateMissing when the record is gone; Adopt to AdoptBound, or AdoptUnbound
 with Join, with the devices already matching; Empty and LocalChanges to
 NotPublishableAbsent or NotPublishableInvalid when the local file cannot be
 published, else EmptyBound or EmptyUnbound with Publish, and
@@ -189,12 +197,12 @@ LocalChangesEdited (the file differs from the base) or LocalChangesOwnStale
 with Publish changes; UpToDate to UpToDateAlone or UpToDateWith.
 
 `localPublishable` is `SyncSettingsPublishable(review, device, writer)`: the
-review's local file is Present and not empty, and the record that keeping it
-would post is valid and at most 256 KiB. That record is built the way the post
-builds it: with this device's id and writer, with the parents
-`PlanConfigChoice(review.state, review.plan, std::nullopt)` publishes with
-(none when that choice does not publish), and with the largest sequence and
-time a record can carry. The parents matter: two of them and a full 64-key
+review's local file is Present, not empty and without `usingLastGood`, and the
+record that keeping it would post is valid and at most 256 KiB. That record is
+built the way the post builds it: with this device's id and writer, with the
+parents `PlanConfigChoice(review.state, review.plan, std::nullopt)` publishes
+with (none when that choice does not publish), and with the largest sequence
+and time a record can carry. The parents matter: two of them and a full 64-key
 lineage add about 6 KiB, so a file near the limit can fit on its own and still
 be too large to post.
 
@@ -214,6 +222,46 @@ WrittenStateNotSaved, WrittenNotReadBack or NothingDone, carrying what the
 wording needs. `SyncConfigUndoFinished(status)` says whether Undo should be
 withdrawn after a restore: yes once it restored, found nothing to do or can
 never succeed, no after a settings, History or write failure.
+
+## Running from the last-good copy
+
+Both clients keep a copy of the last `settings.toml` that loaded
+(`settings.toml.good`) and run from it when the file is missing, cannot be
+read or does not parse. A sync apply in that state would destroy the settings
+the device is running: it writes `settings.toml`, History keeps only the
+broken or missing file, and the reload that follows parses the new file and
+overwrites the last-good copy with it. Undo would then bring back the broken
+file and report the old settings as restored while the device runs the synced
+ones. So sync changes nothing while the client runs from the copy. The person
+fixes `settings.toml` or restores a version of it, and the next Check works as
+usual.
+
+The client contract:
+
+- Pass `usingLastGood = true` to `MakeSyncSettingsFile` exactly when the
+  settings in effect came from the last-good copy (desktop
+  `UsingLastGoodSettings()`, Android `PurpleGate.usedLastGood()`), in every
+  local file it passes to the core: reviews, the fresh reviews of an apply,
+  and posts.
+- Show the UsingLastGood message. It says that `settings.toml` is missing or
+  does not load, that this device is running its last working copy, and that
+  sync changes nothing until `settings.toml` is fixed or restored. It has no
+  action.
+
+The core does the rest. The review refuses with UsingLastGood, so
+`SyncConfigChoices` offers nothing and `CheckSyncConfigApplyChoice` returns
+NeedsReview. An apply of a review shown before the client fell back gets
+NeedsRecheck, because the fresh review's status is part of the stamp.
+`SyncSettingsPublishable` is false, and `PlanSyncConfigPost` finishes a
+new-content request with InvalidSettings. A post already staged can still be
+finished, since that writes nothing to the file.
+
+History restore and Undo are not sync; the core does not plan them, and they
+stay available because restoring a version is one way out of this state. A
+restore while the client runs from the last-good copy replaces that copy too
+(the missing or broken file is kept in History as usual). The person chose
+the restored version, so nothing changes without their say, but the copy they
+were running is not kept.
 
 ## Tests
 
@@ -241,6 +289,9 @@ confirm the suite fails. Each of these must fail it:
   sequence and time;
 - set a bound review's state only after the inventory refusals, which loses
   NeedsReviewWithPending;
+- drop `usingLastGood` from `MakeSyncSettingsFile` or `SameSyncSettingsFile`,
+  from the review refusal, from the post refusal or from
+  `SyncSettingsPublishable`, or describe UsingLastGood as InvalidSettings;
 - in the planner: turn two `Ahead` contents beside a `Same` head back into an
   update, leave out any of the heads a choice lists as seen (the `Same` heads
   of an update, or the `Stale` heads of an update, an adoption or a pick), keep

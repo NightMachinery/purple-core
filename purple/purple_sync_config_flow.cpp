@@ -156,8 +156,10 @@ private:
 
 SyncSettingsFile MakeSyncSettingsFile(
 		SyncSettingsFileStatus status,
-		const QByteArray &text) {
+		const QByteArray &text,
+		bool usingLastGood) {
 	auto result = SyncSettingsFile();
+	result.usingLastGood = usingLastGood;
 	switch (status) {
 	case SyncSettingsFileStatus::Absent:
 		result.status = SyncSettingsFileStatus::Absent;
@@ -182,7 +184,8 @@ bool SameSyncSettingsFile(
 	return a.status == b.status
 		&& a.status != SyncSettingsFileStatus::Invalid
 		&& a.fingerprint == b.fingerprint
-		&& a.text == b.text;
+		&& a.text == b.text
+		&& a.usingLastGood == b.usingLastGood;
 }
 
 bool SyncSettingsTextWritable(const QByteArray &bytes) {
@@ -398,7 +401,11 @@ SyncConfigReview ReviewSyncConfigInventory(
 		result.space = state->space;
 		result.state = SyncConfigStateOf(*state);
 	}
-	if (local.status == SyncSettingsFileStatus::Invalid) {
+	if (local.usingLastGood) {
+		return Refuse(
+			std::move(result),
+			SyncConfigReviewStatus::UsingLastGood);
+	} else if (local.status == SyncSettingsFileStatus::Invalid) {
 		return Refuse(
 			std::move(result),
 			SyncConfigReviewStatus::InvalidSettings);
@@ -827,7 +834,8 @@ SyncConfigPostPlan PlanSyncConfigPost(
 			: PlanSyncConfigStagedPost(state, bindingToken, own, stagedRecord);
 	}
 	if (local.status != SyncSettingsFileStatus::Present
-		|| local.text.isEmpty()) {
+		|| local.text.isEmpty()
+		|| local.usingLastGood) {
 		return FinishPost(SyncConfigPublishStatus::InvalidSettings);
 	}
 	const auto gate = PlanSyncConfigPublishGate(

@@ -84,6 +84,7 @@ enum class SyncConfigMessage {
 	LocalChangesOwnStale,
 	UpToDateAlone,
 	UpToDateWith,
+	UsingLastGood,
 };
 
 struct SyncConfigDescription {

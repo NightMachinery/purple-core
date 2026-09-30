@@ -33,11 +33,13 @@ struct SyncSettingsFile {
 	SyncSettingsFileStatus status = SyncSettingsFileStatus::Invalid;
 	QByteArray text;
 	QString fingerprint;
+	bool usingLastGood = false;
 };
 
 [[nodiscard]] SyncSettingsFile MakeSyncSettingsFile(
 	SyncSettingsFileStatus status,
-	const QByteArray &text = QByteArray());
+	const QByteArray &text = QByteArray(),
+	bool usingLastGood = false);
 [[nodiscard]] bool SameSyncSettingsFile(
 	const SyncSettingsFile &a,
 	const SyncSettingsFile &b);
@@ -79,6 +81,7 @@ enum class SyncConfigReviewStatus {
 	AccountUnbound,
 	StoreError,
 	InvalidSettings,
+	UsingLastGood,
 };
 
 struct SyncConfigReview {
