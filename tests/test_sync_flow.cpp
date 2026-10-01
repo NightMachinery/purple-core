@@ -28,6 +28,7 @@ option) any later version.
 #include "purple/purple_sync_local_state.h"
 
 #include <QtCore/QJsonArray>
+#include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 
 #include <cstdio>
@@ -1990,11 +1991,54 @@ void TestFlowLastGood() {
 	const auto queued = Publish(device, cloud, request, PostMode::Fail);
 	CHECK(queued.status == Status::OutcomeUnknown);
 	device.local = running;
-	const auto pausedPending = Review(device, cloud);
-	CHECK(pausedPending.status == SyncConfigReviewStatus::UsingLastGood);
-	CHECK(MessageOf(pausedPending) == SyncConfigMessage::UsingLastGood);
+	const auto stillPending = Review(device, cloud);
+	CHECK(stillPending.status == SyncConfigReviewStatus::UsingLastGood);
+	CHECK(stillPending.plan.verdict == ConfigSyncVerdict::Pending);
+	CHECK(MessageOf(stillPending)
+		== SyncConfigMessage::UsingLastGoodWithPending);
+	CHECK(ActionOf(stillPending) == SyncConfigAction::FinishSending);
+	CHECK(SyncConfigChoices(stillPending, true).empty());
+	CHECK(Apply(device, cloud, stillPending, std::nullopt).status
+		== SyncConfigApplyStatus::NeedsReview);
+	device.local = MakeSyncSettingsFile(File::Absent, {}, true);
+	CHECK(MessageOf(Review(device, cloud))
+		== SyncConfigMessage::UsingLastGoodWithPending);
+	device.local = MakeSyncSettingsFile(File::Invalid, {}, true);
+	CHECK(MessageOf(Review(device, cloud)) == SyncConfigMessage::UsingLastGood);
+	device.local = running;
+
+	auto opaque = cloud;
+	{
+		auto z = MakeRemote('z', u"Linux"_q);
+		auto document = ParseSyncEnvelope(
+			BuildRemote(z, space, TB, {})).envelope.document;
+		document.insert(u"encoding"_q, u"zstd"_q);
+		const auto bytes = QJsonDocument(document).toJson(
+			QJsonDocument::Compact);
+		CHECK(ClassifySyncCandidate(1, bytes).status
+			== SyncCandidateStatus::UnsupportedEncoding);
+		opaque.add(bytes);
+	}
+	auto working = device;
+	working.setLocal(T1);
+	CHECK(MessageOf(Review(working, opaque))
+		== SyncConfigMessage::NeedsReviewWithPending);
+	CHECK(MessageOf(Review(device, opaque)) == SyncConfigMessage::UsingLastGood);
+	CHECK(ActionOf(Review(device, opaque)) == SyncConfigAction::None);
+	auto partial = cloud;
+	partial.scanComplete = false;
+	CHECK(MessageOf(Review(device, partial)) == SyncConfigMessage::UsingLastGood);
+
+	const auto beside = Publish(device, cloud, LocalRequest(device, cloud));
+	CHECK(beside.status == Status::NeedsReview && beside.posts == 0);
 	const auto finished = Publish(device, cloud, { .pendingOnly = true });
 	CHECK(finished.status == Status::Confirmed && finished.posts == 1);
+	const auto sent = Review(device, cloud);
+	CHECK(sent.status == SyncConfigReviewStatus::UsingLastGood);
+	CHECK(MessageOf(sent) == SyncConfigMessage::UsingLastGood);
+	CHECK(ActionOf(sent) == SyncConfigAction::None);
+	const auto fresh = Publish(device, cloud, LocalRequest(device, cloud));
+	CHECK(fresh.status == Status::InvalidSettings && fresh.posts == 0);
 	device.setLocal(T1);
 	CHECK(Review(device, cloud).plan.verdict == ConfigSyncVerdict::UpToDate);
 
@@ -2432,6 +2476,15 @@ void TestFlowDescribe() {
 	failed.status = SyncConfigReviewStatus::Incomplete;
 	CHECK(DescribeSyncConfigReview(failed, true).message
 		== Message::Incomplete);
+	failed.status = SyncConfigReviewStatus::UsingLastGood;
+	CHECK(DescribeSyncConfigReview(failed, true).message
+		== Message::UsingLastGood);
+	CHECK(DescribeSyncConfigReview(failed, true).action == Action::None);
+	failed.plan.verdict = ConfigSyncVerdict::Pending;
+	CHECK(DescribeSyncConfigReview(failed, true).message
+		== Message::UsingLastGoodWithPending);
+	CHECK(DescribeSyncConfigReview(failed, true).action
+		== Action::FinishSending);
 
 	auto crafted = SyncConfigReview{ .status = SyncConfigReviewStatus::Ready };
 	CHECK(DescribeSyncConfigReview(crafted, true).message

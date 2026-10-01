@@ -402,6 +402,17 @@ SyncConfigReview ReviewSyncConfigInventory(
 		result.state = SyncConfigStateOf(*state);
 	}
 	if (local.usingLastGood) {
+		auto running = local;
+		running.usingLastGood = false;
+		const auto usual = ReviewSyncConfigInventory(
+			inventory,
+			state,
+			stagedRecord,
+			running);
+		if (usual.status == SyncConfigReviewStatus::Ready
+			&& usual.plan.verdict == ConfigSyncVerdict::Pending) {
+			result.plan.verdict = ConfigSyncVerdict::Pending;
+		}
 		return Refuse(
 			std::move(result),
 			SyncConfigReviewStatus::UsingLastGood);

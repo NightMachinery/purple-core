@@ -28,7 +28,10 @@ Terms used below:
 ## Review
 
 The review refuses with UsingLastGood when the local file has `usingLastGood`
-set, before any other check, bound or not. It refuses with InvalidSettings
+set, before any other check, bound or not. Such a review keeps the Pending
+verdict when the same review with `usingLastGood` cleared would be Ready and
+Pending, so a post staged before the fallback can still be finished (see
+Running from the last-good copy). It refuses with InvalidSettings
 when the local file is Invalid, and with Incomplete or NeedsReview when the
 inventory is not complete, needs review, has unreadable candidates or
 colliding message ids, or selects a space that cannot be published to. The
@@ -182,8 +185,9 @@ between calls. Two substitutions are equivalent and tested:
 
 `DescribeSyncConfigReview(review, localPublishable)` returns a message, an
 action, device names, a record time and a count of other devices. Every review
-failure status has its own message, with no action (UsingLastGood gives the
-UsingLastGood message); NeedsReview with a pending key on a bound device is
+failure status has its own message, with no action, with two exceptions: a
+UsingLastGood review with the Pending verdict is UsingLastGoodWithPending with
+Finish sending, and NeedsReview with a pending key on a bound device is
 NeedsReviewWithPending. A Ready review maps its verdict: Invalid to
 InvalidRecords; Pending to Pending with Finish sending; Choose and Conflict to
 ChooseBound, ChooseUnbound, ConflictConcurrent, ConflictSplitBound or
@@ -232,8 +236,9 @@ the device is running: it writes `settings.toml`, History keeps only the
 broken or missing file, and the reload that follows parses the new file and
 overwrites the last-good copy with it. Undo would then bring back the broken
 file and report the old settings as restored while the device runs the synced
-ones. So sync changes nothing while the client runs from the copy. The person
-fixes `settings.toml` or restores a version of it, and the next Check works as
+ones. So sync changes nothing while the client runs from the copy, apart from
+finishing a post this device staged before it fell back. The person fixes
+`settings.toml` or restores a version of it, and the next Check works as
 usual.
 
 The client contract:
@@ -247,14 +252,28 @@ The client contract:
   does not load, that this device is running its last working copy, and that
   sync changes nothing until `settings.toml` is fixed or restored. It has no
   action.
+- Show the UsingLastGoodWithPending message with its Finish sending action.
+  It says what UsingLastGood says and adds that the settings post this device
+  staged earlier can still be sent. Finish sending is the usual one: a fresh
+  Check, then a pending-only post if that Check still offers it.
 
 The core does the rest. The review refuses with UsingLastGood, so
 `SyncConfigChoices` offers nothing and `CheckSyncConfigApplyChoice` returns
 NeedsReview. An apply of a review shown before the client fell back gets
 NeedsRecheck, because the fresh review's status is part of the stamp.
 `SyncSettingsPublishable` is false, and `PlanSyncConfigPost` finishes a
-new-content request with InvalidSettings. A post already staged can still be
-finished, since that writes nothing to the file.
+new-content request with InvalidSettings.
+
+A post already staged can still be finished, because sending it writes
+nothing to `settings.toml` and reads nothing from it. The review offers that
+exactly when a device with a working file would be offered it: it runs the
+same review with `usingLastGood` cleared and keeps the Pending verdict only if
+that review is Ready and Pending. So a staged post that a working device would
+keep paused (Incomplete, NeedsReviewWithPending, or InvalidSettings for an
+Invalid file) gets the plain UsingLastGood message here. Keying the message
+on the pending key alone would not do: the post planner reconciles this
+device's own records but does not extract the other devices' heads, so it
+would finish a post beside an unreadable head that the review keeps paused.
 
 History restore and Undo are not sync; the core does not plan them, and they
 stay available because restoring a version is one way out of this state. A
@@ -292,6 +311,9 @@ confirm the suite fails. Each of these must fail it:
 - drop `usingLastGood` from `MakeSyncSettingsFile` or `SameSyncSettingsFile`,
   from the review refusal, from the post refusal or from
   `SyncSettingsPublishable`, or describe UsingLastGood as InvalidSettings;
+- drop the Pending verdict from a UsingLastGood review, describe a
+  UsingLastGood review by its pending key instead of that verdict, or describe
+  UsingLastGoodWithPending without Finish sending;
 - in the planner: turn two `Ahead` contents beside a `Same` head back into an
   update, leave out any of the heads a choice lists as seen (the `Same` heads
   of an update, or the `Stale` heads of an update, an adoption or a pick), keep

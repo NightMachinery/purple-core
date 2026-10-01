@@ -85,6 +85,7 @@ enum class SyncConfigMessage {
 	UpToDateAlone,
 	UpToDateWith,
 	UsingLastGood,
+	UsingLastGoodWithPending,
 };
 
 struct SyncConfigDescription {

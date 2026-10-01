@@ -137,9 +137,9 @@ rules about data are far easier to prove outside a running app than inside one.
   stale choice, the apply planner and its completion (adoption and the next
   publish proposal), the check before committing new config data, and the
   publish request gate and post planners that decide whether to finish, confirm
-  a found post, stage or post. Sync changes nothing while a client runs from
-  its last-good copy of `settings.toml`. Clients keep file I/O, History, their
-  state store and Telegram posting. See
+  a found post, stage or post. While a client runs from its last-good copy of
+  `settings.toml`, sync changes nothing except finishing a post staged before.
+  Clients keep file I/O, History, their state store and Telegram posting. See
   [`docs/sync-config-flow.md`](docs/sync-config-flow.md).
 - `purple/purple_sync_config_describe.{h,cpp}` - which message, action and
   devices a review or failed apply deserves, the choices a dialog offers,

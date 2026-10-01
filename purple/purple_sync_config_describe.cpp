@@ -152,7 +152,9 @@ SyncConfigDescription DescribeSyncConfigReview(
 	case SyncConfigReviewStatus::InvalidSettings:
 		return Say(Message::InvalidSettings);
 	case SyncConfigReviewStatus::UsingLastGood:
-		return Say(Message::UsingLastGood);
+		return (review.plan.verdict == ConfigSyncVerdict::Pending)
+			? Say(Message::UsingLastGoodWithPending, Action::FinishSending)
+			: Say(Message::UsingLastGood);
 	}
 	const auto &plan = review.plan;
 	switch (plan.verdict) {
