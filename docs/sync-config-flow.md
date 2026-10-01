@@ -16,7 +16,8 @@ Terms used below:
   usingLastGood)`, which gives an absent file the fingerprint of empty bytes
   and turns an oversized Present into Invalid. `usingLastGood` is true when the
   settings in effect come from the client's last-good copy rather than from
-  `settings.toml` (see Running from the last-good copy).
+  `settings.toml`, or when the bytes just read would make the client fall back
+  to it (see Running from the last-good copy).
 - **Review** is `ReviewSyncConfigInventory(inventory, state, staged, local)`:
   the pure evaluation of one inventory against this device's sync state (null
   when the device has not joined), its staged record and the local file.
@@ -243,11 +244,17 @@ usual.
 
 The client contract:
 
-- Pass `usingLastGood = true` to `MakeSyncSettingsFile` exactly when the
-  settings in effect came from the last-good copy (desktop
-  `UsingLastGoodSettings()`, Android `PurpleGate.usedLastGood()`), in every
-  local file it passes to the core: reviews, the fresh reviews of an apply,
-  and posts.
+- Pass `usingLastGood = true` to `MakeSyncSettingsFile` when the settings in
+  effect came from the last-good copy (desktop `UsingLastGoodSettings()`,
+  Android `PurpleGate.usedLastGood()`), and also when the file as just read is
+  missing or does not parse while the last-good copy parses, in every local
+  file it passes to the core: reviews, the fresh reviews of an apply, and
+  posts. The second condition matters because a client notices a broken file
+  only some time after it changes (a file watcher with a delay, or no event at
+  all for an in-place write). Without it, a read in that gap passes broken or
+  missing bytes as an ordinary Invalid or Absent file, and an apply can then
+  overwrite the last-good copy. Desktop decides this in `ReadSyncSettingsFile`,
+  Android in `PurpleSyncSettingsFile.read()`.
 - Show the UsingLastGood message. It says that `settings.toml` is missing or
   does not load, that this device is running its last working copy, and that
   sync changes nothing until `settings.toml` is fixed or restored. It has no
