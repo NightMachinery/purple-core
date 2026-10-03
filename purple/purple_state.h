@@ -143,6 +143,11 @@ struct ResolvedCache {
 	// list it defines; the snapshot answers only for names it has dropped.
 	// See LookupList() in purple_engine.h.
 	//
+	// state.toml therefore grows with the lists named here, about 16 bytes a
+	// member, so no reader may cap it below its cap on settings.toml: a read
+	// refused for size parses as Normal, and the next write puts that over
+	// the running preset and this cache.
+	//
 	// Empty in a file written by an older build, which restores exactly as it
 	// did before this existed: names only.
 	std::vector<List> listDefs;

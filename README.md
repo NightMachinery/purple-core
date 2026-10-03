@@ -286,7 +286,11 @@ guessing defaults.
   membership-only edit moves the snapshot but not the resolution.
   `SnapshotListsInUse` names the lists currently served from the snapshot, so
   the preset picker can say so. A `state.toml` written before the snapshot
-  existed still loads and restores names only, as before.
+  existed still loads and restores names only, as before. The snapshot makes
+  `state.toml` grow with the named lists, about 16 bytes a member, so a client
+  must not cap its read of `state.toml` below its cap on `settings.toml`: a
+  read refused for size parses as an empty state, which is Normal, and the
+  next write would put Normal over the running preset and its cache.
 - `purple/purple_screentime.{h,cpp}` - `screentime.log` and everything derived
   from it: the line format and its tolerant parser, session derivation, active
   time, the buckets, the heat map, the period comparison, the budget ledger and
