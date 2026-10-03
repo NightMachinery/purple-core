@@ -22,8 +22,14 @@ namespace {
 	return QString::fromUtf8(value.data(), int(value.size()));
 }
 
-// Preset and folder names come from settings.toml, which the user writes, so
-// they can hold quotes and backslashes even though they rarely will.
+// Preset, folder and list names come from settings.toml, which the user
+// writes, so they can hold quotes and backslashes even though they rarely
+// will.
+//
+// Every other control character is escaped too, because TOML refuses one
+// written raw in a basic string, and a state.toml that does not parse comes
+// back as an empty state: Normal, with every hidden chat back in view. The
+// user's file can only hold one escaped, but it can hold one.
 [[nodiscard]] QString Quoted(const QString &value) {
 	auto escaped = QString();
 	escaped.reserve(value.size() + 2);
@@ -37,6 +43,8 @@ namespace {
 			escaped += u"\\r"_q;
 		} else if (ch == '\t') {
 			escaped += u"\\t"_q;
+		} else if (ch.unicode() < 0x20 || ch.unicode() == 0x7f) {
+			escaped += u"\\u%1"_q.arg(int(ch.unicode()), 4, 16, QChar('0'));
 		} else {
 			escaped += ch;
 		}

@@ -3735,6 +3735,16 @@ void TestStateQuoting() {
 	CHECK_EQ(back.activePreset, state.activePreset);
 	CHECK(back.resolvedCache.valid());
 	CHECK_EQ(back.resolvedCache.lists[0].list, u"tab\there"_q);
+
+	// Including a control character, which the file can only have written
+	// escaped. Written back raw it would make state.toml unreadable, and an
+	// unreadable state.toml reads as Normal: every hidden chat back in view.
+	auto control = Purple::State();
+	control.activePreset = u"bell \x07 and \x1f delete \x7f"_q;
+	const auto controlBack = Purple::ParseState(
+		Purple::SerializeState(control),
+		u"state.toml"_q);
+	CHECK_EQ(controlBack.activePreset, control.activePreset);
 }
 
 // The two fingerprints, and the rule they exist for. Everything about the
