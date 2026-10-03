@@ -75,17 +75,27 @@ struct ResolvedList {
 	// Unset here too, and for the same reason: it is what leaves this entry's
 	// people to the preset's own stories policy.
 	std::optional<StoryMode> stories;
+
+	friend bool operator==(const ResolvedList &, const ResolvedList &)
+		= default;
 };
 
 struct ResolvedCacheView {
 	QString name;
 	std::vector<PeerIdValue> pinned;
 	std::vector<ResolvedList> lists;
+
+	friend bool operator==(
+		const ResolvedCacheView &,
+		const ResolvedCacheView &) = default;
 };
 
 // The last resolution that worked. When a reload leaves the active preset
 // unresolvable - deleted or renamed mid-edit - the engine keeps running on this
 // rather than falling back to showing everything. See spec 8.5.
+//
+// Comparable so a client that rewrites it after every settings change can tell
+// a cache that moved from one that did not, and skip the write.
 struct ResolvedCache {
 	QString preset;
 
@@ -121,9 +131,28 @@ struct ResolvedCache {
 	// tabs away along with everything else it cannot read.
 	std::vector<ResolvedCacheView> views;
 
+	// The definitions - title, members, kinds - of every list `lists' and the
+	// views name, as they were when this was written: the list snapshot.
+	//
+	// The names above are not enough on their own. A settings.toml that parses
+	// but no longer defines the running preset - an import, a sync apply, a
+	// History restore, a hand edit that dropped the preset with its lists -
+	// also leaves those names pointing at nothing, and a name that claims
+	// nothing hides and silences every chat it used to let through. So the
+	// cache keeps what the names meant. The live file still wins for every
+	// list it defines; the snapshot answers only for names it has dropped.
+	// See LookupList() in purple_engine.h.
+	//
+	// Empty in a file written by an older build, which restores exactly as it
+	// did before this existed: names only.
+	std::vector<List> listDefs;
+
 	[[nodiscard]] bool valid() const {
 		return !preset.isEmpty();
 	}
+
+	friend bool operator==(const ResolvedCache &, const ResolvedCache &)
+		= default;
 };
 
 // A decision about one chat that outranks the preset, until a deadline.

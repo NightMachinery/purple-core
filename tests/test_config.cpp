@@ -82,6 +82,11 @@ template <typename T>
 	}
 }
 
+[[nodiscard]] QString Describe(const std::vector<QString> &value) {
+	return u"["_q + QStringList(value.begin(), value.end()).join(u", "_q)
+		+ u"]"_q;
+}
+
 [[nodiscard]] QString Describe(const std::vector<Purple::PeerIdValue> &value) {
 	auto parts = QStringList();
 	for (const auto id : value) {
@@ -3978,12 +3983,13 @@ list_order = []
 	CHECK_EQ(Purple::DefaultViewName(u"9to5"_q), u"9to5"_q);
 
 	// The cache carries it, so a broken reload does not also rename the tab.
-	const auto cached = Purple::FromCache(Purple::ToCache(*work));
+	const auto cached = Purple::FromCache(
+		Purple::ToCache(*work, named.settings));
 	CHECK(cached.has_value() && cached->viewName == u"Deep Work"_q);
 
 	// A cache written by a build that did not know the key still names the
 	// tab something, rather than leaving it blank.
-	auto older = Purple::ToCache(*work);
+	auto older = Purple::ToCache(*work, named.settings);
 	older.viewName = QString();
 	const auto restored = Purple::FromCache(older);
 	CHECK(restored.has_value() && restored->viewName == u"Work"_q);
@@ -4179,16 +4185,19 @@ list_order = [
 	// a DM is on the tab. A kind nothing names is off it.
 	CHECK(!Purple::ViewHolds(
 		parsed.settings,
+		*work,
 		view,
 		10,
 		Purple::ChatKind::Private));
 	CHECK(Purple::ViewHolds(
 		parsed.settings,
+		*work,
 		view,
 		30,
 		Purple::ChatKind::Private));
 	CHECK(!Purple::ViewHolds(
 		parsed.settings,
+		*work,
 		view,
 		30,
 		Purple::ChatKind::Bot));
@@ -4204,7 +4213,8 @@ list_order = [
 	CHECK(visible.notify);
 
 	// And the cache carries the whole thing, pins included.
-	const auto cached = Purple::FromCache(Purple::ToCache(*work));
+	const auto cached = Purple::FromCache(
+		Purple::ToCache(*work, parsed.settings));
 	CHECK(cached.has_value());
 	CHECK_EQ(int(cached->views.size()), 1);
 	CHECK_EQ(cached->views[0].name, u"Focus"_q);
@@ -4212,6 +4222,7 @@ list_order = [
 		(std::vector<Purple::PeerIdValue>{ 20, 10 }));
 	CHECK(!Purple::ViewHolds(
 		parsed.settings,
+		*cached,
 		cached->views[0],
 		10,
 		Purple::ChatKind::Private));
@@ -4322,7 +4333,8 @@ void TestPeek() {
 
 	// It never reaches the cache, so a resolution restored from state.toml
 	// cannot come back still revealed with nothing left to end it.
-	const auto restored = Purple::FromCache(Purple::ToCache(work));
+	const auto restored = Purple::FromCache(
+		Purple::ToCache(work, parsed.settings));
 	CHECK(restored.has_value());
 	CHECK(!restored->peeking);
 	CHECK_EQ(Mode(restored->list(u"channels"_q)->show),
@@ -5035,7 +5047,8 @@ list_order = [ { list = "os" } ]
 	auto state = Purple::State();
 	state.activePreset = u"work"_q;
 	state.resolvedCache = Purple::ToCache(
-		*Purple::Resolve(off.settings, u"work"_q));
+		*Purple::Resolve(off.settings, u"work"_q),
+		off.settings);
 	const auto written = Purple::SerializeState(state);
 	CHECK(written.contains(u"hide_archive = false"_q));
 	const auto read = Purple::ParseState(written, u"state.toml"_q);
@@ -5133,7 +5146,8 @@ list_order = [ { list = "os" } ]
 	auto state = Purple::State();
 	state.activePreset = u"work"_q;
 	state.resolvedCache = Purple::ToCache(
-		*Purple::Resolve(off.settings, u"work"_q));
+		*Purple::Resolve(off.settings, u"work"_q),
+		off.settings);
 	const auto written = Purple::SerializeState(state);
 	CHECK(written.contains(u"hide_add_story = false"_q));
 	const auto read = Purple::ParseState(written, u"state.toml"_q);
@@ -5380,7 +5394,8 @@ folders = [
 	// Both survive the state.toml round trip. The policy has to, or a broken
 	// settings.toml would silently restore the strip to Follow; the entry mode
 	// has to for the same reason `show' does.
-	const auto cached = Purple::FromCache(Purple::ToCache(*resolved));
+	const auto cached = Purple::FromCache(
+		Purple::ToCache(*resolved, result.settings));
 	CHECK(cached.has_value());
 	CHECK_EQ(int(cached->stories), int(Purple::StoryPolicy::FollowUnseen));
 	CHECK_EQ(
@@ -5396,7 +5411,8 @@ folders = [
 	// switched on the moment the app fell back to its cached resolution.
 	auto withDisabled = *resolved;
 	withDisabled.folders[1].enabled = false;
-	const auto round = Purple::FromCache(Purple::ToCache(withDisabled));
+	const auto round = Purple::FromCache(
+		Purple::ToCache(withDisabled, result.settings));
 	CHECK(round.has_value());
 	CHECK(!Purple::FolderEnabled(round->folders[1]));
 	CHECK(Purple::FolderEnabled(round->folders[0]));
@@ -6884,7 +6900,7 @@ void TestResolvedCache() {
 
 	const auto parsed = Parse(Presets());
 	const auto work = Purple::Resolve(parsed.settings, u"work"_q);
-	const auto cache = Purple::ToCache(*work);
+	const auto cache = Purple::ToCache(*work, parsed.settings);
 	CHECK(cache.valid());
 	CHECK_EQ(cache.preset, u"work"_q);
 	CHECK_EQ(cache.lists.size(), work->lists.size());
@@ -6958,7 +6974,7 @@ void TestResolvedCache() {
 	auto withFolders = *work;
 	withFolders.folders = folders;
 	const auto cachedFolders = Purple::FromCache(
-		Purple::ToCache(withFolders));
+		Purple::ToCache(withFolders, parsed.settings));
 	CHECK(cachedFolders.has_value());
 	CHECK_EQ(cachedFolders->exemptFolders.size(), size_t(2));
 	CHECK_EQ(cachedFolders->exemptFolders.front().name, u"Family"_q);
@@ -6979,15 +6995,518 @@ void TestResolvedCache() {
 	// folder strip away along with everything else it cannot read.
 	auto everyFolder = *work;
 	everyFolder.folders = { { .name = Purple::AllFoldersName() } };
-	const auto cachedAll = Purple::FromCache(Purple::ToCache(everyFolder));
+	const auto cachedAll = Purple::FromCache(
+		Purple::ToCache(everyFolder, parsed.settings));
 	CHECK(cachedAll.has_value());
 	CHECK_EQ(int(cachedAll->folders.size()), 1);
 	CHECK(Purple::IsAllFolders(cachedAll->folders[0]));
 
 	// Normal caches nothing - there is no resolution to remember.
 	const auto normal = Purple::Resolve(parsed.settings, u"normal"_q);
-	CHECK(!Purple::ToCache(*normal).valid());
+	CHECK(!Purple::ToCache(*normal, parsed.settings).valid());
 	CHECK(!Purple::FromCache(Purple::ResolvedCache()).has_value());
+}
+
+// The file a reload replaces settings.toml with in the E4 shape: it parses, it
+// defines lists of its own, and it has neither the running preset nor any list
+// that preset names. An import from Saved Messages, a sync apply, a History
+// restore or a hand edit can all land exactly this.
+[[nodiscard]] QString DroppedPresetFile() {
+	return uR"(
+[lists.os]
+title = "OS"
+members = [ 1234567890 ]
+
+[lists.emergency]
+members = [ 111222333 ]
+
+[lists.private]
+kinds = ["private"]
+
+[lists.groups]
+kinds = ["groups"]
+
+[lists.channels]
+kinds = ["channels"]
+
+[lists.bots]
+kinds = ["bots"]
+)"_q;
+}
+
+// What a gate does with a reload: the resolution it would write to state.toml,
+// read back the way the next launch reads it.
+[[nodiscard]] Purple::ResolvedCache CacheThroughState(
+		const Purple::Resolved &resolved,
+		const Purple::Settings &settings) {
+	auto state = Purple::State();
+	state.activePreset = resolved.preset;
+	state.resolvedCache = Purple::ToCache(resolved, settings);
+	const auto text = Purple::SerializeState(state);
+	return Purple::ParseState(text, u"state.toml"_q).resolvedCache;
+}
+
+void TestCacheFallbackKeepsLists() {
+	Begin("cache fallback keeps lists");
+
+	// The baseline: one list holding every non-private kind, let through by
+	// the only preset. Private chats are what it hides.
+	const auto baseline = Parse(uR"(
+[lists.nonprivate]
+kinds = ["groups", "channels", "bots"]
+
+[presets.work]
+list_order = [ { list = "nonprivate", show_mode = "always", notify_p = true } ]
+)"_q);
+	CHECK(baseline.ok());
+	const auto work = Purple::Resolve(baseline.settings, u"work"_q);
+	CHECK(work.has_value());
+	CHECK(work->listSnapshot.empty());
+	CHECK(Purple::SnapshotListsInUse(baseline.settings, *work).empty());
+
+	const auto cache = CacheThroughState(*work, baseline.settings);
+	CHECK_EQ(cache.listDefs.size(), size_t(1));
+	CHECK_EQ(cache.listDefs.front().name, u"nonprivate"_q);
+	CHECK_EQ(cache.listDefs.front().kinds.size(), size_t(3));
+
+	// The cache read back is the cache written, field for field, so a client
+	// comparing what it would write against what it holds skips the write.
+	CHECK(cache == Purple::ToCache(*work, baseline.settings));
+
+	// The replacement parses and drops both the preset and its list, so the
+	// gate falls back to the cache.
+	const auto dropped = Parse(DroppedPresetFile());
+	CHECK(dropped.ok());
+	CHECK(!Purple::Resolve(dropped.settings, u"work"_q).has_value());
+	CHECK(!dropped.settings.list(u"nonprivate"_q));
+	const auto restored = Purple::FromCache(cache);
+	CHECK(restored.has_value());
+	CHECK_EQ(restored->listSnapshot.size(), size_t(1));
+
+	// What was shown stays shown and audible: before the snapshot, a group, a
+	// channel and a bot each fell through here to hidden and silenced, which
+	// with every private chat already hidden emptied the chat list.
+	const auto check = [&](
+			const Purple::Settings &settings,
+			const Purple::Resolved &resolved,
+			Purple::ChatKind kind) {
+		return Purple::Visible(settings, resolved, 500, kind);
+	};
+	for (const auto kind : {
+			Purple::ChatKind::Group,
+			Purple::ChatKind::Channel,
+			Purple::ChatKind::Bot }) {
+		const auto visible = check(dropped.settings, *restored, kind);
+		CHECK_EQ(Mode(visible.show), Mode(Purple::ShowMode::Always));
+		CHECK(visible.notify);
+	}
+
+	// And what was hidden stays hidden: the snapshot restores what the list
+	// meant, not more. The new file's own [lists.private] is not in the
+	// running order, so it claims nothing either.
+	const auto privateChat = check(
+		dropped.settings,
+		*restored,
+		Purple::ChatKind::Private);
+	CHECK_EQ(Mode(privateChat.show), Mode(Purple::ShowMode::Never));
+	CHECK(!privateChat.notify);
+
+	// The picker is told which lists are running from the snapshot.
+	CHECK_EQ(
+		Purple::SnapshotListsInUse(dropped.settings, *restored),
+		(std::vector<QString>{ u"nonprivate"_q }));
+	CHECK(Purple::LookupList(dropped.settings, *restored, u"nonprivate"_q));
+	CHECK(!Purple::LookupList(dropped.settings, *restored, u"nothing"_q));
+
+	// The equality the desktop gate decides with includes the snapshot. With
+	// it left out, the first fallback reload would compare equal to the
+	// resolution the old file produced, the gate would keep that one - which
+	// has no snapshot - and everything the dropped list let through would go.
+	auto withoutSnapshot = *restored;
+	withoutSnapshot.listSnapshot.clear();
+	CHECK(withoutSnapshot == *work);
+	CHECK(!(*restored == *work));
+	CHECK(!(*restored == withoutSnapshot));
+
+	// The snapshot carries forward. The next reload - an inert edit, a
+	// relaunch - writes the cache from the restored resolution against a file
+	// that still lacks the list, and the definitions must survive that.
+	const auto again = CacheThroughState(*restored, dropped.settings);
+	CHECK(again == cache);
+	const auto twice = Purple::FromCache(again);
+	CHECK(twice.has_value());
+	{
+		const auto visible = check(
+			dropped.settings,
+			*twice,
+			Purple::ChatKind::Group);
+		CHECK_EQ(Mode(visible.show), Mode(Purple::ShowMode::Always));
+		CHECK(visible.notify);
+	}
+
+	// A list the new file still defines answers from the file: membership
+	// comes from settings.toml whenever settings.toml has the list.
+	const auto narrowed = Parse(uR"(
+[lists.nonprivate]
+kinds = ["groups"]
+)"_q);
+	CHECK(narrowed.ok());
+	CHECK(!Purple::Resolve(narrowed.settings, u"work"_q).has_value());
+	CHECK_EQ(
+		Mode(check(
+			narrowed.settings,
+			*restored,
+			Purple::ChatKind::Group).show),
+		Mode(Purple::ShowMode::Always));
+	CHECK_EQ(
+		Mode(check(
+			narrowed.settings,
+			*restored,
+			Purple::ChatKind::Channel).show),
+		Mode(Purple::ShowMode::Never));
+	CHECK(Purple::SnapshotListsInUse(narrowed.settings, *restored).empty());
+
+	// And the next cache takes the live definition rather than keeping the
+	// old copy, so the file's version is what a later drop falls back to.
+	const auto relive = CacheThroughState(*restored, narrowed.settings);
+	CHECK_EQ(relive.listDefs.size(), size_t(1));
+	CHECK(relive.listDefs.front().kinds
+		== (std::vector<Purple::ChatKind>{ Purple::ChatKind::Group }));
+
+	// A cache written before the snapshot existed still loads, and behaves
+	// exactly as it always did: names only, so nothing the dropped list held
+	// gets through. This is the old state.toml from the E4 evidence.
+	const auto older = Purple::ParseState(uR"(
+active_preset = "work"
+
+[resolved_cache]
+preset = "work"
+view_name = "Work"
+hide_everywhere = false
+hide_archive = true
+stories = "follow"
+lists = [
+  { list = "nonprivate", show = "always", notify = true },
+]
+)"_q, u"state.toml"_q);
+	CHECK_EQ(older.activePreset, u"work"_q);
+	CHECK(older.resolvedCache.valid());
+	CHECK(older.resolvedCache.listDefs.empty());
+	const auto fromOlder = Purple::FromCache(older.resolvedCache);
+	CHECK(fromOlder.has_value());
+	CHECK(fromOlder->listSnapshot.empty());
+	CHECK_EQ(
+		Mode(check(
+			dropped.settings,
+			*fromOlder,
+			Purple::ChatKind::Group).show),
+		Mode(Purple::ShowMode::Never));
+	CHECK(Purple::SnapshotListsInUse(dropped.settings, *fromOlder).empty());
+
+	// Nothing defines the name, so writing it back adds no definition: there
+	// is nothing to snapshot, and a name that claims nothing claims nothing
+	// either way.
+	CHECK(Purple::ToCache(*fromOlder, dropped.settings).listDefs.empty());
+
+	// Normal has no lists and nothing to say to the picker.
+	const auto normal = Purple::Resolve(dropped.settings, u"normal"_q);
+	CHECK(Purple::SnapshotListsInUse(dropped.settings, *normal).empty());
+}
+
+void TestCacheSnapshotViewsAndMembers() {
+	Begin("cache snapshot views and members");
+
+	// Members rather than kinds this time, and a view: the predicates other
+	// than Visible() look lists up too, and every one of them has to reach the
+	// snapshot.
+	const auto baseline = Parse(uR"(
+[lists.team]
+title = "Team"
+members = [ 10, 20 ]
+
+[lists.people]
+kinds = ["private"]
+
+[lists.quiet]
+members = [ 40 ]
+
+[presets.work]
+list_order = [
+  { list = "team", show_mode = "always" },
+  { list = "quiet", show_mode = "never", notify_p = false },
+]
+
+[[presets.work.views]]
+name       = "Focus"
+list_order = [
+  { list = "team" },
+  { list = "people", show_mode = "always" },
+]
+)"_q);
+	CHECK(baseline.ok());
+	const auto work = Purple::Resolve(baseline.settings, u"work"_q);
+	CHECK(work.has_value());
+
+	// Every list the order or a view names is in the snapshot, each once, in
+	// order of first mention.
+	const auto cache = CacheThroughState(*work, baseline.settings);
+	auto names = std::vector<QString>();
+	for (const auto &list : cache.listDefs) {
+		names.push_back(list.name);
+	}
+	CHECK_EQ(names, (std::vector<QString>{
+		u"team"_q,
+		u"quiet"_q,
+		u"people"_q,
+	}));
+	CHECK_EQ(cache.listDefs.front().title, u"Team"_q);
+	CHECK_EQ(
+		cache.listDefs.front().members,
+		(std::vector<Purple::PeerIdValue>{ 10, 20 }));
+
+	const auto dropped = Parse(DroppedPresetFile());
+	const auto restored = Purple::FromCache(cache);
+	CHECK(restored.has_value());
+	CHECK_EQ(int(restored->views.size()), 1);
+	const auto &view = restored->views[0];
+
+	// The view still holds its members and its kind.
+	CHECK(Purple::ViewHolds(
+		dropped.settings,
+		*restored,
+		view,
+		10,
+		Purple::ChatKind::Group));
+	CHECK(Purple::ViewHolds(
+		dropped.settings,
+		*restored,
+		view,
+		77,
+		Purple::ChatKind::Private));
+	CHECK(!Purple::ViewHolds(
+		dropped.settings,
+		*restored,
+		view,
+		77,
+		Purple::ChatKind::Channel));
+
+	// The names written down by hand are still named outright, and one
+	// written down to be hidden still is not.
+	CHECK(Purple::NamedExplicitly(dropped.settings, *restored, 20));
+	CHECK(!Purple::NamedExplicitly(dropped.settings, *restored, 40));
+	CHECK(!Purple::NamedExplicitly(dropped.settings, *restored, 77));
+
+	// The decider is the list that held the chat, not the fall-through.
+	const auto decided = Purple::MatchList(
+		dropped.settings,
+		*restored,
+		20,
+		Purple::ChatKind::Private);
+	CHECK(decided != nullptr);
+	CHECK_EQ(decided ? decided->list : QString(), u"team"_q);
+	const auto hidden = Purple::Visible(
+		dropped.settings,
+		*restored,
+		40,
+		Purple::ChatKind::Private);
+	CHECK_EQ(Mode(hidden.show), Mode(Purple::ShowMode::Never));
+	CHECK(!hidden.notify);
+
+	// The view's list counts for the picker too, after the main order's.
+	CHECK_EQ(
+		Purple::SnapshotListsInUse(dropped.settings, *restored),
+		(std::vector<QString>{ u"team"_q, u"quiet"_q, u"people"_q }));
+
+	// The same file without its snapshot - the old behaviour - shows the view
+	// emptying, which is what the lookup through LookupList() prevents.
+	auto bare = *restored;
+	bare.listSnapshot.clear();
+	CHECK(!Purple::ViewHolds(
+		dropped.settings,
+		bare,
+		bare.views[0],
+		10,
+		Purple::ChatKind::Group));
+	CHECK(!Purple::NamedExplicitly(dropped.settings, bare, 20));
+}
+
+void TestCacheSnapshotFreshness() {
+	Begin("cache snapshot freshness");
+
+	// The desktop gate writes the cache only when the resolution changes, and
+	// adding a chat to a list does not change it: the resolution holds the
+	// names, the file holds the members. A snapshot that missed that edit
+	// would drop the new chat the day the file drops the list.
+	const auto before = Parse(uR"(
+[lists.team]
+members = [ 10 ]
+
+[presets.work]
+list_order = [ { list = "team", show_mode = "always" } ]
+)"_q);
+	const auto after = Parse(uR"(
+[lists.team]
+members = [ 10, 30 ]
+
+[presets.work]
+list_order = [ { list = "team", show_mode = "always" } ]
+)"_q);
+	CHECK(before.ok() && after.ok());
+	const auto first = Purple::Resolve(before.settings, u"work"_q);
+	const auto second = Purple::Resolve(after.settings, u"work"_q);
+	CHECK(first.has_value() && second.has_value());
+
+	// The membership edit leaves the resolution as it was, which is why the
+	// gate takes its early return...
+	CHECK(*first == *second);
+
+	// ...and moves the cache, which is how it can tell it still owes a write.
+	const auto stored = CacheThroughState(*first, before.settings);
+	const auto fresh = Purple::ToCache(*second, after.settings);
+	CHECK(!(fresh == stored));
+
+	// A settings change that moved nothing the cache holds - a comment, a list
+	// the preset does not name - owes nothing.
+	const auto unrelated = Parse(uR"(
+# a comment
+[lists.team]
+members = [ 10 ]
+
+[lists.other]
+members = [ 99 ]
+
+[presets.work]
+list_order = [ { list = "team", show_mode = "always" } ]
+)"_q);
+	CHECK(Purple::ToCache(*first, unrelated.settings) == stored);
+
+	// With the write made, the file dropping the list keeps the new chat.
+	const auto dropped = Parse(DroppedPresetFile());
+	const auto written = Purple::State{
+		.activePreset = u"work"_q,
+		.resolvedCache = fresh,
+	};
+	const auto reread = Purple::ParseState(
+		Purple::SerializeState(written),
+		u"state.toml"_q);
+	const auto restored = Purple::FromCache(reread.resolvedCache);
+	CHECK(restored.has_value());
+	const auto added = Purple::Visible(
+		dropped.settings,
+		*restored,
+		30,
+		Purple::ChatKind::Private);
+	CHECK_EQ(Mode(added.show), Mode(Purple::ShowMode::Always));
+	CHECK(added.notify);
+
+	// Without it, the stale snapshot loses exactly that chat.
+	const auto stale = Purple::FromCache(stored);
+	CHECK_EQ(
+		Mode(Purple::Visible(
+			dropped.settings,
+			*stale,
+			30,
+			Purple::ChatKind::Private).show),
+		Mode(Purple::ShowMode::Never));
+	CHECK_EQ(
+		Mode(Purple::Visible(
+			dropped.settings,
+			*stale,
+			10,
+			Purple::ChatKind::Private).show),
+		Mode(Purple::ShowMode::Always));
+}
+
+void TestCacheListDefsRoundTrip() {
+	Begin("cache list_defs round trip");
+
+	// Names and titles come from the user's file, so they can hold anything a
+	// TOML string can: quotes, backslashes, tabs, newlines, and control
+	// characters the file could only have written escaped. Any of them
+	// written raw would make state.toml unreadable, and an unreadable
+	// state.toml comes back as Normal.
+	auto cache = Purple::ResolvedCache();
+	cache.preset = u"work"_q;
+	cache.viewName = u"Work"_q;
+	cache.lists = {
+		{ .list = u"say \"hi\"\tnow"_q, .show = Purple::ShowMode::Always },
+		{ .list = u"empty"_q, .notify = false },
+	};
+	cache.listDefs = {
+		{
+			.name = u"say \"hi\"\tnow"_q,
+			.title = u"Back\\slash\nand \x01 bell \x7f"_q,
+			.members = { 10, -1001234567890, 9007199254740993 },
+			.kinds = { Purple::ChatKind::Bot, Purple::ChatKind::Private },
+		},
+		// An empty list is a real definition - a placeholder filled in from
+		// the chat menu later - and has to come back as one, not vanish.
+		{ .name = u"empty"_q },
+	};
+	auto state = Purple::State();
+	state.activePreset = u"work"_q;
+	state.resolvedCache = cache;
+	const auto text = Purple::SerializeState(state);
+	CHECK(text.contains(u"[[resolved_cache.list_defs]]"_q));
+	const auto reread = Purple::ParseState(text, u"state.toml"_q);
+
+	// The file still parses - the preset would be lost otherwise - and every
+	// field comes back as it went in.
+	CHECK_EQ(reread.activePreset, u"work"_q);
+	CHECK(reread.resolvedCache == cache);
+	CHECK_EQ(reread.resolvedCache.listDefs.size(), size_t(2));
+	if (reread.resolvedCache.listDefs.size() == 2) {
+		const auto &first = reread.resolvedCache.listDefs[0];
+		CHECK_EQ(first.name, u"say \"hi\"\tnow"_q);
+		CHECK_EQ(first.title, u"Back\\slash\nand \x01 bell \x7f"_q);
+		CHECK_EQ(first.members, (std::vector<Purple::PeerIdValue>{
+			10,
+			-1001234567890,
+			9007199254740993,
+		}));
+		CHECK(first.kinds == (std::vector<Purple::ChatKind>{
+			Purple::ChatKind::Bot,
+			Purple::ChatKind::Private,
+		}));
+		const auto &second = reread.resolvedCache.listDefs[1];
+		CHECK_EQ(second.name, u"empty"_q);
+		CHECK(second.title.isEmpty());
+		CHECK(second.members.empty());
+		CHECK(second.kinds.empty());
+	}
+
+	// A table with no name is skipped, and so is a kind this build cannot
+	// spell, on the terms of everything else read from state.toml.
+	const auto odd = Purple::ParseState(uR"(
+active_preset = "work"
+
+[resolved_cache]
+preset = "work"
+lists = [ { list = "a", notify = true } ]
+
+[[resolved_cache.list_defs]]
+title = "no name"
+members = [ 1 ]
+
+[[resolved_cache.list_defs]]
+name = "a"
+members = [ 2, "three" ]
+kinds = ["groups", "robots"]
+)"_q, u"state.toml"_q);
+	CHECK_EQ(odd.resolvedCache.listDefs.size(), size_t(1));
+	if (!odd.resolvedCache.listDefs.empty()) {
+		const auto &a = odd.resolvedCache.listDefs.front();
+		CHECK_EQ(a.name, u"a"_q);
+		CHECK_EQ(a.members, (std::vector<Purple::PeerIdValue>{ 2 }));
+		CHECK(a.kinds
+			== (std::vector<Purple::ChatKind>{ Purple::ChatKind::Group }));
+	}
+
+	// The cache compares on the snapshot as well, or a membership-only edit
+	// would look like nothing to write.
+	auto moved = cache;
+	moved.listDefs[1].members.push_back(5);
+	CHECK(!(moved == cache));
 }
 
 void TestLastSeenKeys() {
@@ -13550,6 +14069,10 @@ int main() {
 	TestScheduleStatus();
 	TestFocusStep();
 	TestResolvedCache();
+	TestCacheFallbackKeepsLists();
+	TestCacheSnapshotViewsAndMembers();
+	TestCacheSnapshotFreshness();
+	TestCacheListDefsRoundTrip();
 	TestLastSeenKeys();
 	TestLastSeenReasons();
 	TestLastSeenTrades();

@@ -167,6 +167,10 @@ struct List {
 	// placeholder you fill in from the chat menu later.
 	std::vector<PeerIdValue> members;
 	std::vector<ChatKind> kinds;
+
+	// A resolution restored from state.toml carries copies of these (see
+	// Resolved::listSnapshot), and resolutions are compared whole.
+	friend bool operator==(const List &, const List &) = default;
 };
 
 // One step of a preset's ordered list_order: the list it names, and what the

@@ -271,6 +271,22 @@ guessing defaults.
 - `purple/purple_engine.{h,cpp}` - resolves a preset into a flat table of "for
   this list, show and notify are these", and answers what that means for one
   chat. Resolution runs once per config or preset change, never per repaint.
+  When the running preset stops resolving, the clients run on the cached
+  resolution in `state.toml` (`ToCache`, `FromCache`) rather than on defaults.
+  The cache holds the preset's order by list name, and also the list snapshot:
+  the definitions (title, members, kinds) of every list that order and its
+  views name, as `[[resolved_cache.list_defs]]`. Every list lookup goes through
+  `LookupList`, which asks the live `settings.toml` first and the snapshot only
+  for a name the file no longer defines. So a file that parses but drops the
+  running preset together with its lists (an import, a sync apply, a History
+  restore, a hand edit) leaves the chat list as it was instead of hiding and
+  silencing every chat. `ToCache` takes the settings so the snapshot carries
+  forward through later reloads. A client writes it whenever it differs from
+  the stored cache, not only when the resolution changed, because a
+  membership-only edit moves the snapshot but not the resolution.
+  `SnapshotListsInUse` names the lists currently served from the snapshot, so
+  the preset picker can say so. A `state.toml` written before the snapshot
+  existed still loads and restores names only, as before.
 - `purple/purple_screentime.{h,cpp}` - `screentime.log` and everything derived
   from it: the line format and its tolerant parser, session derivation, active
   time, the buckets, the heat map, the period comparison, the budget ledger and

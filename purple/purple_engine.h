@@ -176,10 +176,22 @@ struct Resolved {
 	// leave the chat list revealed with nothing left running to put it back.
 	bool peeking = false;
 
+	// The list snapshot this resolution was restored with: FromCache() copies
+	// ResolvedCache::listDefs here, and Resolve() leaves it empty. LookupList()
+	// reads it for a list name the live settings.toml no longer defines, and
+	// for nothing else - a list the file defines answers from the file.
+	std::vector<List> listSnapshot;
+
 	[[nodiscard]] const EffectiveList *list(const QString &name) const;
 
 	// Used to decide whether a reload actually changed anything, so a state
 	// write that only moved a peek deadline does not rebuild every chat list.
+	//
+	// The snapshot is part of the comparison on purpose. The first reload
+	// that falls back to the cache usually restores the same names, modes and
+	// folders the live resolution had; were the snapshot left out, it would
+	// compare equal, the gate would keep the resolution it already held - one
+	// with no snapshot - and every chat the dropped lists let through would go.
 	friend bool operator==(const Resolved &, const Resolved &) = default;
 };
 
@@ -196,6 +208,34 @@ struct Resolved {
 	const List &list,
 	PeerIdValue id,
 	ChatKind kind);
+
+// The definition a list name stands for under this resolution: the live
+// settings.toml's when it has a [lists.<name>] table, else the resolution's
+// list snapshot's, else null. Every predicate below looks lists up through
+// this, so a name the file has dropped still claims what it claimed when the
+// cache was written, while a list the file defines - again or still - always
+// answers with its live members.
+//
+// A client naming the list that decided a chat (a "decided by" label, say)
+// should look it up here too, or it will show the bare key for a list the
+// snapshot is serving.
+[[nodiscard]] const List *LookupList(
+	const Settings &settings,
+	const Resolved &resolved,
+	const QString &name);
+
+// The lists the running resolution orders - in its main order or any view -
+// that the live settings.toml does not define and the snapshot does: the ones
+// it is running from the snapshot right now, in order of first mention. Empty
+// whenever the file defines everything the preset names, which includes every
+// resolution Resolve() produced.
+//
+// This is what the preset picker reads to say so. Like the line for a missing
+// preset, it must not be a silent state: the user is looking at a chat list
+// shaped by definitions their file no longer shows them.
+[[nodiscard]] std::vector<QString> SnapshotListsInUse(
+	const Settings &settings,
+	const Resolved &resolved);
 
 // The entry that decides a chat under this resolution: the first in the
 // preset's order whose list claims it. Null means no entry claimed it, which is
@@ -225,8 +265,12 @@ struct Visibility {
 
 // Whether one of the preset's extra views shows this chat. Views select
 // membership; they never change what a chat is allowed to do.
+//
+// `view' is one of `resolved.views'. The resolution is passed as well because
+// the list snapshot belongs to it rather than to any one view.
 [[nodiscard]] bool ViewHolds(
 	const Settings &settings,
+	const Resolved &resolved,
 	const ResolvedView &view,
 	PeerIdValue id,
 	ChatKind kind);
@@ -249,7 +293,21 @@ struct Visibility {
 	const Resolved &resolved,
 	PeerIdValue id);
 
-[[nodiscard]] ResolvedCache ToCache(const Resolved &resolved);
+// The cache to write for this resolution, list snapshot included: for every
+// list it names, whatever LookupList() answers against `settings'. Passing the
+// settings in force is what carries the snapshot forward. A resolution that
+// was itself restored from the cache, written back after the next reload,
+// keeps the definitions its file still lacks - and takes the live one for any
+// list that file defines again. A name neither defines is left out of the
+// snapshot; it claims nothing either way.
+//
+// Write it whenever it differs from the stored one, not only when the
+// resolution changed: adding a chat to a list moves the file but not the
+// resolution, and a snapshot that missed that edit would drop the chat the day
+// the file drops the list.
+[[nodiscard]] ResolvedCache ToCache(
+	const Resolved &resolved,
+	const Settings &settings);
 [[nodiscard]] std::optional<Resolved> FromCache(const ResolvedCache &cache);
 
 // What this install is, as far as a ruleset is concerned. Every field comes

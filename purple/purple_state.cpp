@@ -22,9 +22,9 @@ namespace {
 	return QString::fromUtf8(value.data(), int(value.size()));
 }
 
-// Preset, folder and list names come from settings.toml, which the user
-// writes, so they can hold quotes and backslashes even though they rarely
-// will.
+// Preset, folder and list names and list titles come from settings.toml,
+// which the user writes, so they can hold quotes and backslashes even though
+// they rarely will.
 //
 // Every other control character is escaped too, because TOML refuses one
 // written raw in a basic string, and a state.toml that does not parse comes
@@ -273,6 +273,84 @@ constexpr auto kMaxLastSeenTrades = 200;
 	return result;
 }
 
+// The list snapshot, one table per list. Tables rather than inline ones for
+// the reason the views use them: `members' can run long, and an inline table
+// has to fit on one line.
+//
+// The title is written only when there is one, and members and kinds always,
+// empty or not - an empty list is a real definition, the placeholder a user
+// fills in from the chat menu, and it must restore as one.
+[[nodiscard]] QString SerializeListDefs(const std::vector<List> &lists) {
+	auto result = QString();
+	for (const auto &list : lists) {
+		result += u"\n[[resolved_cache.list_defs]]\n"_q;
+		result += u"name = %1\n"_q.arg(Quoted(list.name));
+		if (!list.title.isEmpty()) {
+			result += u"title = %1\n"_q.arg(Quoted(list.title));
+		}
+		auto members = QStringList();
+		for (const auto id : list.members) {
+			members.push_back(QString::number(id));
+		}
+		result += u"members = [%1]\n"_q.arg(members.join(u", "_q));
+		auto kinds = QStringList();
+		for (const auto kind : list.kinds) {
+			kinds.push_back(Quoted(ChatKindName(kind)));
+		}
+		result += u"kinds = [%1]\n"_q.arg(kinds.join(u", "_q));
+	}
+	return result;
+}
+
+// Absent in a file written before the snapshot existed, which reads as an
+// empty one: the cache then restores names only, exactly as it always did.
+// A table with no name is skipped, and so is a kind this build cannot spell,
+// on the terms of every other reader here.
+[[nodiscard]] std::vector<List> ReadListDefs(const toml::table &table) {
+	auto result = std::vector<List>();
+	const auto node = table.get("list_defs");
+	const auto array = node ? node->as_array() : nullptr;
+	if (!array) {
+		return result;
+	}
+	for (auto &&element : *array) {
+		const auto fields = element.as_table();
+		if (!fields) {
+			continue;
+		}
+		auto list = List();
+		list.name = ReadString(*fields, "name");
+		if (list.name.isEmpty()) {
+			continue;
+		}
+		list.title = ReadString(*fields, "title");
+		if (const auto members = fields->get("members")) {
+			if (const auto ids = members->as_array()) {
+				for (auto &&id : *ids) {
+					if (const auto value = id.value<int64>()) {
+						list.members.push_back(*value);
+					}
+				}
+			}
+		}
+		if (const auto kinds = fields->get("kinds")) {
+			if (const auto names = kinds->as_array()) {
+				for (auto &&name : *names) {
+					const auto text = name.value<std::string_view>();
+					const auto kind = text
+						? ParseChatKind(Text(*text))
+						: std::nullopt;
+					if (kind) {
+						list.kinds.push_back(*kind);
+					}
+				}
+			}
+		}
+		result.push_back(std::move(list));
+	}
+	return result;
+}
+
 [[nodiscard]] ResolvedCache ReadResolvedCache(const toml::table &root) {
 	auto result = ResolvedCache();
 	const auto node = root.get("resolved_cache");
@@ -371,6 +449,7 @@ constexpr auto kMaxLastSeenTrades = 200;
 			}
 		}
 	}
+	result.listDefs = ReadListDefs(*table);
 
 	// A cache naming lists it cannot describe is worse than none: the engine
 	// would resolve half the chats and silently default the rest.
@@ -924,6 +1003,7 @@ QString SerializeState(const State &state) {
 		}
 		result += SerializeLists(view.lists);
 	}
+	result += SerializeListDefs(cache.listDefs);
 	return result;
 }
 

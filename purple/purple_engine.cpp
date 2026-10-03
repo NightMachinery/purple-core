@@ -156,6 +156,47 @@ bool ListHolds(const List &list, PeerIdValue id, ChatKind kind) {
 		!= list.kinds.end();
 }
 
+const List *LookupList(
+		const Settings &settings,
+		const Resolved &resolved,
+		const QString &name) {
+	if (const auto live = settings.list(name)) {
+		return live;
+	}
+	const auto &snapshot = resolved.listSnapshot;
+	const auto i = std::find_if(
+		snapshot.begin(),
+		snapshot.end(),
+		[&](const List &list) { return list.name == name; });
+	return (i == snapshot.end()) ? nullptr : &*i;
+}
+
+std::vector<QString> SnapshotListsInUse(
+		const Settings &settings,
+		const Resolved &resolved) {
+	auto result = std::vector<QString>();
+	if (resolved.normal || resolved.listSnapshot.empty()) {
+		return result;
+	}
+	const auto add = [&](const std::vector<EffectiveList> &order) {
+		for (const auto &effective : order) {
+			const auto &name = effective.list;
+			if (settings.list(name)
+				|| !LookupList(settings, resolved, name)
+				|| std::find(result.begin(), result.end(), name)
+					!= result.end()) {
+				continue;
+			}
+			result.push_back(name);
+		}
+	};
+	add(resolved.lists);
+	for (const auto &view : resolved.views) {
+		add(view.lists);
+	}
+	return result;
+}
+
 const EffectiveList *MatchList(
 		const Settings &settings,
 		const Resolved &resolved,
@@ -169,7 +210,7 @@ const EffectiveList *MatchList(
 	// once an entry claims a chat, nothing further down ever sees it, which is
 	// what makes a separate override table unnecessary.
 	for (const auto &effective : resolved.lists) {
-		const auto list = settings.list(effective.list);
+		const auto list = LookupList(settings, resolved, effective.list);
 		if (list && ListHolds(*list, id, kind)) {
 			return &effective;
 		}
@@ -217,11 +258,12 @@ Visibility Visible(
 
 bool ViewHolds(
 		const Settings &settings,
+		const Resolved &resolved,
 		const ResolvedView &view,
 		PeerIdValue id,
 		ChatKind kind) {
 	for (const auto &effective : view.lists) {
-		const auto list = settings.list(effective.list);
+		const auto list = LookupList(settings, resolved, effective.list);
 		if (list && ListHolds(*list, id, kind)) {
 			// Only "never" drops a chat from a tab. A view is a selection you
 			// asked for by name, so the unread-watching modes are deliberately
@@ -249,7 +291,7 @@ bool NamedExplicitly(
 			if (effective.show == ShowMode::Never) {
 				continue;
 			}
-			const auto list = settings.list(effective.list);
+			const auto list = LookupList(settings, resolved, effective.list);
 			if (list
 				&& (std::find(list->members.begin(), list->members.end(), id)
 					!= list->members.end())) {
@@ -274,10 +316,32 @@ bool NamedExplicitly(
 	return false;
 }
 
-ResolvedCache ToCache(const Resolved &resolved) {
+ResolvedCache ToCache(const Resolved &resolved, const Settings &settings) {
 	auto result = ResolvedCache();
 	if (resolved.normal) {
 		return result;
+	}
+	const auto snapshot = [&](const std::vector<EffectiveList> &order) {
+		for (const auto &effective : order) {
+			const auto &name = effective.list;
+			const auto known = std::any_of(
+				result.listDefs.begin(),
+				result.listDefs.end(),
+				[&](const List &list) { return list.name == name; });
+			if (known) {
+				continue;
+			}
+			// Live first, then the snapshot this resolution was restored
+			// with - so a list the file defines again is cached as the file
+			// now has it, and one it still lacks keeps the copy it had.
+			if (const auto list = LookupList(settings, resolved, name)) {
+				result.listDefs.push_back(*list);
+			}
+		}
+	};
+	snapshot(resolved.lists);
+	for (const auto &view : resolved.views) {
+		snapshot(view.lists);
 	}
 	const auto cached = [](const std::vector<EffectiveList> &lists) {
 		auto result = std::vector<ResolvedList>();
@@ -349,6 +413,7 @@ std::optional<Resolved> FromCache(const ResolvedCache &cache) {
 			restored(view.lists),
 		});
 	}
+	result.listSnapshot = cache.listDefs;
 	return result;
 }
 
