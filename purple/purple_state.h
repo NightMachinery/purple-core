@@ -313,6 +313,12 @@ struct State {
 // other device, and returning them is the thing this is here to stop.
 [[nodiscard]] bool ShouldAutoSend(
 	const Settings &settings,
+	const QString &lastSentFingerprint,
+	const QString &lastImportedFingerprint,
+	const QByteArray &bytes,
+	bool wroteFromImport);
+[[nodiscard]] bool ShouldAutoSend(
+	const Settings &settings,
 	const State &state,
 	const QByteArray &bytes,
 	bool wroteFromImport);

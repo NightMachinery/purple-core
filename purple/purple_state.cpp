@@ -637,15 +637,29 @@ QString SettingsFingerprint(const QByteArray &bytes) {
 
 bool ShouldAutoSend(
 		const Settings &settings,
-		const State &state,
+		const QString &lastSentFingerprint,
+		const QString &lastImportedFingerprint,
 		const QByteArray &bytes,
 		bool wroteFromImport) {
 	if (!settings.sync.sendAfterSave || wroteFromImport) {
 		return false;
 	}
 	const auto fingerprint = SettingsFingerprint(bytes);
-	return fingerprint != state.lastSentFingerprint
-		&& fingerprint != state.lastImportedFingerprint;
+	return fingerprint != lastSentFingerprint
+		&& fingerprint != lastImportedFingerprint;
+}
+
+bool ShouldAutoSend(
+		const Settings &settings,
+		const State &state,
+		const QByteArray &bytes,
+		bool wroteFromImport) {
+	return ShouldAutoSend(
+		settings,
+		state.lastSentFingerprint,
+		state.lastImportedFingerprint,
+		bytes,
+		wroteFromImport);
 }
 
 std::optional<OverrideKind> ParseOverrideKind(const QString &value) {

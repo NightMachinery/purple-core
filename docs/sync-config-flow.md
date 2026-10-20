@@ -329,3 +329,35 @@ confirm the suite fails. Each of these must fail it:
 
 The staged-bytes comparison for ConfirmFound survives such a mutation by
 design: `ReconcileOwnConfigInventory` already enforces it.
+
+## Pure root-store Relink proof
+
+`ReviewSyncConfigRelink(inventory, state, expectedAccountUserId, stagedRecord,
+local)` returns a `SyncConfigRelinkReview` containing the ordinary review,
+`ownStatus` and `proven`. The explicitly expected account id must be nonzero and
+match the supplied account inventory. This is a pure model operation: it neither
+reads an account nor restores a token, writes state, confirms a post or applies a
+version. The returned review stays unbound. Frontends must obtain a fresh
+inventory for the intended account and separately perform any authorized Relink.
+
+The function uses `ReviewSyncConfigInventory` with the existing state, then
+`ReconcileOwnConfigInventory` in the selected store space. It bypasses the
+frontend account-preference binding requirement only. Existing inventory
+completeness, selected/publishable-space, malformed/future-record, local-settings,
+last-good, serialized-state, clone, issued-record and staged-pending checks still
+apply. A ready ordinary review is required before ownership can be proven.
+
+Present or PendingFound own records prove ownership. Absent own records prove
+ownership only when neither config nor library has confirmed a post and the
+ordinary review/reconciliation accepts an empty remote inventory or the store's
+own space. A confirmed store missing its own records, a different space, another
+account, or an uncertain inventory refuses proof. Library-only confirmed stores
+need separate ownership evidence and are conservatively refused by this
+config-record proof.
+
+A valid pending operation retains its normal Pending plan; a missing or different
+staged record refuses. Conflicting configuration choices remain the ordinary
+review's conflict plan, rather than being resolved by Relink. Ownership proof is
+not permission to apply, publish, complete a pending post or accept a stale
+choice. Account-path identity, frontend binding behavior, token reuse and actual
+account/network isolation remain separate integration and native work.

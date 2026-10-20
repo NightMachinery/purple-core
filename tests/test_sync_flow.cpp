@@ -2733,6 +2733,139 @@ void TestFlowReviewStatuses() {
 	CHECK(invalidState.status == SyncConfigReviewStatus::NeedsReview);
 }
 
+void TestRootStoreRelinkProof() {
+	Begin("root store relink proof");
+	auto cloud = Cloud();
+	auto device = Device('a');
+	device.setLocal(T0);
+	CHECK(Join(device, cloud.inventory()));
+	const auto prove = [&](const Device &value,
+			const SyncAccountInventoryResult &inventory,
+			uint64_t expectedUser = kUserId) {
+		return ReviewSyncConfigRelink(inventory, *value.state,
+			expectedUser, value.staged, value.local);
+	};
+	const auto original = device.stateBytes();
+	const auto empty = prove(device, cloud.inventory());
+	CHECK(empty.proven);
+	CHECK(empty.ownStatus == SyncOwnInventoryStatus::Absent);
+	CHECK(empty.review.status == SyncConfigReviewStatus::Ready);
+	CHECK(!empty.review.bound);
+	CHECK(device.stateBytes() == original);
+	CHECK(!prove(device, cloud.inventory(), 0).proven);
+	CHECK(!prove(device, cloud.inventory(), kUserId + 1).proven);
+	auto wrongAccount = cloud.inventory();
+	wrongAccount.accountUserId = kUserId + 1;
+	CHECK(!prove(device, wrongAccount).proven);
+	auto incomplete = cloud;
+	incomplete.scanComplete = false;
+	CHECK(!prove(device, incomplete.inventory()).proven);
+	auto unread = cloud.inventory();
+	unread.read.reset();
+	CHECK(!prove(device, unread).proven);
+	auto broken = cloud;
+	broken.add(QByteArray("{\"not\":\"a record\"}"));
+	CHECK(!prove(device, broken.inventory()).proven);
+	auto badState = device;
+	badState.state->version = 2;
+	CHECK(!prove(badState, cloud.inventory()).proven);
+	auto usingGood = device;
+	usingGood.local.usingLastGood = true;
+	CHECK(!prove(usingGood, cloud.inventory()).proven);
+	auto invalidLocal = device;
+	invalidLocal.local = MakeSyncSettingsFile(SyncSettingsFileStatus::Invalid);
+	CHECK(!prove(invalidLocal, cloud.inventory()).proven);
+	auto remote = MakeRemote('b', u"Android"_q);
+	auto sameSpace = cloud;
+	Post(sameSpace, remote, device.state->space, TB);
+	CHECK(prove(device, sameSpace.inventory()).proven);
+	auto confirmedLibrary = device;
+	confirmedLibrary.state->library.seq = 1;
+	confirmedLibrary.state->library.confirmedSeq = 1;
+	confirmedLibrary.state->library.ownHash = QString(64, u'a');
+	CHECK(bool(SerializeSyncLocalState(*confirmedLibrary.state)));
+	CHECK(!prove(confirmedLibrary, cloud.inventory()).proven);
+	auto differentSpace = Cloud();
+	Post(differentSpace, remote, *FormatSyncSpaceId(QByteArray(16, 'z')), TB);
+	CHECK(!prove(device, differentSpace.inventory()).proven);
+	CHECK(PublishLocal(device, cloud).status == SyncConfigPublishStatus::Confirmed);
+	const auto publishedState = device.stateBytes();
+	const auto present = prove(device, cloud.inventory());
+	CHECK(present.proven);
+	CHECK(present.ownStatus == SyncOwnInventoryStatus::Present);
+	CHECK(present.review.plan.verdict == ConfigSyncVerdict::UpToDate);
+	CHECK(!present.review.bound);
+	CHECK(device.stateBytes() == publishedState);
+	auto newerCloud = cloud;
+	auto newerDocument = ParseSyncEnvelope(cloud.records.front().second)
+		.envelope.document;
+	auto newerPayload = newerDocument.value(u"payload"_q).toObject();
+	const auto newerText = QByteArray("version = 3\n");
+	newerPayload.insert(u"schema"_q, 3);
+	newerPayload.insert(u"text"_q, QString::fromUtf8(newerText));
+	newerPayload.insert(u"key"_q, MakeConfigVersion(newerText, {})->key);
+	newerDocument.insert(u"payload"_q, newerPayload);
+	const auto newerRecord = SerializeSyncEnvelope({ newerDocument }).canonical;
+	CHECK(ClassifySyncCandidate(900, newerRecord).status
+		== SyncCandidateStatus::NewerSchema);
+	newerCloud.add(newerRecord);
+	CHECK(!prove(device, newerCloud.inventory()).proven);
+	auto cloneCloud = cloud;
+	auto clone = MakeRemote('a', u"Windows"_q);
+	Post(cloneCloud, clone, device.state->space, T0);
+	CHECK(!prove(device, cloneCloud.inventory()).proven);
+	auto aheadCloud = cloud;
+	auto ahead = MakeRemote('a', u"macOS"_q);
+	ahead.device = device.state->createdDevice;
+	ahead.seq = device.state->config.seq;
+	Post(aheadCloud, ahead, device.state->space, T1);
+	CHECK(!prove(device, aheadCloud.inventory()).proven);
+	CHECK(!prove(device, Cloud().inventory()).proven);
+	CHECK(!prove(device, sameSpace.inventory()).proven);
+	auto stale = device;
+	stale.state->config.seq = 0;
+	stale.state->config.confirmedSeq = 0;
+	stale.state->config.ownHash.clear();
+	CHECK(!prove(stale, cloud.inventory()).proven);
+	auto duplicate = cloud;
+	duplicate.add(duplicate.records.front().second);
+	CHECK(prove(device, duplicate.inventory()).proven);
+	auto conflictCloud = cloud;
+	auto c = MakeRemote('c', u"Linux"_q);
+	Post(conflictCloud, c, device.state->space, TC);
+	device.setLocal(TL);
+	const auto conflict = prove(device, conflictCloud.inventory());
+	const auto normal = Review(device, conflictCloud);
+	CHECK(conflict.proven);
+	CHECK(conflict.review.plan.verdict == normal.plan.verdict);
+	CHECK(conflict.review.heads.size() == normal.heads.size());
+	const auto changes = LocalRequest(device, cloud);
+	const auto lost = Publish(device, cloud, changes, PostMode::LoseReceipt);
+	CHECK(lost.status == SyncConfigPublishStatus::OutcomeUnknown);
+	const auto pending = prove(device, cloud.inventory());
+	CHECK(pending.proven);
+	CHECK(pending.ownStatus == SyncOwnInventoryStatus::PendingFound);
+	CHECK(pending.review.plan.verdict == ConfigSyncVerdict::Pending);
+	auto missingStaged = device;
+	missingStaged.staged.clear();
+	CHECK(!prove(missingStaged, cloud.inventory()).proven);
+	auto wrongStaged = device;
+	wrongStaged.staged = QByteArray("{}");
+	CHECK(!prove(wrongStaged, cloud.inventory()).proven);
+	auto unconfirmed = Device('n');
+	unconfirmed.setLocal(T0);
+	auto pendingCloud = Cloud();
+	CHECK(Join(unconfirmed, pendingCloud.inventory()));
+	const auto failed = Publish(unconfirmed, pendingCloud,
+		LocalRequest(unconfirmed, pendingCloud), PostMode::Fail);
+	CHECK(failed.status == SyncConfigPublishStatus::OutcomeUnknown);
+	CHECK(unconfirmed.state->config.pendingSeq != 0);
+	CHECK(prove(unconfirmed, pendingCloud.inventory()).proven);
+	auto missingFirstStaged = unconfirmed;
+	missingFirstStaged.staged.clear();
+	CHECK(!prove(missingFirstStaged, pendingCloud.inventory()).proven);
+}
+
 } // namespace
 
 int main() {
@@ -2752,6 +2885,7 @@ int main() {
 	TestFlowCommitCheck();
 	TestFlowDescribe();
 	TestFlowReviewStatuses();
+	TestRootStoreRelinkProof();
 
 	std::printf("%d checks, %d failures\n", Checks, Failures);
 	return Failures ? 1 : 0;

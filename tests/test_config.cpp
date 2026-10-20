@@ -11233,6 +11233,407 @@ device = "desktop"
 	CHECK(Purple::SummarizeConfigChange("", "").parsed);
 }
 
+void TestScopedConfigChangesAndFileFingerprints() {
+	Begin("scoped reviews and file fingerprints");
+	using Scope = Purple::SettingScope;
+	using Kind = Purple::ConfigChangeKind;
+	const auto before = QByteArray(
+		"[last_seen]\nreasons_p=true\ntrade_remember='1h'\n"
+		"[lists.\"a.b\"]\nmembers=[1]\nkinds=['private']\n");
+	const auto after = QByteArray(
+		"[last_seen]\nreasons_p=false\ntrade_cooldown='2h'\n"
+		"[lists.\"a.b\"]\nmembers=[2]\nkinds=['groups']\n");
+	const auto summary = Purple::SummarizeConfigChange(before, after);
+	CHECK(summary.parsed);
+	CHECK_EQ(summary.entries.size(), size_t(2));
+	for (const auto &entry : summary.entries) {
+		CHECK(entry.kind == Kind::Changed);
+		CHECK(entry.mixedScopes);
+		CHECK(entry.scope == Scope::Unknown);
+		for (const auto &key : entry.keys) {
+			CHECK(key.scope == Purple::SettingsScope(key.table, key.key));
+		}
+	}
+	const auto &lastSeen = summary.entries.front();
+	CHECK_EQ(lastSeen.table, u"last_seen"_q);
+	CHECK_EQ(lastSeen.keys.size(), size_t(3));
+	CHECK_EQ(lastSeen.keys[0].key, u"reasons_p"_q);
+	CHECK(lastSeen.keys[0].kind == Kind::Changed);
+	CHECK(lastSeen.keys[0].scope == Scope::PerAccount);
+	CHECK_EQ(lastSeen.keys[1].key, u"trade_cooldown"_q);
+	CHECK(lastSeen.keys[1].kind == Kind::Added);
+	CHECK(lastSeen.keys[1].scope == Scope::AppWide);
+	CHECK_EQ(lastSeen.keys[2].key, u"trade_remember"_q);
+	CHECK(lastSeen.keys[2].kind == Kind::Removed);
+	CHECK(lastSeen.keys[2].scope == Scope::AppWide);
+	const auto &list = summary.entries.back();
+	CHECK_EQ(list.table, u"lists.\"a.b\""_q);
+	CHECK_EQ(list.keys.size(), size_t(2));
+	CHECK(list.keys[0].scope == Scope::AppWide);
+	CHECK(list.keys[1].scope == Scope::PerAccount);
+	const auto removed = Purple::SummarizeConfigChange(before, "");
+	CHECK_EQ(removed.entries.size(), size_t(2));
+	for (const auto &entry : removed.entries) {
+		CHECK(entry.kind == Kind::Removed);
+		CHECK(entry.mixedScopes);
+		for (const auto &key : entry.keys) {
+			CHECK(key.kind == Kind::Removed);
+		}
+	}
+	const auto added = Purple::SummarizeConfigChange("", before);
+	for (const auto &entry : added.entries) {
+		CHECK(entry.kind == Kind::Added);
+		for (const auto &key : entry.keys) {
+			CHECK(key.kind == Kind::Added);
+		}
+	}
+	const auto onlyMembers = Purple::SummarizeConfigChange(
+		"[lists.work]\nmembers=[1]\nkinds=['private']\n",
+		"[lists.work]\nmembers=[2]\nkinds=['private']\n");
+	CHECK_EQ(onlyMembers.entries.size(), size_t(1));
+	CHECK(!onlyMembers.entries.front().mixedScopes);
+	CHECK(onlyMembers.entries.front().scope == Scope::PerAccount);
+	CHECK_EQ(onlyMembers.entries.front().keys.size(), size_t(1));
+	const auto structured = Purple::SummarizeConfigChange(
+		"[last_seen]\ntrade_remember={deep=1}\n",
+		"[last_seen]\ntrade_remember={deep=2}\n");
+	CHECK_EQ(structured.entries.size(), size_t(1));
+	CHECK(structured.entries.front().scope == Scope::AppWide);
+	CHECK_EQ(structured.entries.front().keys.size(), size_t(1));
+	CHECK_EQ(structured.entries.front().keys.front().key, u"trade_remember"_q);
+	const auto roots = Purple::SummarizeConfigChange(
+		"version=1\ncustom=1\n", "version=2\ncustom=2\n");
+	CHECK(roots.entries.front().mixedScopes);
+	CHECK(roots.entries.front().keys[0].scope == Scope::Unknown);
+	CHECK(roots.entries.front().keys[1].scope == Scope::FileLocal);
+	CHECK(!Purple::SummarizeConfigChange("[bad", "").parsed);
+	CHECK(Purple::SummarizeConfigChange(before, before).entries.empty());
+	const auto ordered = Purple::SummarizeConfigChange(
+		"[lists.z]\nmembers=[1]\n[lists.a]\nmembers=[2]\n",
+		"[lists.a]\nmembers=[2]\n[lists.z]\nmembers=[1]\n");
+	CHECK_EQ(ordered.entries.size(), size_t(1));
+	CHECK(ordered.entries.front().scope == Scope::AppWide);
+	CHECK_EQ(ordered.entries.front().table, u"lists"_q);
+
+	auto settings = Purple::Settings();
+	settings.sync.sendAfterSave = true;
+	const auto bytes = QByteArray("version=1\n");
+	const auto other = QByteArray("version=2\n");
+	const auto fingerprint = Purple::SettingsFingerprint(bytes);
+	const auto different = Purple::SettingsFingerprint(other);
+	for (const auto &sent : { QString(), fingerprint, different }) {
+		for (const auto &imported : { QString(), fingerprint, different }) {
+			for (const auto importedWrite : { false, true }) {
+				const auto expected = !importedWrite
+					&& sent != fingerprint && imported != fingerprint;
+				CHECK(Purple::ShouldAutoSend(settings, sent, imported,
+					bytes, importedWrite) == expected);
+				auto state = Purple::State();
+				state.lastSentFingerprint = sent;
+				state.lastImportedFingerprint = imported;
+				CHECK(Purple::ShouldAutoSend(settings, state, bytes, importedWrite)
+					== expected);
+			}
+		}
+	}
+	CHECK(Purple::ShouldAutoSend(settings, QString(), QString(), bytes, false));
+	CHECK(!Purple::ShouldAutoSend(settings, fingerprint, QString(), bytes, false));
+	CHECK(Purple::ShouldAutoSend(settings, fingerprint, QString(), other, false));
+	settings.sync.sendAfterSave = false;
+	CHECK(!Purple::ShouldAutoSend(settings, QString(), QString(), bytes, false));
+}
+
+void TestScopeDefinitionAndEmptyKeyRegressions() {
+	Begin("scope definition and empty key regressions");
+	using Scope = Purple::SettingScope;
+	using Kind = Purple::ConfigChangeKind;
+	using Address = Purple::ConfigChangeAddressKind;
+	for (const auto &version : { QByteArray(), QByteArray("version=1\n") }) {
+		for (const auto &table : { QByteArray("lists.work"),
+				QByteArray("lists.\"a.b\""), QByteArray("lists.\"\"") }) {
+			const auto withList = version + '[' + table + "]\nmembers=[1]\n";
+			for (const auto added : { false, true }) {
+				const auto summary = Purple::SummarizeConfigChange(
+					added ? version : withList, added ? withList : version);
+				CHECK_EQ(summary.entries.size(), size_t(1));
+				if (summary.entries.empty()) {
+					continue;
+				}
+				const auto &entry = summary.entries.front();
+				const auto kind = added ? Kind::Added : Kind::Removed;
+				CHECK(entry.kind == kind);
+				CHECK_EQ(entry.table, QString::fromUtf8(table));
+				CHECK(entry.mixedScopes);
+				CHECK(entry.scope == Scope::Unknown);
+				CHECK_EQ(entry.keys.size(), size_t(2));
+				auto members = 0;
+				auto definitions = 0;
+				for (const auto &key : entry.keys) {
+					CHECK_EQ(key.table, QString::fromUtf8(table));
+					CHECK(key.kind == kind);
+					if (key.addressKind == Address::ListDefinition) {
+						++definitions;
+						CHECK(key.scope == Scope::AppWide);
+						CHECK(key.key.isEmpty());
+					} else {
+						++members;
+						CHECK(key.addressKind == Address::Key);
+						CHECK_EQ(key.key, u"members"_q);
+						CHECK(key.scope == Scope::PerAccount);
+					}
+				}
+				CHECK_EQ(members, 1);
+				CHECK_EQ(definitions, 1);
+			}
+		}
+	}
+	const auto layered = QByteArray("version=2\n");
+	const auto fork = layered + "[lists.work]\nmembers=[1]\n";
+	for (const auto added : { false, true }) {
+		const auto summary = Purple::SummarizeConfigChange(
+			added ? layered : fork, added ? fork : layered);
+		CHECK_EQ(summary.entries.size(), size_t(1));
+		const auto &entry = summary.entries.front();
+		CHECK_EQ(entry.table, u"lists.work"_q);
+		CHECK(entry.scope == Scope::PerAccount);
+		CHECK(!entry.mixedScopes);
+		CHECK_EQ(entry.keys.size(), size_t(1));
+		CHECK(entry.keys.front().addressKind == Address::Key);
+		CHECK_EQ(entry.keys.front().key, u"members"_q);
+	}
+	for (const auto &prefix : { QByteArray(), QByteArray("version=1\n"), layered }) {
+		const auto summary = Purple::SummarizeConfigChange(
+			prefix + "[lists.work]\nmembers=[1]\n",
+			prefix + "[lists.work]\nmembers=[2]\n");
+		CHECK_EQ(summary.entries.size(), size_t(1));
+		const auto &entry = summary.entries.front();
+		CHECK(entry.kind == Kind::Changed);
+		CHECK(entry.scope == Scope::PerAccount);
+		CHECK_EQ(entry.keys.size(), size_t(1));
+		CHECK(entry.keys.front().addressKind == Address::Key);
+	}
+	const auto definedLayered = fork + "title='Work'\n";
+	const auto titled = Purple::SummarizeConfigChange(layered, definedLayered);
+	CHECK(titled.entries.front().mixedScopes);
+	CHECK(std::any_of(titled.entries.front().keys.begin(),
+		titled.entries.front().keys.end(), [](const auto &key) {
+			return key.addressKind == Address::ListDefinition
+				&& key.kind == Kind::Added && key.scope == Scope::AppWide;
+		}));
+	for (const auto toLayered : { false, true }) {
+		const auto whole = QByteArray("version=1\n[lists.work]\nmembers=[1]\n");
+		const auto summary = Purple::SummarizeConfigChange(
+			toLayered ? whole : fork, toLayered ? fork : whole);
+		CHECK_EQ(summary.entries.size(), size_t(1));
+		CHECK(summary.entries.front().table.isEmpty());
+		CHECK(summary.entries.front().mixedScopes);
+		const auto &facts = summary.entries.front().keys;
+		CHECK_EQ(facts.size(), size_t(2));
+		CHECK(facts.back().addressKind == Address::ListDefinition);
+		CHECK_EQ(facts.back().table, u"lists.work"_q);
+		CHECK(facts.back().scope == Scope::AppWide);
+		CHECK(facts.back().kind == (toLayered ? Kind::Removed : Kind::Added));
+	}
+	struct EmptyPathCase {
+		QByteArray header;
+		QByteArray oldValue;
+		QByteArray newValue;
+		QString expectedTable;
+		QString expectedKey;
+		Scope expectedScope;
+	};
+	for (const auto &test : std::vector<EmptyPathCase>{
+		{ "[lists.work]\n", "\"\"={members=[1]}\n", "\"\"={members=[2]}\n",
+			u"lists.work.\"\""_q, u"members"_q, Scope::AppWide },
+		{ "[last_seen]\n", "\"\"={trade_remember='1h'}\n",
+			"\"\"={trade_remember='2h'}\n", u"last_seen.\"\""_q,
+			u"trade_remember"_q, Scope::Unknown },
+		{ "[lists.work]\n", "\"\"={\"\"={members=[1]}}\n",
+			"\"\"={\"\"={members=[2]}}\n", u"lists.work.\"\".\"\""_q,
+			u"members"_q, Scope::AppWide },
+		{ "[last_seen]\n", "\"\"={\"\"={trade_remember='1h'}}\n",
+			"\"\"={\"\"={trade_remember='2h'}}\n", u"last_seen.\"\".\"\""_q,
+			u"trade_remember"_q, Scope::Unknown },
+		{ "[lists.work]\n", "\"\"=1\n", "\"\"=2\n",
+			u"lists.work"_q, QString(), Scope::AppWide },
+		{ "[last_seen]\n", "\"\"=1\n", "\"\"=2\n",
+			u"last_seen"_q, QString(), Scope::PerAccount },
+	}) {
+		for (const auto kind : { Kind::Added, Kind::Removed, Kind::Changed }) {
+			const auto before = test.header
+				+ (kind == Kind::Added ? QByteArray() : test.oldValue);
+			const auto after = test.header
+				+ (kind == Kind::Removed ? QByteArray() : test.newValue);
+			const auto summary = Purple::SummarizeConfigChange(before, after);
+			CHECK(summary.parsed);
+			CHECK_EQ(summary.entries.size(), size_t(1));
+			CHECK_EQ(summary.entries.front().keys.size(), size_t(1));
+			const auto &key = summary.entries.front().keys.front();
+			CHECK(key.addressKind == Address::Key);
+			CHECK_EQ(key.table, test.expectedTable);
+			CHECK_EQ(key.key, test.expectedKey);
+			CHECK(key.scope == test.expectedScope);
+			CHECK(key.kind == kind);
+		}
+	}
+	const auto order = Purple::SummarizeConfigChange(
+		"[lists.z]\nmembers=[]\n[lists.a]\nmembers=[]\n",
+		"[lists.a]\nmembers=[]\n[lists.z]\nmembers=[]\n");
+	CHECK(order.entries.front().keys.front().addressKind == Address::Unit);
+	CHECK(order.entries.front().keys.front().scope == Scope::AppWide);
+}
+
+void TestScopeVersionFallbackFacts() {
+	Begin("scope version fallback facts");
+	using Kind = Purple::ConfigChangeKind;
+	using Scope = Purple::SettingScope;
+	using Address = Purple::ConfigChangeAddressKind;
+	const auto body = QByteArray("[lists.work]\nmembers=[1]\n");
+	const auto definitions = [](const Purple::ConfigChangeSummary &summary) {
+		auto result = std::vector<Purple::ConfigKeyChange>();
+		for (const auto &entry : summary.entries) {
+			for (const auto &key : entry.keys) {
+				if (key.addressKind == Address::ListDefinition) {
+					result.push_back(key);
+				}
+			}
+		}
+		return result;
+	};
+	for (const auto &literal : {
+			QByteArray("0"), QByteArray("-1"), QByteArray("-2147483648"),
+			QByteArray("2147483648"), QByteArray("-2147483649"),
+			QByteArray("9223372036854775807"),
+			QByteArray("-9223372036854775808"), QByteArray("'wrong'"),
+			QByteArray("'2'"), QByteArray("false"), QByteArray("1.5"),
+			QByteArray("[]"), QByteArray("{ schema = 2 }") }) {
+		const auto prefix = "version=" + literal + '\n';
+		std::printf("SCOPE_VERSION_CASE literal=%s phase=parser\n", literal.constData());
+		const auto parsed = Parse(QString::fromUtf8(prefix + body));
+		CHECK(parsed.ok());
+		CHECK_EQ(parsed.settings.version, 1);
+		for (const auto added : { false, true }) {
+			std::printf("SCOPE_VERSION_CASE literal=%s phase=list direction=%s\n",
+				literal.constData(), added ? "add" : "remove");
+			const auto summary = Purple::SummarizeConfigChange(
+				added ? prefix : prefix + body, added ? prefix + body : prefix);
+			CHECK(summary.parsed);
+			const auto facts = definitions(summary);
+			CHECK_EQ(facts.size(), size_t(1));
+			if (!facts.empty()) {
+				CHECK_EQ(facts.front().table, u"lists.work"_q);
+				CHECK(facts.front().scope == Scope::AppWide);
+				CHECK(facts.front().kind == (added ? Kind::Added : Kind::Removed));
+			}
+			const auto entry = std::find_if(summary.entries.begin(),
+				summary.entries.end(), [](const auto &value) {
+					return value.table == u"lists.work"_q;
+				});
+			CHECK(entry != summary.entries.end());
+			if (entry != summary.entries.end()) {
+				CHECK(entry->mixedScopes);
+				CHECK(entry->scope == Scope::Unknown);
+			}
+		}
+		for (const auto reverse : { false, true }) {
+			std::printf("SCOPE_VERSION_CASE literal=%s phase=explicit1 direction=%s\n",
+				literal.constData(), reverse ? "from-1" : "to-1");
+			const auto explicitOne = QByteArray("version=1\n") + body;
+			const auto same = Purple::SummarizeConfigChange(
+				reverse ? explicitOne : prefix + body,
+				reverse ? prefix + body : explicitOne);
+			CHECK(same.parsed);
+			CHECK(definitions(same).empty());
+			std::printf("SCOPE_VERSION_CASE literal=%s phase=layered direction=%s\n",
+				literal.constData(), reverse ? "from-2" : "to-2");
+			const auto layered = QByteArray("version=2\n") + body;
+			const auto transition = Purple::SummarizeConfigChange(
+				reverse ? layered : prefix + body,
+				reverse ? prefix + body : layered);
+			CHECK(transition.parsed);
+			const auto facts = definitions(transition);
+			CHECK_EQ(facts.size(), size_t(1));
+			if (!facts.empty()) {
+				CHECK_EQ(facts.front().table, u"lists.work"_q);
+				CHECK(facts.front().scope == Scope::AppWide);
+				CHECK(facts.front().kind == (reverse ? Kind::Added : Kind::Removed));
+			}
+		}
+	}
+	for (const auto version : { 3, 2147483647 }) {
+		const auto prefix = "version=" + QByteArray::number(version) + '\n';
+		const auto parsed = Parse(QString::fromUtf8(prefix + body));
+		CHECK(parsed.ok());
+		CHECK_EQ(parsed.settings.version, version);
+		for (const auto added : { false, true }) {
+			const auto summary = Purple::SummarizeConfigChange(
+				added ? prefix : prefix + body, added ? prefix + body : prefix);
+			CHECK(summary.parsed);
+			CHECK(definitions(summary).empty());
+			CHECK_EQ(summary.entries.size(), size_t(1));
+			if (!summary.entries.empty()) {
+				CHECK(summary.entries.front().scope == Scope::PerAccount);
+			}
+		}
+	}
+}
+
+void TestStructuredVersionFactCarrier() {
+	Begin("structured version fact carrier");
+	using Kind = Purple::ConfigChangeKind;
+	using Scope = Purple::SettingScope;
+	using Address = Purple::ConfigChangeAddressKind;
+	for (const auto &literal : {
+			QByteArray("0"), QByteArray("'wrong'"), QByteArray("{}"),
+			QByteArray("{ schema = 2 }"), QByteArray("{ nested = { schema = 2 } }"),
+			QByteArray("[{ name = 'one' }]") }) {
+		const auto structured = literal.startsWith('{') || literal.startsWith('[');
+		for (const auto changedList : { false, true }) {
+			const auto before = "version=" + literal
+				+ "\nother=1\n[lists.work]\nmembers=[1]\n";
+			const auto after = QByteArray("version=2\nother=2\n[lists.work]\nmembers=")
+				+ (changedList ? "[2]\n" : "[1]\n");
+			for (const auto reverse : { false, true }) {
+				std::printf("SCOPE_CARRIER_CASE literal=%s direction=%s changed-list=%d\n",
+					literal.constData(), reverse ? "from-2" : "to-2", int(changedList));
+				const auto summary = Purple::SummarizeConfigChange(
+					reverse ? after : before, reverse ? before : after);
+				CHECK(summary.parsed);
+				auto definitionCount = 0;
+				for (const auto &entry : summary.entries) {
+					for (const auto &key : entry.keys) {
+						if (key.addressKind != Address::ListDefinition) {
+							continue;
+						}
+						++definitionCount;
+						CHECK_EQ(key.table, u"lists.work"_q);
+						CHECK(key.scope == Scope::AppWide);
+						CHECK(key.kind == (reverse ? Kind::Added : Kind::Removed));
+						CHECK_EQ(entry.table, changedList ? u"lists.work"_q
+							: structured ? u"version"_q : QString());
+					}
+				}
+				CHECK_EQ(definitionCount, 1);
+			}
+		}
+		const auto explicitOne = QByteArray("version=1\nother=2\n[lists.work]\nmembers=[1]\n");
+		const auto invalid = "version=" + literal
+			+ "\nother=1\n[lists.work]\nmembers=[1]\n";
+		for (const auto reverse : { false, true }) {
+			std::printf("SCOPE_CARRIER_CASE literal=%s direction=%s effective-version=1\n",
+				literal.constData(), reverse ? "from-1" : "to-1");
+			const auto summary = Purple::SummarizeConfigChange(
+				reverse ? explicitOne : invalid, reverse ? invalid : explicitOne);
+			CHECK(summary.parsed);
+			for (const auto &entry : summary.entries) {
+				for (const auto &key : entry.keys) {
+					CHECK(key.addressKind != Address::ListDefinition);
+				}
+			}
+		}
+	}
+}
+
 void TestSyncJson() {
 	Begin("sync json");
 	const auto canonical = [](const QByteArray &input, const QByteArray &expected) {
@@ -14840,6 +15241,10 @@ int main() {
 	TestConfigConvergence();
 	TestConfigDiff();
 	TestConfigChangeSummary();
+	TestScopedConfigChangesAndFileFingerprints();
+	TestScopeDefinitionAndEmptyKeyRegressions();
+	TestScopeVersionFallbackFacts();
+	TestStructuredVersionFactCarrier();
 	TestPersianKeyboardToEnglish();
 	TestLists();
 	TestKinds();

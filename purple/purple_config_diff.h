@@ -8,6 +8,7 @@ option) any later version.
 #pragma once
 
 #include "purple/purple_types.h"
+#include "purple/purple_settings.h"
 
 #include <QtCore/QByteArray>
 #include <QtCore/QString>
@@ -58,10 +59,27 @@ enum class ConfigChangeKind {
 	Changed,
 };
 
+enum class ConfigChangeAddressKind {
+	Key,
+	Unit,
+	ListDefinition,
+};
+
+struct ConfigKeyChange {
+	ConfigChangeKind kind = ConfigChangeKind::Changed;
+	QString table;
+	QString key;
+	SettingScope scope = SettingScope::Unknown;
+	ConfigChangeAddressKind addressKind = ConfigChangeAddressKind::Key;
+};
+
 struct ConfigChangeEntry {
 	ConfigChangeKind kind = ConfigChangeKind::Changed;
 	QString table;
 	QString label;
+	SettingScope scope = SettingScope::Unknown;
+	bool mixedScopes = false;
+	std::vector<ConfigKeyChange> keys;
 };
 
 struct ConfigChangeSummary {

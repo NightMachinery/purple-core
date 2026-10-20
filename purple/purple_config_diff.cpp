@@ -516,8 +516,10 @@ auto LineDiffer::middle(
 struct ChangeUnit {
 	QString table;
 	QString label;
-	std::map<std::string, const toml::node*> values;
+	std::map<std::optional<std::string>, const toml::node*> values;
 	std::vector<QString> order;
+	bool definesList = false;
+	bool ownsVersion = false;
 };
 
 using ChangeUnits = std::map<QString, ChangeUnit>;
@@ -791,18 +793,21 @@ void ChangeCollector::addElements(
 		auto &unit = units[path + u'\n' + name];
 		unit.table = path;
 		unit.label = ElementLabel(path, name);
-		unit.values[std::string()] = &item;
+		unit.values[std::nullopt] = &item;
 		parent.order.push_back(prefix + name);
 	}
 }
 
 ChangeUnits ChangeCollector::collect(const toml::table &root) const {
 	auto result = ChangeUnits();
+	const auto version = root["version"].value<int>();
+	const auto whole = !version || *version <= kDefaultSettingsVersion;
 	for (auto &&[key, value] : root) {
 		const auto name = key.str();
 		if (!tableLike(name)) {
 			auto &unit = result[QString()];
 			unit.label = u"Top-level settings"_q;
+			unit.ownsVersion = unit.ownsVersion || name == "version";
 			unit.values[std::string(name)] = &value;
 			continue;
 		}
@@ -810,6 +815,7 @@ ChangeUnits ChangeCollector::collect(const toml::table &root) const {
 		auto &parent = result[path];
 		parent.table = path;
 		parent.label = TableLabel(name);
+		parent.ownsVersion = name == "version";
 		const auto table = value.as_table();
 		if (table && Collection(name)) {
 			auto children = std::vector<std::tuple<
@@ -825,7 +831,10 @@ ChangeUnits ChangeCollector::collect(const toml::table &root) const {
 				auto &unit = result[childPath];
 				unit.table = childPath;
 				unit.label = ChildLabel(name, Utf8(childKey.str()));
-				unit.values[std::string()] = &child;
+				unit.values[std::nullopt] = &child;
+				unit.definesList = name == "lists"
+					&& (whole || child.as_table()->contains("title")
+						|| child.as_table()->contains("kinds"));
 				const auto &begin = child.source().begin;
 				children.emplace_back(begin.line, begin.column, childPath);
 			}
@@ -850,7 +859,7 @@ ChangeUnits ChangeCollector::collect(const toml::table &root) const {
 		} else if (splits(name)) {
 			addElements(result, parent, path, *value.as_array(), QString());
 		} else {
-			parent.values[std::string()] = &value;
+			parent.values[std::nullopt] = &value;
 		}
 	}
 	return result;
@@ -882,6 +891,106 @@ ChangeUnits ChangeCollector::collect(const toml::table &root) const {
 		return result;
 	};
 	return common(a.order, b.order) == common(b.order, a.order);
+}
+
+void CollectKeyChanges(
+		std::vector<ConfigKeyChange> &result,
+		const QString &table,
+		const QString &key,
+		bool wholeUnit,
+		const toml::node *before,
+		const toml::node *after) {
+	if (before && after && Same(*before, *after)) {
+		return;
+	}
+	const auto path = SettingsTablePath(table);
+	const auto exception = (!wholeUnit && path)
+		? SettingsScopeOverride(*path, key) : std::nullopt;
+	const auto oldTable = before ? before->as_table() : nullptr;
+	const auto newTable = after ? after->as_table() : nullptr;
+	if (!exception && (oldTable || newTable)) {
+		const auto childPath = wholeUnit
+			? table
+			: table.isEmpty()
+			? DottedKey(key.toUtf8().toStdString())
+			: table + u'.' + DottedKey(key.toUtf8().toStdString());
+		auto children = std::map<std::string, const toml::node*>();
+		if (oldTable) {
+			for (auto &&[name, value] : *oldTable) {
+				children[std::string(name.str())] = &value;
+			}
+		}
+		if (newTable) {
+			for (auto &&[name, value] : *newTable) {
+				children.try_emplace(std::string(name.str()), nullptr);
+			}
+		}
+		for (const auto &[name, value] : children) {
+			CollectKeyChanges(
+				result,
+				childPath,
+				Utf8(name),
+				false,
+				value,
+				newTable ? newTable->get(name) : nullptr);
+		}
+		if ((!before || oldTable) && (!after || newTable)) {
+			return;
+		}
+	}
+	const auto kind = !before
+		? ConfigChangeKind::Added
+		: !after
+		? ConfigChangeKind::Removed
+		: ConfigChangeKind::Changed;
+	result.push_back({ kind, table, key, SettingsScope(table, key),
+		wholeUnit ? ConfigChangeAddressKind::Unit : ConfigChangeAddressKind::Key });
+}
+
+void CollectListDefinitionChange(
+		std::vector<ConfigKeyChange> &result,
+		const ChangeUnit *before,
+		const ChangeUnit *after) {
+	const auto oldDefinition = before && before->definesList;
+	const auto newDefinition = after && after->definesList;
+	if (oldDefinition == newDefinition) {
+		return;
+	}
+	const auto &table = after ? after->table : before->table;
+	result.push_back({ newDefinition
+		? ConfigChangeKind::Added : ConfigChangeKind::Removed,
+		table, QString(), SettingsScope(table, QString()),
+		ConfigChangeAddressKind::ListDefinition });
+}
+
+[[nodiscard]] std::vector<ConfigKeyChange> KeyChanges(
+		const ChangeUnit *before,
+		const ChangeUnit *after) {
+	auto result = std::vector<ConfigKeyChange>();
+	auto keys = std::map<std::optional<std::string>, const toml::node*>();
+	if (before) {
+		keys = before->values;
+	}
+	if (after) {
+		for (const auto &[key, value] : after->values) {
+			keys.try_emplace(key, nullptr);
+		}
+	}
+	const auto &table = after ? after->table : before->table;
+	for (const auto &[key, value] : keys) {
+		const auto found = after ? after->values.find(key)
+			: decltype(after->values)::const_iterator();
+		CollectKeyChanges(result, table, key ? Utf8(*key) : QString(), !key, value,
+			(after && found != after->values.end()) ? found->second : nullptr);
+	}
+	CollectListDefinitionChange(result, before, after);
+	if (result.empty()) {
+		const auto kind = !before ? ConfigChangeKind::Added
+			: !after ? ConfigChangeKind::Removed : ConfigChangeKind::Changed;
+		result.push_back({ kind, table, QString(),
+			SettingsScope(table, QString()), ConfigChangeAddressKind::Unit });
+	}
+	return result;
 }
 
 } // namespace
@@ -937,23 +1046,49 @@ ConfigChangeSummary SummarizeConfigChange(
 	const auto now = collector.collect(*second);
 	auto result = ConfigChangeSummary();
 	result.parsed = true;
-	const auto add = [&](ConfigChangeKind kind, const ChangeUnit &unit) {
-		result.entries.push_back({ kind, unit.table, unit.label });
+	auto versionFactsAttached = false;
+	const auto add = [&](ConfigChangeKind kind,
+			const ChangeUnit *beforeUnit, const ChangeUnit *afterUnit) {
+		const auto &unit = afterUnit ? *afterUnit : *beforeUnit;
+		auto entry = ConfigChangeEntry{ kind, unit.table, unit.label };
+		entry.keys = KeyChanges(beforeUnit, afterUnit);
+		const auto ownsVersion = (beforeUnit && beforeUnit->ownsVersion)
+			|| (afterUnit && afterUnit->ownsVersion);
+		if (ownsVersion && !versionFactsAttached) {
+			for (const auto &[id, oldUnit] : old) {
+				const auto found = now.find(id);
+				if (found != now.end()
+					&& SameValues(oldUnit, found->second)
+					&& SameOrder(oldUnit, found->second)) {
+					CollectListDefinitionChange(entry.keys, &oldUnit, &found->second);
+				}
+			}
+			versionFactsAttached = true;
+		}
+		entry.scope = entry.keys.front().scope;
+		entry.mixedScopes = std::any_of(
+			entry.keys.begin(), entry.keys.end(), [&](const auto &key) {
+				return key.scope != entry.scope;
+			});
+		if (entry.mixedScopes) {
+			entry.scope = SettingScope::Unknown;
+		}
+		result.entries.push_back(std::move(entry));
 	};
 	for (const auto &[id, unit] : old) {
 		const auto other = now.find(id);
 		if (other == now.end()) {
 			if (!unit.values.empty()) {
-				add(ConfigChangeKind::Removed, unit);
+				add(ConfigChangeKind::Removed, &unit, nullptr);
 			}
 		} else if (!SameValues(unit, other->second)
 			|| !SameOrder(unit, other->second)) {
-			add(ConfigChangeKind::Changed, other->second);
+			add(ConfigChangeKind::Changed, &unit, &other->second);
 		}
 	}
 	for (const auto &[id, unit] : now) {
 		if (!old.contains(id) && !unit.values.empty()) {
-			add(ConfigChangeKind::Added, unit);
+			add(ConfigChangeKind::Added, nullptr, &unit);
 		}
 	}
 	const auto rank = [](ConfigChangeKind kind) {

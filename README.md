@@ -79,6 +79,11 @@ boundaries, defaults, writer behavior and the remaining integration work.
   a whole, and the top-level keys together. Labels follow the sync review's
   wording (List "work", Schedule "phone", Device names); a side that does not
   parse yields `parsed` false so the client can fall back to the line diff.
+  Entries also carry registry-derived scope and per-key changes. Mixed entries
+  retain their existing label and expose each key's scope and removal separately. List
+  definitions retain their app-wide existence facts in whole files, while v2
+  member-only forks remain per-account. Explicit address kinds distinguish
+  literal empty keys from whole-unit and list-definition facts.
   See [`docs/config-sync.md`](docs/config-sync.md).
 - `purple/purple_sync_json.{h,cpp}` - validates and canonicalizes JSON for
   account-backed sync. It preserves every member, including unknown members,
@@ -152,6 +157,8 @@ boundaries, defaults, writer behavior and the remaining integration work.
   `settings.toml`, sync changes nothing except finishing a post staged before.
   Clients keep file I/O, History, their state store and Telegram posting. See
   [`docs/sync-config-flow.md`](docs/sync-config-flow.md).
+  `ReviewSyncConfigRelink` provides pure root-store ownership proof against an
+  explicitly identified account inventory, without changing a binding or state.
 - `purple/purple_sync_config_describe.{h,cpp}` - which message, action and
   devices a review or failed apply deserves, the choices a dialog offers,
   device name parts, whether `settings.toml` can be published, and whether a

@@ -500,6 +500,37 @@ SyncConfigReview ReviewSyncConfigInventory(
 	return result;
 }
 
+SyncConfigRelinkReview ReviewSyncConfigRelink(
+		const SyncAccountInventoryResult &inventory,
+		const SyncLocalState &state,
+		uint64_t expectedAccountUserId,
+		const QByteArray &stagedRecord,
+		const SyncSettingsFile &local) {
+	auto result = SyncConfigRelinkReview();
+	if (!expectedAccountUserId
+		|| inventory.accountUserId != expectedAccountUserId) {
+		result.review.status = SyncConfigReviewStatus::AccountUnavailable;
+		return result;
+	}
+	result.review = ReviewSyncConfigInventory(
+		inventory, &state, stagedRecord, local);
+	result.review.bound = false;
+	if (result.review.status != SyncConfigReviewStatus::Ready) {
+		return result;
+	}
+	auto scoped = inventory;
+	SelectSyncSpaceIfEmpty(scoped, state.space);
+	const auto own = ReconcileOwnConfigInventory(
+		state, scoped, expectedAccountUserId, stagedRecord);
+	result.ownStatus = own.status;
+	result.proven = own.status == SyncOwnInventoryStatus::Present
+		|| own.status == SyncOwnInventoryStatus::PendingFound
+		|| (own.status == SyncOwnInventoryStatus::Absent
+			&& state.config.confirmedSeq == 0
+			&& state.library.confirmedSeq == 0);
+	return result;
+}
+
 QString SyncConfigReviewStamp(const SyncConfigReview &review) {
 	auto writer = StampWriter();
 	writer.add("stamp", QByteArray("purple-config-review-1"));

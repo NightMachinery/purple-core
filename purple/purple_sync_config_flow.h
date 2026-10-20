@@ -130,6 +130,19 @@ void SelectSyncSpaceIfEmpty(
 	const SyncSettingsFile &local);
 
 [[nodiscard]] QString SyncConfigReviewStamp(const SyncConfigReview &review);
+struct SyncConfigRelinkReview {
+	SyncConfigReview review;
+	SyncOwnInventoryStatus ownStatus = SyncOwnInventoryStatus::Incomplete;
+	bool proven = false;
+};
+
+[[nodiscard]] SyncConfigRelinkReview ReviewSyncConfigRelink(
+	const SyncAccountInventoryResult &inventory,
+	const SyncLocalState &state,
+	uint64_t expectedAccountUserId,
+	const QByteArray &stagedRecord,
+	const SyncSettingsFile &local);
+
 [[nodiscard]] SyncConfigReview SyncConfigJoinedReview(
 	const SyncConfigReview &shown,
 	const SyncLocalState &joined);

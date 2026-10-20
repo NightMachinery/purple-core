@@ -306,3 +306,56 @@ holding nothing but rulesets) produces no entry itself. Entries are ordered
 Changed, then Added, then Removed, and within each kind by label ignoring
 case, then by label and table. The labels are English; a client that
 localizes can derive its own wording from `table` and the kind of unit.
+
+Each `ConfigChangeEntry` also has `scope`, `mixedScopes` and `keys`. Each
+`ConfigKeyChange` names its dotted TOML table, decoded key, Added/Removed/Changed
+kind and `SettingsScope(table, key)`. The existing summary units, labels and
+ordering remain unchanged. A key removed from a surviving table is Removed even
+though the enclosing entry is Changed. Lists with quoted names use the same
+registry exception for `members` as any other list.
+
+When all changed keys have the same scope, the entry carries that scope. When
+they differ, `mixedScopes` is true and the entry scope is Unknown; consumers must
+group the key details instead of classifying the whole entry as unused. An
+unregistered key remains Unknown independently. Named key exceptions are atomic
+even when their value is structured, matching the registry's parent-key policy.
+`addressKind` distinguishes Key, Unit and ListDefinition. Key always names a
+literal decoded TOML key, including the valid empty string. Unit identifies a
+whole-value or collection-order fact; its empty key is not a literal key.
+ListDefinition identifies an app-wide list-existence addition or removal. All
+scope values still come from the shared registry. Quoted empty path components
+remain explicit, such as `lists.work.""`, independently of the address kind.
+
+A missing-version or version1 file defines each list table, even when it holds
+only members. A version2 table defines the list only when it sets title or kinds;
+a member-only fork does not add an app-wide list definition. Definition facts
+accompany key changes within the existing summary entry. Editing members of an
+already-defined list stays per-account. If only a version change alters whether
+an otherwise unchanged table defines a list, its definition fact accompanies the
+existing unit that owns the root version value, exactly once. That is the
+top-level entry for ordinary scalar versions, or the existing version unit when
+paired scalar/structured values are grouped there. Other changed root keys do
+not receive duplicate definition facts. Changed lists retain their own local
+facts. No extra summary unit or label is introduced.
+Whole-file classification uses the parser's exact `value<int>()` primitive and
+fallback: a missing, wrongly typed or unrepresentable version, or a number below
+1, resolves to version1. Such warning-bearing files remain usable and retain
+their whole-file list facts. Replacing an invalid version with explicit1 does
+not create an existence transition. A representable version above2 keeps that
+version and is not treated as a fallback1 file.
+No entry is created for cosmetic edits, and a TOML parse refusal still returns
+no semantic entries.
+
+## File-owned automatic-send fingerprints
+
+`ShouldAutoSend(settings, lastSentFingerprint, lastImportedFingerprint, bytes,
+wroteFromImport)` takes the written file's own send/import history explicitly.
+It sends only when that file's own parsed `sync.sendAfterSave` is enabled, this
+write is not an import, and the bytes match neither fingerprint. Empty history
+does not suppress the first send. The function does no file or account lookup
+and cannot verify that its caller selected the correct file; selecting that
+file's settings and fingerprints is the caller's obligation.
+
+The existing State overload forwards its two fields to the explicit overload,
+preserving current callers and the backward-compatible root-file fields in
+`state.toml`. Per-account storage and frontend routing are separate work.
