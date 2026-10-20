@@ -2679,7 +2679,7 @@ void TestFlowReviewStatuses() {
 	broken.add(QByteArray("{\"not\":\"a record\"}"));
 	CHECK(Review(device, broken).status == SyncConfigReviewStatus::NeedsReview);
 
-	const auto newerText = QByteArray("version = 2\n");
+	const auto newerText = QByteArray("version = 3\n");
 	const auto newerVersion = *MakeConfigVersion(newerText, {});
 	auto n = MakeRemote('n', u"Linux"_q);
 	const auto newerRecord = SerializeSyncEnvelope(SyncEnvelope{
@@ -2696,7 +2696,7 @@ void TestFlowReviewStatuses() {
 			{ u"seq"_q, 1 },
 			{ u"at"_q, 0 },
 			{ u"payload"_q, QJsonObject{
-				{ u"schema"_q, 2 },
+				{ u"schema"_q, 3 },
 				{ u"key"_q, newerVersion.key },
 				{ u"parents"_q, QJsonArray() },
 				{ u"lineage"_q, QJsonArray() },

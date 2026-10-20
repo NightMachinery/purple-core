@@ -16,6 +16,7 @@ option) any later version.
 #include "purple/purple_config_sync.h"
 #include "purple/purple_config_diff.h"
 #include "purple/purple_config_payload.h"
+#include "purple/purple_local_choice.h"
 #include "purple/purple_passcode.h"
 #include "purple/purple_screentime.h"
 #include "purple/purple_settings.h"
@@ -1156,10 +1157,10 @@ void TestVersion() {
 
 	// A file from a newer build parses as far as this one understands it, and
 	// says so. Everything this build knows about is still exactly where it was.
-	const auto newer = Parse(u"version = 2\n"_q + Example());
+	const auto newer = Parse(u"version = 3\n"_q + Example());
 	CHECK(newer.ok());
-	CHECK_EQ(newer.settings.version, 2);
-	CHECK(WarnsAbout(newer, u"version 2"_q));
+	CHECK_EQ(newer.settings.version, 3);
+	CHECK(WarnsAbout(newer, u"version 3"_q));
 	CHECK_EQ(ListNames(newer.settings).join(u","_q),
 		u"os,emergency,colleagues,people,noise"_q);
 	CHECK_EQ(int(newer.settings.presets.size()), 2);
@@ -11933,13 +11934,13 @@ void TestConfigPayload() {
 	changed = rootPayload;
 	changed.insert(u"schema"_q, 2);
 	rejects(changed, Purple::ConfigPayloadError::SchemaMismatch);
-	const auto newerText = QByteArray("version = 2\n");
+	const auto newerText = QByteArray("version = 3\n");
 	const auto newerVersion = Purple::MakeConfigVersion(newerText, {});
 	CHECK(newerVersion.has_value());
-	const auto newer = inspect(payload(*newerVersion, newerText, 2));
+	const auto newer = inspect(payload(*newerVersion, newerText, 3));
 	CHECK(bool(newer));
 	CHECK(newer.status == Purple::ConfigPayloadStatus::NewerSchema);
-	CHECK_EQ(newer.schema, 2);
+	CHECK_EQ(newer.schema, 3);
 	CHECK(!newer.localWarnings.empty());
 	const auto libraryWrite = Purple::SerializeSyncEnvelope(
 		Purple::SyncEnvelope{ document(rootPayload, u"library"_q) });
@@ -12066,7 +12067,7 @@ void TestConfigRecordBuilder() {
 	invalidAcknowledgement.text = "version = [\n";
 	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).error
 		== Purple::ConfigRecordBuildError::TomlSyntax);
-	invalidAcknowledgement.text = "version = 2\n";
+	invalidAcknowledgement.text = "version = 3\n";
 	CHECK(Purple::BuildConfigRecord(invalidAcknowledgement).status
 		== Purple::ConfigRecordBuildStatus::NewerSchema);
 	invalidAcknowledgement = acknowledgement;
@@ -12097,7 +12098,7 @@ void TestConfigRecordBuilder() {
 	const auto syntax = Purple::BuildConfigRecord(input);
 	CHECK(syntax.error == Purple::ConfigRecordBuildError::TomlSyntax);
 	CHECK(!syntax.tomlError.isEmpty());
-	input.text = "version = 2\n";
+	input.text = "version = 3\n";
 	const auto newer = Purple::BuildConfigRecord(input);
 	CHECK(newer.status == Purple::ConfigRecordBuildStatus::NewerSchema);
 	CHECK(newer.error == Purple::ConfigRecordBuildError::None);
@@ -13675,10 +13676,10 @@ void TestSyncInventory() {
 			{ u"text"_q, QString::fromUtf8(text) },
 		};
 	};
-	const auto newerText = QByteArray("version = 2\n");
+	const auto newerText = QByteArray("version = 3\n");
 	const auto newerRecord = envelopeOf(
 		u"config"_q,
-		payloadOf(*Purple::MakeConfigVersion(newerText, {}), newerText, 2));
+		payloadOf(*Purple::MakeConfigVersion(newerText, {}), newerText, 3));
 	CHECK(!newerRecord.isEmpty());
 	const auto newer = Purple::ClassifySyncCandidate(8, newerRecord);
 	CHECK(newer.status == Status::NewerSchema);
@@ -14036,7 +14037,783 @@ void TestSyncInventory() {
 		== Own::Absent);
 }
 
+void TestAccountIdentityAndLocalChoice() {
+	using namespace Purple;
+	Begin("Account identity and device-local choices");
+	const auto production = AccountKey{ 0, 42 };
+	const auto test = AccountKey{ 1, 42 };
+	const auto other = AccountKey{ 0, 73 };
+	CHECK(production != test);
+	for (const auto environment : { 0, 1 }) {
+		for (const auto id : { int64(1), int64(42),
+				std::numeric_limits<int64>::max() }) {
+			const auto text = AccountKeyText(environment, id);
+			CHECK(text.has_value());
+			if (text) {
+				CHECK(ParseAccountKey(*text) == (AccountKey{ environment, id }));
+			}
+		}
+	}
+	CHECK_EQ(*AccountKeyText(0, 42), u"0-42"_q);
+	CHECK_EQ(*AccountKeyText(1, 42), u"1-42"_q);
+	CHECK(!AccountKeyText(0, 0));
+	CHECK(!AccountKeyText(1, -1));
+	CHECK(!AccountKeyText(-1, 42));
+	CHECK(!AccountKeyText(2, 42));
+	for (const auto text : {
+			u""_q, u"0"_q, u"0-"_q, u"0-0"_q, u"0--1"_q,
+			u"0-+1"_q, u"0-01"_q, u"00-1"_q, u"2-1"_q,
+			u"-1-42"_q, u"0-9223372036854775808"_q,
+			u"1-18446744073709551615"_q, u"0-1e3"_q, u"0-1.0"_q,
+			u"0-1/../../settings.toml"_q, u"../0-42"_q,
+			u"0-42\\settings.toml"_q, u"0-42:extra"_q,
+			u" 0-42"_q, u"0-42 "_q, u"0-42\n"_q,
+			u"0-\u0661"_q, u"\uff10-42"_q }) {
+		CHECK(!ParseAccountKey(text));
+	}
+	CHECK(!ParseAccountKey(QString::fromUtf16(u"0-42\0tail", 9)));
+	const auto empty = ParseLocalChoice(QString(), u"local.toml"_q);
+	CHECK(empty.ok());
+	CHECK(empty.warnings.empty());
+	CHECK(!empty.choice.globalAccount);
+	CHECK(!empty.choice.rootFileAccount);
+	CHECK(empty.choice.accountWorkMode.empty());
+	CHECK(GlobalAccountFor(empty.choice, production) == production);
+	CHECK(!GlobalAccountFor(empty.choice, AccountKey{ 0, 0 }));
+	CHECK(AccountWorkModeFor(empty.choice, test, production)
+		== AccountWorkMode::Own);
+	CHECK(ParseOwnerRecord(QString(), u"root.toml"_q).status
+		== OwnerRecordStatus::Missing);
+	CHECK(ParseOwnerRecord(u"# no owner yet\n"_q, u"root.toml"_q).status
+		== OwnerRecordStatus::Missing);
+	const auto text = u"global_account = '1-42'\n"
+		"root_file_account = '0-42'\n"
+		"[account_work_mode]\n"
+		"'0-42' = 'stock'\n"
+		"'1-42' = 'follow'\n"
+		"'0-73' = 'own'\n"_q;
+	const auto parsed = ParseLocalChoice(text, u"local.toml"_q);
+	CHECK(parsed.ok());
+	CHECK(parsed.choice.globalAccount == test);
+	CHECK(parsed.choice.rootFileAccount == production);
+	CHECK(parsed.choice.accountWorkMode.size() == 3);
+	CHECK(parsed.warnings.size() == 1);
+	CHECK(GlobalAccountFor(parsed.choice, other) == test);
+	CHECK(AccountWorkModeFor(parsed.choice, production, test)
+		== AccountWorkMode::Stock);
+	CHECK(AccountWorkModeFor(parsed.choice, test, test)
+		== AccountWorkMode::Own);
+	CHECK(AccountWorkModeFor(parsed.choice, test, production)
+		== AccountWorkMode::Follow);
+	CHECK(AccountWorkModeFor(parsed.choice, other, test)
+		== AccountWorkMode::Own);
+	const auto owner = ParseOwnerRecord(text, u"local.toml"_q);
+	CHECK(owner.ok());
+	CHECK(owner.account == production);
+	const auto otherOwner = ParseOwnerRecord(
+		u"root_file_account = '1-42'\n"_q, u"root.toml"_q);
+	CHECK(otherOwner.ok());
+	CHECK(otherOwner.account == test);
+	CHECK(otherOwner.account != owner.account);
+	const auto fallback = ParseLocalChoice(
+		u"global_account = '../0-73'\nroot_file_account = '1-42'\n"_q,
+		u"local.toml"_q);
+	CHECK(fallback.ok());
+	CHECK(fallback.warnings.size() == 1);
+	CHECK(!fallback.choice.globalAccount);
+	CHECK(GlobalAccountFor(fallback.choice, production) == production);
+	CHECK(fallback.choice.rootFileAccount == test);
+	for (const auto value : {
+			u"42"_q, u"true"_q, u"[]"_q, u"{}"_q, u"'0-0'"_q,
+			u"'2-42'"_q, u"'0-042'"_q, u"'0-42/other'"_q }) {
+		const auto local = ParseLocalChoice(
+			u"global_account = %1\nroot_file_account = %1\n"_q.arg(value),
+			u"local.toml"_q);
+		CHECK(local.ok());
+		CHECK(local.warnings.size() == 2);
+		CHECK(!local.choice.globalAccount);
+		CHECK(!local.choice.rootFileAccount);
+		CHECK(GlobalAccountFor(local.choice, production) == production);
+		const auto invalid = ParseOwnerRecord(
+			u"root_file_account = %1\n"_q.arg(value), u"root.toml"_q);
+		CHECK(invalid.status == OwnerRecordStatus::Invalid);
+		CHECK(!invalid.account);
+		CHECK(!invalid.error.isEmpty());
+	}
+	for (const auto broken : {
+			u"global_account = \""_q,
+			u"root_file_account = '0-42'\nroot_file_account = '1-42'\n"_q,
+			u"[account_work_mode\n"_q,
+			u"root_file_account = '\u0001'\n"_q }) {
+		const auto local = ParseLocalChoice(broken, u"local.toml"_q);
+		CHECK(!local.ok());
+		CHECK(!local.choice.globalAccount);
+		CHECK(!local.choice.rootFileAccount);
+		CHECK(local.choice.accountWorkMode.empty());
+		const auto invalid = ParseOwnerRecord(broken, u"root.toml"_q);
+		CHECK(invalid.status == OwnerRecordStatus::Invalid);
+		CHECK(!invalid.account);
+	}
+	const auto unknown = ParseLocalChoice(
+		u"future = { option = 7 }\nversion = 99\n"
+		"global_account = '0-42'\nroot_file_account = '1-42'\n"
+		"[future_section]\nmode = 'future'\n"_q, u"local.toml"_q);
+	CHECK(unknown.ok());
+	CHECK(unknown.warnings.empty());
+	CHECK(unknown.choice.globalAccount == production);
+	CHECK(unknown.choice.rootFileAccount == test);
+	CHECK(ParseOwnerRecord(
+		u"root_file_account = '0-42'\nfuture = { x = 1 }\n"_q,
+		u"root.toml"_q).account == production);
+	const auto modes = ParseLocalChoice(
+		u"[account_work_mode]\n'0-42' = 'stock'\n'1-42' = 'follow'\n"
+		"'0-73' = 'OWN'\n'0-74' = 3\n'0-75' = { mode = 'stock' }\n"
+		"'../0-76' = 'stock'\n'0-77' = 'future'\n"_q, u"local.toml"_q);
+	CHECK(modes.ok());
+	CHECK(modes.warnings.size() == 5);
+	CHECK(modes.choice.accountWorkMode.size() == 2);
+	CHECK(AccountWorkModeFor(modes.choice, production, other)
+		== AccountWorkMode::Stock);
+	CHECK(AccountWorkModeFor(modes.choice, test, other)
+		== AccountWorkMode::Follow);
+	CHECK(AccountWorkModeFor(modes.choice, other, production)
+		== AccountWorkMode::Own);
+	const auto wrongTable = ParseLocalChoice(
+		u"account_work_mode = ['stock']\n"_q, u"local.toml"_q);
+	CHECK(wrongTable.ok());
+	CHECK(wrongTable.warnings.size() == 1);
+	CHECK(wrongTable.choice.accountWorkMode.empty());
+	const auto written = SerializeLocalChoice(parsed.choice);
+	CHECK(written.has_value());
+	if (written) {
+		const auto roundTrip = ParseLocalChoice(*written, u"local.toml"_q);
+		CHECK(roundTrip.ok());
+		CHECK(roundTrip.choice.globalAccount == test);
+		CHECK(roundTrip.choice.rootFileAccount == production);
+		CHECK(roundTrip.choice.accountWorkMode == parsed.choice.accountWorkMode);
+		CHECK(written->contains(u"accounts/1-42/settings.toml"_q));
+	}
+	const auto named = SerializeLocalChoice(parsed.choice, [](const AccountKey &) {
+		return u"Synthetic\nroot_file_account = '1-999'\r\t\u0001\u007f\u2028name"_q;
+	});
+	CHECK(named.has_value());
+	if (named) {
+		const auto roundTrip = ParseLocalChoice(*named, u"local.toml"_q);
+		CHECK(roundTrip.ok());
+		CHECK(roundTrip.choice.rootFileAccount == production);
+		CHECK(roundTrip.choice.globalAccount == test);
+		CHECK(roundTrip.choice.accountWorkMode == parsed.choice.accountWorkMode);
+		CHECK(ParseOwnerRecord(*named, u"local.toml"_q).account == production);
+	}
+	for (const auto key : { production, test }) {
+		const auto record = SerializeOwnerRecord(key);
+		CHECK(record.has_value());
+		if (record) {
+			const auto decoded = ParseOwnerRecord(*record, u"root.toml"_q);
+			CHECK(decoded.ok());
+			CHECK(decoded.account == key);
+		}
+	}
+	CHECK(!SerializeOwnerRecord(AccountKey{ 2, 42 }));
+	CHECK(!SerializeOwnerRecord(AccountKey{ 0, 0 }));
+	const auto files = SerializeLocalChoice(parsed.choice, {},
+		{ production, test, other });
+	CHECK(files.has_value());
+	if (files) {
+		CHECK(files->contains(u"#   accounts/1-42/settings.toml"_q));
+		CHECK(files->contains(u"#   accounts/0-73/settings.toml"_q));
+		CHECK(!files->contains(u"#   accounts/0-42/settings.toml"_q));
+		CHECK(ParseLocalChoice(*files, u"local.toml"_q)
+			.choice.accountWorkMode == parsed.choice.accountWorkMode);
+	}
+	CHECK(!SerializeLocalChoice(parsed.choice, {}, { AccountKey{ 2, 42 } }));
+	CHECK(!SerializeLocalChoice(empty.choice));
+	auto choice = LocalChoice();
+	choice.rootFileAccount = production;
+	const auto defaultWritten = SerializeLocalChoice(choice);
+	CHECK(defaultWritten.has_value());
+	if (defaultWritten) {
+		const auto defaults = ParseLocalChoice(*defaultWritten, u"local.toml"_q);
+		CHECK(defaults.choice.globalAccount == production);
+		CHECK(defaultWritten->contains(u"# That account's file on this device: settings.toml"_q));
+		CHECK(defaults.choice.accountWorkMode.empty());
+	}
+	choice.globalAccount = AccountKey{ 2, 42 };
+	CHECK(!SerializeLocalChoice(choice));
+	choice.globalAccount = test;
+	choice.accountWorkMode.emplace(u"0-042"_q, AccountWorkMode::Stock);
+	CHECK(!SerializeLocalChoice(choice));
+	choice.accountWorkMode.clear();
+	choice.accountWorkMode.emplace(u"0-42"_q, AccountWorkMode(99));
+	CHECK(!SerializeLocalChoice(choice));
+}
+
+void TestSettingsScopeAndRemoval() {
+	using namespace Purple;
+	Begin("Settings scope registry and lossless removal");
+	const auto parsed = Parse(QString());
+	CHECK(parsed.ok());
+	CHECK(!parsed.readRoots.empty());
+	for (const auto &root : parsed.readRoots) {
+		const auto &registry = SettingsScopeRegistry();
+		CHECK(std::any_of(registry.begin(), registry.end(), [&](const auto &entry) {
+			return entry.name == root && !entry.future;
+		}));
+		CHECK(SettingsScope(QString(), root) != SettingScope::Unknown);
+	}
+	auto incomplete = SettingsScopeRegistry();
+	incomplete.erase(std::remove_if(incomplete.begin(), incomplete.end(), [](const auto &entry) {
+		return entry.name == u"peek"_q;
+	}), incomplete.end());
+	auto missing = std::vector<QString>();
+	for (const auto &root : parsed.readRoots) {
+		if (std::none_of(incomplete.begin(), incomplete.end(), [&](const auto &entry) {
+			return entry.name == root;
+		})) {
+			missing.push_back(root);
+		}
+	}
+	CHECK(missing == std::vector<QString>{ u"peek"_q });
+	CHECK(SettingsScope(u"notifications"_q, u"preview_always"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(u"notifications"_q, u"future_key"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(u"last_seen"_q, u"reasons_p"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(u"last_seen"_q, u"trade_p"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(u"last_seen"_q, u"trade_hold"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(u"last_seen"_q, u"trade_remember"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"last_seen"_q, u"trade_cooldown"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"lists.work"_q, u"members"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(u"lists.\"work.one\""_q, u"members"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(u"lists"_q, u"members"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"lists.work"_q, u"title"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"lists.work.future"_q, u"members"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"presets.work.views"_q, u"lists"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"schedule.rulesets.rules"_q, u"from"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"screen_time.budgets"_q, u"target"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"playlists"_q, u"auto_sync_p"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(u"playlists"_q, u"menu_item_p"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"playlists"_q, u"keep_downloaded_p"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"music"_q, u"private_listening_p"_q) == SettingScope::PerAccount);
+	CHECK(SettingsScope(QString(), u"version"_q) == SettingScope::FileLocal);
+	CHECK(SettingsScope(QString(), u"list_order"_q) == SettingScope::AppWide);
+	CHECK(SettingsScope(u"sync"_q, u"send_after_save_p"_q) == SettingScope::FileLocal);
+	CHECK(SettingsScope(u"sync.future"_q, u"unknown"_q) == SettingScope::FileLocal);
+	CHECK(SettingsScope(u"unknown.peek"_q, u"auto_off"_q) == SettingScope::Unknown);
+	CHECK(SettingsScope(u"notifications.unknown"_q, u"x"_q) == SettingScope::Unknown);
+	CHECK(SettingsScope(u"\"lists.work\""_q, u"members"_q) == SettingScope::Unknown);
+	CHECK(!SettingsTablePath(u"peek] # injected"_q));
+	CHECK(!SettingsTablePath(u"peek\n[other"_q));
+	CHECK(!SettingsTablePath(u"lists..work"_q));
+	CHECK(SettingsTablePath(u"lists.'work.one'"_q)
+		== (std::vector<QString>{ u"lists"_q, u"work.one"_q }));
+	const auto two = u"# preamble\n[last_seen]\ntrade_p = false # owned\n"
+		"trade_hold  = '7s' # retain\n"_q;
+	const auto reset = RemoveTableKey(two, Path(), u"last_seen"_q, u"trade_p"_q);
+	CHECK(reset.ok());
+	CHECK(reset.changed);
+	CHECK_EQ(reset.text, u"# preamble\n[last_seen]\ntrade_hold  = '7s' # retain\n"_q);
+	CHECK_EQ(RemoveTableKey(two, Path(), u"last_seen"_q, u"missing"_q).text, two);
+	CHECK(!RemoveTableKey(two, Path(), u"last_seen"_q, u"missing"_q).changed);
+	CHECK_EQ(RemoveTableKey(two, Path(), u"unknown"_q, u"x"_q).text, two);
+	CHECK_EQ(RemoveTableKey(u"[last_seen]\ntrade_p = true"_q,
+		Path(), u"last_seen"_q, u"trade_p"_q).text, QString());
+	CHECK_EQ(RemoveTableKey(u"[last_seen]\n# keep explanation\ntrade_p = true\n"_q,
+		Path(), u"last_seen"_q, u"trade_p"_q).text,
+		u"[last_seen]\n# keep explanation\n"_q);
+	CHECK_EQ(RemoveTableKey(u"[last_seen] # keep header\ntrade_p = true\n"_q,
+		Path(), u"last_seen"_q, u"trade_p"_q).text,
+		u"[last_seen] # keep header\n"_q);
+	const auto quoted = u"[\"last_seen\"]\n\"trade_p\" = true\nother = '# trade_p = false'\n"_q;
+	CHECK_EQ(RemoveTableKey(quoted, Path(), u"last_seen"_q, u"trade_p"_q).text,
+		u"[\"last_seen\"]\nother = '# trade_p = false'\n"_q);
+	CHECK_EQ(RemoveTableKey(u"[custom]\n\"a=b#c\" = 'owned'\nkeep = 7\n"_q,
+		Path(), u"custom"_q, u"a=b#c"_q).text,
+		u"[custom]\nkeep = 7\n"_q);
+	const auto nested = u"# outside\n[lists.'work.one']\nmembers = [\n  1,\n  # owned array note\n  2,\n]\n"
+		"[unknown]\nkeep = 4\n"_q;
+	CHECK_EQ(RemoveTableKey(nested, Path(), u"lists.'work.one'"_q, u"members"_q).text,
+		u"# outside\n[unknown]\nkeep = 4\n"_q);
+	const auto emptyArray = RemoveTableKey(u"[lists.work]\nmembers = []\n"_q,
+		Path(), u"lists.work"_q, u"members"_q);
+	CHECK(emptyArray.ok());
+	CHECK_EQ(emptyArray.text, QString());
+	for (const auto text : {
+			u"last_seen = { trade_p = true }\n"_q,
+			u"last_seen.trade_p = true\n"_q,
+			u"[[last_seen]]\ntrade_p = true\n"_q,
+			u"[last_seen]\ntrade_p = { x = true }\n"_q,
+			u"[last_seen]\ntrade_p = [ { x = true } ]\n"_q,
+			u"[last_seen\ntrade_p = true\n"_q }) {
+		const auto refused = RemoveTableKey(text, Path(), u"last_seen"_q, u"trade_p"_q);
+		CHECK(!refused.ok());
+		CHECK(!refused.changed);
+		CHECK_EQ(refused.text, text);
+	}
+	const auto crlf = QString(two).replace(u"\n"_q, u"\r\n"_q);
+	CHECK_EQ(RemoveTableKey(crlf, Path(), u"last_seen"_q, u"trade_p"_q).text,
+		u"# preamble\r\n[last_seen]\r\ntrade_hold  = '7s' # retain\r\n"_q);
+	const auto keptA = u"# outside preamble\nversion  = 1 # schema\n"
+		"[notifications]\npreview_always = [] # account\n"
+		"[last_seen]\ntrade_p = false\ntrade_hold = '7s'\nfuture_key = 'keep'\n"_q;
+	const auto keptB = u"[lists.work]\nmembers = [1, 2]\n"_q;
+	const auto keptC = u"[unknown]\nraw = '''\n[peek]\nauto_off = 'fake'\n'''\n"
+		"[sync]\nsend_after_save_p = true\nfuture = 'file-local'\n"
+		"[playlists]\nauto_sync_p = false\n"
+		"[music]\nprivate_listening_p = true\n"_q;
+	const auto mixed = keptA + u"trade_remember = '1h' # removed\ntrade_cooldown = '2m'\n"_q
+		+ keptB + u"title = 'Work'\nfuture_global = 3\n"
+		"[lists.work.extra]\nvalue = 9\n"
+		"[peek]\n# inside removed table\nauto_off = '2m'\n"_q
+		+ QString(keptC).replace(u"[music]\n"_q,
+			u"menu_item_p = false\nkeep_downloaded_p = true\n[music]\n"_q)
+		+ u"[[schedule.rules]]\nfrom = '09:00'\nto = '10:00'\npreset = 'work'\n"
+		"[[presets.work.views]]\nname = 'view'\nlists = []\n"_q;
+	const auto expected = QString(keptA).replace(u"version  = 1"_q, u"version  = 2"_q)
+		+ keptB + keptC;
+	const auto removed = RemoveAppWideSettings(mixed, Path());
+	CHECK(removed.ok());
+	CHECK(removed.changed);
+	CHECK_EQ(removed.text, expected);
+	CHECK(Parse(removed.text).ok());
+	CHECK_EQ(Parse(removed.text).settings.version, 2);
+	const auto again = RemoveAppWideSettings(removed.text, Path());
+	CHECK(again.ok());
+	CHECK(!again.changed);
+	CHECK_EQ(again.text, removed.text);
+	const auto mixedCrlf = QString(mixed).replace(u"\n"_q, u"\r\n"_q);
+	const auto removedCrlf = RemoveAppWideSettings(mixedCrlf, Path());
+	CHECK(removedCrlf.ok());
+	CHECK_EQ(removedCrlf.text, QString(expected).replace(u"\n"_q, u"\r\n"_q));
+	CHECK_EQ(RemoveAppWideSettings(u"[peek]\nauto_off = '2m'\n"_q, Path()).text,
+		u"version = 2\n"_q);
+	CHECK_EQ(RemoveAppWideSettings(QString(), Path()).text, u"version = 2\n"_q);
+	CHECK_EQ(RemoveAppWideSettings(u"# retained\n[unknown]\nx = 3"_q, Path()).text,
+		u"version = 2\n# retained\n[unknown]\nx = 3"_q);
+	CHECK_EQ(RemoveAppWideSettings(u"peek = { auto_off = '2m' }\n[unknown]\nx = 3\n"_q, Path()).text,
+		u"version = 2\n[unknown]\nx = 3\n"_q);
+	CHECK_EQ(RemoveAppWideSettings(u"[presets.work]\n"
+		"list_order = [{list = 'work', show = 'show'}]\n"
+		"folders = [{name = 'Groups'}]\n"
+		"[[presets.work.views]]\nname = 'view'\n"
+		"lists = [{list = 'work'}]\n[unknown]\nkeep = nan\n"_q, Path()).text,
+		u"version = 2\n[unknown]\nkeep = nan\n"_q);
+	for (const auto text : {
+			u"peek.auto_off = '2m'\n"_q,
+			u"last_seen = { trade_p = false, trade_remember = '1h' }\n"_q,
+			u"lists = { work = { members = [1], title = 'Work' } }\n"_q,
+			u"[[lists.work]]\nmembers = [1]\ntitle = 'Work'\n"_q,
+			u"version = 3\n[peek]\nauto_off = '2m'\n"_q,
+			u"version = '1'\n"_q,
+			u"version = 0\n"_q,
+			u"[peek\n"_q }) {
+		const auto refused = RemoveAppWideSettings(text, Path());
+		CHECK(!refused.ok());
+		CHECK(!refused.changed);
+		CHECK_EQ(refused.text, text);
+	}
+	CHECK_EQ(Parse(QString()).settings.version, 1);
+	CHECK_EQ(kSettingsVersion, 1);
+}
+
+void TestStructuredScopeExceptionRefusal() {
+	using namespace Purple;
+	struct ExceptionCase {
+		QString table;
+		QString key;
+		SettingScope scope = SettingScope::Unknown;
+	};
+	const auto cases = std::vector<ExceptionCase>{
+		{ u"lists.work"_q, u"members"_q, SettingScope::PerAccount },
+		{ u"lists.\"work.one\""_q, u"members"_q, SettingScope::PerAccount },
+		{ u"last_seen"_q, u"trade_remember"_q, SettingScope::AppWide },
+		{ u"last_seen"_q, u"trade_cooldown"_q, SettingScope::AppWide },
+		{ u"playlists"_q, u"menu_item_p"_q, SettingScope::AppWide },
+		{ u"playlists"_q, u"keep_downloaded_p"_q, SettingScope::AppWide },
+	};
+	for (const auto &item : cases) {
+		const auto path = SettingsTablePath(item.table);
+		CHECK(path.has_value());
+		if (!path) {
+			continue;
+		}
+		CHECK(SettingsScopeOverride(*path, item.key) == item.scope);
+		CHECK(SettingsScope(*path, item.key) == item.scope);
+		const auto header = u"[%1]\n"_q.arg(item.table);
+		const auto child = item.table + '.' + item.key;
+		const auto shapes = std::vector<QString>{
+			u"[%1]\nvalue = 7\n"_q.arg(child),
+			u"[%1]\n"_q.arg(child),
+			u"[[%1]]\nvalue = 7\n[[%1]]\nvalue = 8\n"_q.arg(child),
+			header + item.key + u" = { value = 7 }\n"_q,
+			header + item.key + u" = { nested = { value = 7 } }\n"_q,
+			header + item.key + u" = [{ value = 7 }, { value = 8 }]\n"_q,
+			header + item.key + u" = [7, { value = 8 }]\n"_q,
+			header + item.key + u" = [[7]]\n"_q,
+			header + item.key + u" = [[{ value = 7 }]]\n"_q,
+			header + item.key + u" = [[], 7]\n"_q,
+		};
+		for (const auto &shape : shapes) {
+			for (const auto crlf : { false, true }) {
+				auto text = u"# outside\nversion = 1 # original\n[peek]\nauto_off = '2m'\n"_q
+					+ shape + u"[unknown]\npreserved = { value = 9 } # exact\n"_q;
+				if (crlf) {
+					text.replace(u"\n"_q, u"\r\n"_q);
+				}
+				CHECK(ParseSettings(text, Path()).error.isEmpty());
+				const auto refused = RemoveAppWideSettings(text, Path());
+				CHECK(!refused.ok());
+				CHECK(!refused.error.isEmpty());
+				CHECK(!refused.changed);
+				CHECK_EQ(refused.text, text);
+			}
+		}
+		const auto dotted = u"version = 1\n"_q + child
+			+ u".value = 7\n[peek]\nauto_off = '2m'\n"_q;
+		CHECK(ParseSettings(dotted, Path()).error.isEmpty());
+		const auto refusedDotted = RemoveAppWideSettings(dotted, Path());
+		CHECK(!refusedDotted.ok());
+		CHECK(!refusedDotted.changed);
+		CHECK_EQ(refusedDotted.text, dotted);
+		for (const auto &value : { u"false"_q, u"7"_q, u"[1, 2]"_q, u"[]"_q }) {
+			const auto assignment = item.key + u" = "_q + value + '\n';
+			const auto outside = u"[unknown]\nvalue = { nested = [1, 2] } # exact\n"_q;
+			const auto text = u"version = 1\n"_q + header + assignment + outside;
+			CHECK(ParseSettings(text, Path()).error.isEmpty());
+			const auto removed = RemoveAppWideSettings(text, Path());
+			CHECK(removed.ok());
+			CHECK(removed.changed);
+			CHECK_EQ(removed.text, u"version = 2\n"_q + header
+				+ (item.scope == SettingScope::PerAccount ? assignment : QString()) + outside);
+		}
+	}
+	for (const auto &text : {
+			u"version = 1\nlists = { work = { members = { value = 7 } } }\n"_q,
+			u"version = 1\nlists = { work = { members = [7, { value = 8 }] } }\n"_q,
+			u"version = 1\nlast_seen = { trade_remember = { value = 7 } }\n"_q,
+			u"version = 1\nplaylists = { menu_item_p = [[7]] }\n"_q,
+			u"version = 1\n[[lists.work]]\nmembers = { value = 7 }\n"_q }) {
+		CHECK(ParseSettings(text, Path()).error.isEmpty());
+		const auto refused = RemoveAppWideSettings(text, Path());
+		CHECK(!refused.ok());
+		CHECK(!refused.changed);
+		CHECK_EQ(refused.text, text);
+	}
+	CHECK(!SettingsScopeOverride({}, u"members"_q));
+	CHECK(!SettingsScopeOverride({ u"unknown"_q }, u"members"_q));
+	CHECK(!SettingsScopeOverride({ u"lists.work"_q }, u"members"_q));
+	CHECK(!SettingsScopeOverride({ u"lists"_q, u"work"_q, u"future"_q }, u"members"_q));
+	const auto unknown = u"[unknown.members]\nvalue = 7\n"
+		"[\"lists.work\"]\nmembers = { value = 8 }\n"
+		"[notifications.unknown]\ntrade_remember = [[7]]\n"_q;
+	const auto text = u"version = 1\n[peek]\nauto_off = '2m'\n"_q + unknown;
+	const auto removed = RemoveAppWideSettings(text, Path());
+	CHECK(removed.ok());
+	CHECK_EQ(removed.text, u"version = 2\n"_q + unknown);
+}
+
+void TestVersionAwareLayerSettings() {
+	using namespace Purple;
+	Begin("version-aware account layering");
+	const auto globalPath = u"global/settings.toml"_q;
+	const auto accountPath = u"account/settings.toml"_q;
+	CHECK_EQ(kDefaultSettingsVersion, 1);
+	CHECK_EQ(kSettingsVersion, 1);
+	CHECK_EQ(kHighestSettingsVersion, 2);
+	CHECK_EQ(Settings().version, 1);
+	CHECK_EQ(ParseSettings(QString(), accountPath).settings.version, 1);
+	for (const auto version : { 1, 2 }) {
+		const auto parsed = ParseSettings(u"version = %1\n"_q.arg(version), accountPath);
+		CHECK(parsed.ok());
+		CHECK(parsed.warnings.empty());
+		CHECK_EQ(parsed.settings.version, version);
+	}
+	CHECK(WarnsAbout(ParseSettings(u"version = 3\n"_q, accountPath), u"version 3"_q));
+	auto record = ConfigRecordBuildInput();
+	record.space = *FormatSyncSpaceId(QByteArray(16, 's'));
+	record.install = *FormatSyncInstallId(QByteArray(16, 'i'));
+	record.device = u"fixture"_q;
+	record.platform = u"core"_q;
+	record.app = u"Purple"_q;
+	record.seq = 1;
+	for (const auto version : { 0, 1, 2 }) {
+		record.text = version ? QString(u"version = %1\n"_q.arg(version)).toUtf8()
+			: QByteArray("[last_seen]\ntrade_p = false\n");
+		const auto built = BuildConfigRecord(record);
+		CHECK(bool(built));
+		const auto inspected = InspectConfigPayload(ParseSyncEnvelope(built.canonical));
+		CHECK(inspected.status == ConfigPayloadStatus::Valid);
+		CHECK_EQ(inspected.schema, version ? version : 1);
+	}
+	record.text = "version = 3\n";
+	CHECK(BuildConfigRecord(record).status == ConfigRecordBuildStatus::NewerSchema);
+	const auto global = uR"(version = 2
+[notifications]
+preview_always = ['private:1', 'group:2']
+[last_seen]
+reasons_p = true
+trade_p = true
+trade_hold = '7s'
+trade_remember = '2h'
+trade_cooldown = '3m'
+[premium]
+enabled_p = false
+[sync]
+send_after_save_p = true
+[lists.z]
+title = 'Global Z'
+kinds = ['channels']
+members = [10, 11]
+[lists.a]
+members = [20]
+[lists."work.one"]
+members = [30]
+[list_sets.z]
+list_order = [{ list = 'z' }]
+[list_sets.a]
+list_order = [{ list = 'a' }]
+[folder_sets.z]
+folders = [{ name = 'Z' }]
+[folder_sets.a]
+folders = [{ name = 'A' }]
+[presets.z]
+list_order = ['*z', '*a', { list = 'work.one' }]
+folders = ['*z', '*a']
+[presets.a]
+list_order = [{ list = 'a' }]
+)"_q;
+	const auto account = uR"(version = 1
+[notifications]
+preview_always = []
+[last_seen]
+trade_p = false
+trade_remember = '1s'
+[premium]
+enabled_p = true
+[lists.z]
+title = 'Own inactive title'
+kinds = ['private']
+members = []
+[lists."work.one"]
+members = [99]
+[lists.missing]
+members = [88]
+[unknown]
+future = { nested = [1, 2] }
+)"_q;
+	const auto beforeGlobal = global;
+	const auto beforeAccount = account;
+	const auto layered = LayerSettings(global, globalPath, account, accountPath);
+	CHECK(layered.effective.ok());
+	CHECK(layered.effective.warnings.empty());
+	CHECK(layered.global.current.parsed.ok());
+	CHECK(layered.account.current.parsed.ok());
+	CHECK(layered.global.usable && layered.account.usable);
+	CHECK_EQ(layered.global.current.path, globalPath);
+	CHECK_EQ(layered.account.current.path, accountPath);
+	CHECK_EQ(layered.effective.settings.version, 1);
+	CHECK(layered.effective.settings.notifications.previewAlways.empty());
+	CHECK(!layered.effective.settings.notifications.magicBots);
+	CHECK(!layered.effective.settings.lastSeen.trade);
+	CHECK(layered.effective.settings.lastSeen.reasons);
+	CHECK_EQ(layered.effective.settings.lastSeen.tradeHoldSeconds, 7);
+	CHECK_EQ(layered.effective.settings.lastSeen.tradeRememberSeconds, 7200);
+	CHECK_EQ(layered.effective.settings.lastSeen.tradeCooldownSeconds, 180);
+	CHECK(!layered.effective.settings.premium.enabled);
+	CHECK(!layered.effective.settings.sync.sendAfterSave);
+	CHECK_EQ(ListNames(layered.effective.settings).join(','), u"z,a,work.one"_q);
+	const auto z = layered.effective.settings.list(u"z"_q);
+	const auto a = layered.effective.settings.list(u"a"_q);
+	const auto quoted = layered.effective.settings.list(u"work.one"_q);
+	CHECK(z && a && quoted);
+	if (z && a && quoted) {
+		CHECK(z->members.empty());
+		CHECK_EQ(z->title, u"Global Z"_q);
+		CHECK((z->kinds == std::vector<ChatKind>{ ChatKind::Channel }));
+		CHECK((a->members == std::vector<PeerIdValue>{ 20 }));
+		CHECK((quoted->members == std::vector<PeerIdValue>{ 99 }));
+	}
+	CHECK(!layered.effective.settings.list(u"missing"_q));
+	CHECK_EQ(layered.effective.settings.presets.size(), size_t(2));
+	if (layered.effective.settings.presets.size() == 2) {
+		CHECK_EQ(layered.effective.settings.presets[0].name, u"z"_q);
+		CHECK_EQ(layered.effective.settings.presets[1].name, u"a"_q);
+		const auto &preset = layered.effective.settings.presets[0];
+		CHECK_EQ(preset.listOrder.size(), size_t(3));
+		if (preset.listOrder.size() == 3) {
+			CHECK_EQ(preset.listOrder[0].list, u"z"_q);
+			CHECK_EQ(preset.listOrder[1].list, u"a"_q);
+			CHECK_EQ(preset.listOrder[2].list, u"work.one"_q);
+		}
+		CHECK_EQ(preset.folders.size(), size_t(2));
+		if (preset.folders.size() == 2) {
+			CHECK_EQ(preset.folders[0].name, u"Z"_q);
+			CHECK_EQ(preset.folders[1].name, u"A"_q);
+		}
+	}
+	const auto resolved = Resolve(layered.effective.settings, u"z"_q);
+	CHECK(resolved.has_value());
+	if (resolved) {
+		const auto byKind = MatchList(layered.effective.settings, *resolved, 777, ChatKind::Channel);
+		CHECK(byKind && byKind->list == u"z"_q);
+		CHECK(!MatchList(layered.effective.settings, *resolved, 10, ChatKind::Private));
+	}
+	CHECK(std::any_of(layered.inactive.begin(), layered.inactive.end(), [&](const auto &fact) {
+		return fact.reason == SettingsInactiveReason::UndefinedGlobalList
+			&& fact.source.key == u"members"_q && fact.source.path == accountPath;
+	}));
+	CHECK(std::any_of(layered.inactive.begin(), layered.inactive.end(), [&](const auto &fact) {
+		return fact.reason == SettingsInactiveReason::AppWide
+			&& fact.source.key == u"trade_remember"_q && fact.source.path == accountPath;
+	}));
+	CHECK(std::any_of(layered.applied.begin(), layered.applied.end(), [&](const auto &source) {
+		return source.key == u"preview_always"_q && source.path == accountPath
+			&& source.line == 3 && source.column > 0;
+	}));
+	CHECK_EQ(global, beforeGlobal);
+	CHECK_EQ(account, beforeAccount);
+	CHECK(layered.effective.readRoots == ParseSettings(global, globalPath).readRoots);
+	auto follow = SettingsLayerOptions();
+	follow.followListMembers = true;
+	const auto followed = LayerSettings(global, globalPath, account, accountPath, follow);
+	const auto followedZ = followed.effective.settings.list(u"z"_q);
+	CHECK(followedZ);
+	if (followedZ) {
+		CHECK((followedZ->members == std::vector<PeerIdValue>{ 10, 11 }));
+	}
+	CHECK(!followed.effective.settings.lastSeen.trade);
+	CHECK(followed.effective.settings.notifications.previewAlways.empty());
+	CHECK(std::count_if(followed.inactive.begin(), followed.inactive.end(), [](const auto &fact) {
+		return fact.reason == SettingsInactiveReason::FollowListMembers;
+	}) == 3);
+	const auto other = LayerSettings(global, globalPath,
+		u"[lists.z]\nmembers = [55]\n[notifications]\npreview_always = ['private:9']\n"_q,
+		u"other/settings.toml"_q);
+	const auto otherZ = other.effective.settings.list(u"z"_q);
+	CHECK(otherZ);
+	if (otherZ) {
+		CHECK((otherZ->members == std::vector<PeerIdValue>{ 55 }));
+	}
+	CHECK_EQ(other.effective.settings.notifications.previewAlways.size(), size_t(1));
+	CHECK_EQ(layered.effective.settings.notifications.previewAlways.size(), size_t(0));
+	for (const auto &own : { QString(), u"[last_seen]\ntrade_p = false\n"_q }) {
+		const auto inherited = LayerSettings(global, globalPath, own, accountPath);
+		CHECK_EQ(inherited.effective.settings.notifications.previewAlways.size(), size_t(2));
+		CHECK(!inherited.effective.settings.sync.sendAfterSave);
+		CHECK_EQ(inherited.effective.settings.version, 1);
+		CHECK_EQ(inherited.effective.settings.lastSeen.trade, own.isEmpty());
+	}
+	const auto ownSync = LayerSettings(global, globalPath,
+		u"version = 2\n[sync]\nsend_after_save_p = true\n"_q, accountPath);
+	CHECK(ownSync.effective.settings.sync.sendAfterSave);
+	CHECK_EQ(ownSync.effective.settings.version, 2);
+	const auto bad = u"[last_seen\n"_q;
+	auto fallback = SettingsLayerOptions();
+	fallback.accountGood = SettingsLayerText{
+		u"[last_seen]\ntrade_p = false\n"_q, u"account/settings.toml.good"_q };
+	const auto good = LayerSettings(global, globalPath, bad, accountPath, fallback);
+	CHECK(!good.account.current.parsed.ok());
+	CHECK_EQ(good.account.current.path, accountPath);
+	CHECK(good.account.usedGood && good.account.usable && good.account.good);
+	CHECK(!good.effective.settings.lastSeen.trade);
+	CHECK_EQ(good.effective.settings.notifications.previewAlways.size(), size_t(2));
+	CHECK(!good.effective.settings.sync.sendAfterSave);
+	CHECK(std::any_of(good.applied.begin(), good.applied.end(), [](const auto &source) {
+		return source.key == u"trade_p"_q && source.path == u"account/settings.toml.good"_q
+			&& source.line == 2;
+	}));
+	fallback.accountGood->text = u"[broken\n"_q;
+	const auto badGood = LayerSettings(global, globalPath, bad, accountPath, fallback);
+	CHECK(!badGood.account.usedGood && !badGood.account.usable);
+	CHECK(badGood.account.good && !badGood.account.good->parsed.ok());
+	CHECK(badGood.effective.settings.lastSeen.trade);
+	CHECK_EQ(badGood.effective.settings.notifications.previewAlways.size(), size_t(2));
+	const auto noGood = LayerSettings(global, globalPath, bad, accountPath);
+	CHECK(!noGood.account.current.parsed.ok() && !noGood.account.good);
+	CHECK(noGood.effective.settings.lastSeen.trade);
+	fallback.accountGood->text = u"[last_seen]\ntrade_p = false\n"_q;
+	const auto empty = LayerSettings(global, globalPath, QString(), accountPath, fallback);
+	CHECK(empty.account.current.present && empty.account.usable && !empty.account.usedGood);
+	CHECK(!empty.account.good);
+	CHECK(empty.effective.settings.lastSeen.trade);
+	fallback.accountPresent = false;
+	const auto missing = LayerSettings(global, globalPath, bad, accountPath, fallback);
+	CHECK(!missing.account.current.present && !missing.account.usable && !missing.account.usedGood);
+	CHECK(missing.account.current.parsed.ok() && !missing.account.good);
+	CHECK(missing.effective.settings.lastSeen.trade);
+	fallback.accountPresent = true;
+	fallback.globalGood = SettingsLayerText{ global, u"global/settings.toml.good"_q };
+	const auto bothGood = LayerSettings(bad, globalPath, bad, accountPath, fallback);
+	CHECK(bothGood.global.usedGood && bothGood.account.usedGood);
+	CHECK_EQ(bothGood.global.current.path, globalPath);
+	CHECK(bothGood.global.good.has_value());
+	if (bothGood.global.good) {
+		CHECK_EQ(bothGood.global.good->path, u"global/settings.toml.good"_q);
+	}
+	CHECK(!bothGood.effective.settings.lastSeen.trade);
+	CHECK_EQ(ListNames(bothGood.effective.settings).join(','), u"z,a,work.one"_q);
+	fallback.globalGood->text = bad;
+	const auto neitherGood = LayerSettings(bad, globalPath, bad, accountPath, fallback);
+	CHECK(!neitherGood.global.usable && neitherGood.account.usable);
+	CHECK(neitherGood.effective.settings.lists.empty());
+	CHECK(!neitherGood.effective.settings.lastSeen.trade);
+	const auto diagnostics = LayerSettings(
+		u"[last_seen]\ntrade_p = 'bad'\n"_q, globalPath,
+		u"[premium]\nenabled_p = 'bad'\n[unknown]\nvalue = 7\n"_q, accountPath);
+	CHECK(WarnsAbout(diagnostics.global.current.parsed, u"line 2"_q));
+	CHECK(WarnsAbout(diagnostics.account.current.parsed, u"line 2"_q));
+	CHECK_EQ(diagnostics.global.current.path, globalPath);
+	CHECK_EQ(diagnostics.account.current.path, accountPath);
+	CHECK(diagnostics.effective.warnings.empty());
+	CHECK(diagnostics.inactive.size() == 1);
+	const auto structured = LayerSettings(global, globalPath,
+		u"[lists.z.members]\nvalue = 7\n[last_seen.trade_remember]\nvalue = 8\n"_q, accountPath);
+	CHECK(structured.effective.ok());
+	CHECK(!structured.account.current.parsed.warnings.empty());
+	CHECK(std::any_of(structured.applied.begin(), structured.applied.end(), [](const auto &source) {
+		return source.key == u"members"_q;
+	}));
+	CHECK(std::any_of(structured.inactive.begin(), structured.inactive.end(), [](const auto &fact) {
+		return fact.source.key == u"trade_remember"_q
+			&& fact.reason == SettingsInactiveReason::AppWide;
+	}));
+	for (const auto &own : { u"last_seen = 7\n"_q, u"last_seen = [7]\n"_q,
+			u"[[last_seen]]\ntrade_p = false\n"_q }) {
+		const auto result = LayerSettings(global, globalPath, own, accountPath);
+		CHECK(!result.account.current.parsed.warnings.empty());
+		CHECK(result.effective.settings.lastSeen.trade);
+		CHECK_EQ(result.effective.settings.lastSeen.tradeRememberSeconds, 7200);
+	}
+	const auto invalidKeyType = LayerSettings(
+		u"[last_seen]\ntrade_p = false\ntrade_remember = '2h'\n"_q, globalPath,
+		u"[last_seen.trade_p]\nvalue = 7\n"_q, accountPath);
+	CHECK(invalidKeyType.effective.settings.lastSeen.trade);
+	CHECK_EQ(invalidKeyType.effective.settings.lastSeen.tradeRememberSeconds, 7200);
+	CHECK(!invalidKeyType.account.current.parsed.warnings.empty());
+	fallback.accountGood->text = QString();
+	const auto emptyGood = LayerSettings(global, globalPath, bad, accountPath, fallback);
+	CHECK(emptyGood.account.usedGood && emptyGood.account.usable);
+	CHECK(emptyGood.effective.settings.lastSeen.trade);
+	CHECK_EQ(emptyGood.effective.settings.notifications.previewAlways.size(), size_t(2));
+	for (const auto &base : { Example(), global }) {
+		const auto parsed = ParseSettings(base, globalPath);
+		const auto ordered = LayerSettings(base, globalPath, u"[last_seen]\ntrade_p = false\n"_q, accountPath);
+		CHECK_EQ(ListNames(ordered.effective.settings).join(','), ListNames(parsed.settings).join(','));
+		CHECK_EQ(ordered.effective.settings.presets.size(), parsed.settings.presets.size());
+		for (auto i = size_t(0); i < std::min(parsed.settings.presets.size(),
+				ordered.effective.settings.presets.size()); ++i) {
+			const auto &expected = parsed.settings.presets[i];
+			const auto &actual = ordered.effective.settings.presets[i];
+			CHECK_EQ(actual.name, expected.name);
+			CHECK(actual.listOrder == expected.listOrder);
+			CHECK(actual.folders == expected.folders);
+		}
+	}
+}
+
 int main() {
+	TestVersionAwareLayerSettings();
+	TestStructuredScopeExceptionRefusal();
+	TestSettingsScopeAndRemoval();
+	TestAccountIdentityAndLocalChoice();
 	TestSyncStatus();
 	TestSyncJson();
 	TestSyncIdFormatting();

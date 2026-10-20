@@ -9,8 +9,19 @@ It is a repository of its own because two apps need exactly this code and
 nothing around it. Every policy in the Work Mode spec is a rule about data, and
 rules about data are far easier to prove outside a running app than inside one.
 
+## Account identity and local choices (source candidate)
+
+The account-key and device-local TOML codecs are implemented but remain
+SOURCE_UNQUALIFIED. Their prepared cases have not been compiled or run.
+See [the codec contract](docs/account-local-choice.md) for startup ownership
+boundaries, defaults, writer behavior and the remaining integration work.
+
 ## What is here
 
+- `purple/purple_local_choice.{h,cpp}` - validates stable production/test
+  account keys, parses device-local choices and root-file owner records, and
+  serializes their whole-template TOML representations. It does no file I/O,
+  migration, account discovery or sync binding.
 - `purple/purple_settings.{h,cpp}` - parses `settings.toml` into presets, lists,
   folders and rules, collecting warnings as it goes.
 - `purple/purple_splice.{h,cpp}` - the only writes the apps ever make to
@@ -397,3 +408,21 @@ The clients own ephemeral countdown/abort UI, delayed setting changes and chat
 navigation. No pending activation or binary serialization fields are added.
 Focused regression cases live in TestPeekControls; run the existing core suite
 when qualifying this change.
+
+## Settings scope and Reset (source candidate)
+
+The shared per-key scope registry and source-bound Reset/app-wide removal
+operations are SOURCE_IMPLEMENTED_UNQUALIFIED. Their genuine prepared cases
+have not been compiled or run. See [settings scope and removal](docs/settings-scope-reset.md)
+for actual-reader coverage, unknown-data preservation, supported syntax and
+version limits. The preceding account codecs remain source-reviewed only.
+
+
+## Account settings layering source status
+
+The core now has a private source candidate for a missing-version default of 1,
+highest-understood version 2, and pure per-key account layering with supplied
+fallback texts and separate diagnostics. It is SOURCE_IMPLEMENTED_UNQUALIFIED:
+no compiler or test execution is claimed. See [settings layering](docs/settings-layering.md)
+for the API, presence/fallback contract, list membership, source order and
+remaining frontend/integration obligations.

@@ -104,6 +104,16 @@ struct SpliceResult {
 	const QString &key,
 	bool value);
 
+[[nodiscard]] SpliceResult RemoveTableKey(
+	const QString &text,
+	const QString &path,
+	const QString &table,
+	const QString &key);
+
+[[nodiscard]] SpliceResult RemoveAppWideSettings(
+	const QString &text,
+	const QString &path);
+
 [[nodiscard]] SpliceResult SetPeekStartDelay(
 	const QString &text,
 	const QString &path,

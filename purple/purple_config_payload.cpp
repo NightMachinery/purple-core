@@ -210,7 +210,7 @@ ConfigPayloadInspection InspectConfigPayload(
 		result.error = ConfigPayloadError::SchemaMismatch;
 		return result;
 	}
-	result.status = (result.schema > kSettingsVersion)
+	result.status = (result.schema > kHighestSettingsVersion)
 		? ConfigPayloadStatus::NewerSchema
 		: ConfigPayloadStatus::Valid;
 	return result;
@@ -231,7 +231,7 @@ ConfigRecordBuildResult BuildConfigRecord(
 		result.tomlError = parsedSettings.error;
 		return result;
 	}
-	if (parsedSettings.settings.version > kSettingsVersion) {
+	if (parsedSettings.settings.version > kHighestSettingsVersion) {
 		result.status = ConfigRecordBuildStatus::NewerSchema;
 		return result;
 	}

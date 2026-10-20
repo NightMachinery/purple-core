@@ -38,6 +38,16 @@ constexpr auto kMaxSpreadDepth = 8;
 	return QString::fromUtf8(value.data(), int(value.size()));
 }
 
+struct SettingsRootReader {
+	const toml::table &table;
+	std::vector<QString> &readRoots;
+
+	[[nodiscard]] const toml::node *get(std::string_view name) const {
+		readRoots.push_back(Text(name));
+		return table.get(name);
+	}
+};
+
 [[nodiscard]] QString At(const toml::node &node) {
 	return u"line %1"_q.arg(node.source().begin.line);
 }
@@ -214,7 +224,7 @@ void WarnRetired(
 }
 
 [[nodiscard]] Notifications ReadNotifications(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = Notifications();
 	const auto node = root.get("notifications");
@@ -320,7 +330,7 @@ void WarnRetired(
 }
 
 [[nodiscard]] std::vector<List> ReadLists(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = std::vector<List>();
 	const auto node = root.get("lists");
@@ -388,7 +398,7 @@ void WarnRetired(
 using SetTables = std::vector<std::pair<QString, const toml::array*>>;
 
 [[nodiscard]] SetTables ReadSets(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::string_view section,
 		std::string_view key,
 		std::vector<QString> &warnings) {
@@ -804,7 +814,7 @@ void WarnUnknownLists(
 }
 
 [[nodiscard]] std::vector<Preset> ReadPresets(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		const std::vector<List> &lists,
 		Expander &expander,
 		std::vector<QString> &warnings) {
@@ -1182,7 +1192,7 @@ void WarnUnknownLists(
 }
 
 [[nodiscard]] Schedule ReadSchedule(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		const std::vector<Preset> &presets,
 		std::vector<QString> &warnings) {
 	auto result = Schedule();
@@ -1247,7 +1257,7 @@ void WarnUnknownLists(
 }
 
 [[nodiscard]] FocusSync ReadFocusSync(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		const std::vector<Preset> &presets,
 		std::vector<QString> &warnings) {
 	auto result = FocusSync();
@@ -1291,7 +1301,7 @@ void WarnUnknownLists(
 }
 
 [[nodiscard]] Peek ReadPeek(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = Peek();
 	result.hotkey = QString::fromLatin1(kDefaultHotkey);
@@ -1370,7 +1380,7 @@ void WarnUnknownLists(
 }
 
 [[nodiscard]] Recent ReadRecent(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = Recent();
 	const auto node = root.get("recent");
@@ -1417,7 +1427,7 @@ void WarnUnknownLists(
 }
 
 [[nodiscard]] Overrides ReadOverrides(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = Overrides();
 	const auto node = root.get("overrides");
@@ -1448,7 +1458,7 @@ void WarnUnknownLists(
 // screen. Every key here is a device somebody owns, so there is no such thing
 // as an unknown key to warn about - only a value that is not a name at all.
 [[nodiscard]] std::vector<DeviceLabel> ReadDevices(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = std::vector<DeviceLabel>();
 	const auto node = root.get("devices");
@@ -1478,7 +1488,7 @@ void WarnUnknownLists(
 }
 
 [[nodiscard]] Suggestions ReadSuggestions(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = Suggestions();
 	const auto node = root.get("suggestions");
@@ -1510,7 +1520,7 @@ void WarnUnknownLists(
 // table at all, because there is nothing here that deserves to be read
 // differently from the rest of the file.
 [[nodiscard]] Sync ReadSync(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = Sync();
 	const auto node = root.get("sync");
@@ -1558,7 +1568,7 @@ void WarnUnknownLists(
 // trade is offered. Shaped like ReadPeek - two flags and three durations, all
 // defaulted, so a file that says nothing gets the documented behaviour.
 [[nodiscard]] LastSeen ReadLastSeen(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = LastSeen();
 	const auto node = root.get("last_seen");
@@ -1736,7 +1746,7 @@ void WarnUnknownLists(
 // Every threshold is applied at read time rather than while recording, which
 // is what makes changing one re-derive the history it already has.
 [[nodiscard]] ScreenTime ReadScreenTime(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
 	auto result = ScreenTime();
 	const auto node = root.get("screen_time");
@@ -1788,9 +1798,9 @@ void WarnUnknownLists(
 // are still where they were, so it reads what it understands and says out loud
 // that there may be more of the file than it can see.
 [[nodiscard]] int ReadVersion(
-		const toml::table &root,
+		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
-	const auto result = kSettingsVersion;
+	const auto result = kDefaultSettingsVersion;
 	const auto node = root.get("version");
 	if (!node) {
 		return result;
@@ -1806,19 +1816,149 @@ void WarnUnknownLists(
 			u"'version' should be 1 or more (%1), reading the file as version "
 			"%2."_q.arg(At(*node)).arg(result));
 		return result;
-	} else if (*value > kSettingsVersion) {
+	} else if (*value > kHighestSettingsVersion) {
 		warnings.push_back(
 			u"settings.toml is version %1, written by a newer Purple Telegram "
 			"(%2); this build understands version %3 and may ignore keys it "
 			"has never heard of."_q
 				.arg(*value)
 				.arg(At(*node))
-				.arg(kSettingsVersion));
+				.arg(kHighestSettingsVersion));
 	}
 	return *value;
 }
 
 } // namespace
+
+const std::vector<SettingsScopeTable> &SettingsScopeRegistry() {
+	static const auto result = std::vector<SettingsScopeTable>{
+		{ u"version"_q, SettingScope::FileLocal, {}, false, true },
+		{ u"list_order"_q, SettingScope::AppWide, {}, false, true },
+		{ u"notifications"_q, SettingScope::PerAccount },
+		{ u"last_seen"_q, SettingScope::PerAccount, {
+			{ u"last_seen"_q, u"trade_remember"_q, SettingScope::AppWide },
+			{ u"last_seen"_q, u"trade_cooldown"_q, SettingScope::AppWide },
+		} },
+		{ u"premium"_q, SettingScope::AppWide },
+		{ u"lists"_q, SettingScope::AppWide, {
+			{ u"lists.*"_q, u"members"_q, SettingScope::PerAccount },
+		} },
+		{ u"list_sets"_q, SettingScope::AppWide },
+		{ u"folder_sets"_q, SettingScope::AppWide },
+		{ u"presets"_q, SettingScope::AppWide },
+		{ u"schedule"_q, SettingScope::AppWide },
+		{ u"focus_sync"_q, SettingScope::AppWide },
+		{ u"peek"_q, SettingScope::AppWide },
+		{ u"recent"_q, SettingScope::AppWide },
+		{ u"overrides"_q, SettingScope::AppWide },
+		{ u"suggestions"_q, SettingScope::AppWide },
+		{ u"screen_time"_q, SettingScope::AppWide },
+		{ u"devices"_q, SettingScope::AppWide },
+		{ u"sync"_q, SettingScope::FileLocal },
+		{ u"playlists"_q, SettingScope::PerAccount, {
+			{ u"playlists"_q, u"menu_item_p"_q, SettingScope::AppWide },
+			{ u"playlists"_q, u"keep_downloaded_p"_q, SettingScope::AppWide },
+		}, true },
+		{ u"music"_q, SettingScope::PerAccount, {}, true },
+	};
+	return result;
+}
+
+std::optional<std::vector<QString>> SettingsTablePath(const QString &text) {
+	if (text.isEmpty()) {
+		return std::vector<QString>();
+	}
+	auto quote = QChar();
+	auto escaped = false;
+	for (const auto ch : text) {
+		if (ch == '\n' || ch == '\r') {
+			return std::nullopt;
+		} else if (escaped) {
+			escaped = false;
+		} else if (!quote.isNull()) {
+			if (quote == QChar('"') && ch == '\\') {
+				escaped = true;
+			} else if (ch == quote) {
+				quote = QChar();
+			}
+		} else if (ch == '\'' || ch == '"') {
+			quote = ch;
+		} else if (ch == '[' || ch == ']' || ch == '#') {
+			return std::nullopt;
+		}
+	}
+	if (!quote.isNull() || escaped) {
+		return std::nullopt;
+	}
+	const auto utf8 = (u"[%1]\n"_q.arg(text)).toUtf8();
+	auto parsed = toml::parse(std::string_view(utf8.constData(), utf8.size()));
+	if (!parsed) {
+		return std::nullopt;
+	}
+	auto result = std::vector<QString>();
+	const auto *table = &parsed.table();
+	while (!table->empty()) {
+		if (table->size() != 1) {
+			return std::nullopt;
+		}
+		const auto &entry = *table->begin();
+		result.push_back(Text(entry.first.str()));
+		table = entry.second.as_table();
+		if (!table || table->is_inline()) {
+			return std::nullopt;
+		}
+	}
+	return result.empty() ? std::nullopt : std::make_optional(result);
+}
+
+std::optional<SettingScope> SettingsScopeOverride(
+		const std::vector<QString> &table,
+		const QString &key) {
+	if (table.empty()) {
+		return std::nullopt;
+	}
+	for (const auto &entry : SettingsScopeRegistry()) {
+		if (entry.name != table.front()) {
+			continue;
+		}
+		for (const auto &exception : entry.exceptions) {
+			const auto matching = exception.table.endsWith(u".*"_q)
+				? table.size() == 2
+				: table.size() == 1;
+			if (matching && key == exception.key) {
+				return exception.scope;
+			}
+		}
+	}
+	return std::nullopt;
+}
+
+SettingScope SettingsScope(
+		const std::vector<QString> &table,
+		const QString &key) {
+	if (const auto exception = SettingsScopeOverride(table, key)) {
+		return *exception;
+	}
+	const auto &root = table.empty() ? key : table.front();
+	for (const auto &entry : SettingsScopeRegistry()) {
+		if (entry.name != root) {
+			continue;
+		} else if (entry.rootKey) {
+			return entry.scope;
+		} else if (table.empty()) {
+			return entry.scope;
+		}
+		return (table.size() > 1 && entry.scope == SettingScope::PerAccount)
+			? SettingScope::Unknown
+			: entry.scope;
+	}
+	return SettingScope::Unknown;
+}
+
+SettingScope SettingsScope(const QString &table, const QString &key) {
+	const auto path = SettingsTablePath(table);
+	return path ? SettingsScope(*path, key) : SettingScope::Unknown;
+}
 
 std::optional<RecentScope> ParseRecentScope(const QString &value) {
 	const auto trimmed = value.trimmed().toLower();
@@ -2363,21 +2503,11 @@ bool PreviewAlways(
 		PreviewPeer{ id, kind }) != notifications.previewAlways.end();
 }
 
-ParseResult ParseSettings(const QString &text, const QString &path) {
+namespace {
+
+[[nodiscard]] ParseResult ReadSettingsTree(const toml::table &table) {
 	auto result = ParseResult();
-	const auto utf8 = text.toUtf8();
-	auto parsed = toml::parse(
-		std::string_view(utf8.constData(), utf8.size()),
-		path.toStdString());
-	if (!parsed) {
-		const auto &error = parsed.error();
-		result.error = u"%1:%2: %3"_q
-			.arg(error.source().begin.line)
-			.arg(error.source().begin.column)
-			.arg(Text(error.description()));
-		return result;
-	}
-	const auto root = std::move(parsed).table();
+	const auto root = SettingsRootReader{ table, result.readRoots };
 
 	result.settings.version = ReadVersion(root, result.warnings);
 	result.settings.notifications = ReadNotifications(root, result.warnings);
@@ -2516,6 +2646,249 @@ ParseResult ParseSettings(const QString &text, const QString &path) {
 		}
 		claimed.emplace_back(key, u"preset '%1'"_q.arg(preset.name));
 	}
+	return result;
+}
+
+} // namespace
+
+ParseResult ParseSettings(const QString &text, const QString &path) {
+	auto result = ParseResult();
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		result.error = u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description()));
+		return result;
+	}
+	return ReadSettingsTree(parsed.table());
+}
+
+namespace {
+
+struct ParsedLayerFile {
+	SettingsLayerText source;
+	toml::table tree;
+};
+
+[[nodiscard]] std::optional<toml::table> ParseLayerFile(
+		const QString &text,
+		const QString &path,
+		bool present,
+		SettingsLayerFileParse &report) {
+	report.path = path;
+	report.present = present;
+	if (!present) {
+		return std::nullopt;
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		report.parsed.error = u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description()));
+		return std::nullopt;
+	}
+	report.parsed = ReadSettingsTree(parsed.table());
+	return std::move(parsed.table());
+}
+
+[[nodiscard]] ParsedLayerFile SelectLayerFile(
+		const QString &text,
+		const QString &path,
+		bool present,
+		const std::optional<SettingsLayerText> &good,
+		SettingsLayerFileReport &report) {
+	if (auto parsed = ParseLayerFile(text, path, present, report.current)) {
+		report.usable = true;
+		return { { text, path }, std::move(*parsed) };
+	}
+	if (present && good) {
+		report.good.emplace();
+		if (auto parsed = ParseLayerFile(
+				good->text,
+				good->path,
+				true,
+				*report.good)) {
+			report.usable = true;
+			report.usedGood = true;
+			return { *good, std::move(*parsed) };
+		}
+	}
+	return { { QString(), path }, toml::table() };
+}
+
+[[nodiscard]] SettingsLayerKey LayerKeySource(
+		const std::vector<QString> &path,
+		const QString &key,
+		const toml::node &node) {
+	const auto &source = node.source();
+	return {
+		path,
+		key,
+		source.path ? Text(*source.path) : QString(),
+		int(source.begin.line),
+		int(source.begin.column),
+	};
+}
+
+void RemoveInheritedFileLocal(
+		toml::table &table,
+		const std::vector<QString> &path) {
+	auto removed = std::vector<std::string>();
+	for (auto &&[key, value] : table) {
+		const auto name = Text(key.str());
+		if (SettingsScope(path, name) == SettingScope::FileLocal) {
+			removed.emplace_back(key.str());
+		} else if (const auto child = value.as_table()) {
+			auto nested = path;
+			nested.push_back(name);
+			RemoveInheritedFileLocal(*child, nested);
+		}
+	}
+	for (const auto &key : removed) {
+		table.erase(key);
+	}
+}
+
+[[nodiscard]] toml::table *LayerTableAt(
+		toml::table &root,
+		const std::vector<QString> &path) {
+	auto table = &root;
+	for (const auto &part : path) {
+		const auto name = part.toUtf8();
+		const auto key = std::string_view(name.constData(), name.size());
+		const auto node = table->get(key);
+		auto child = node ? node->as_table() : nullptr;
+		if (!child) {
+			table->insert_or_assign(std::string(key), toml::table());
+			child = table->get(key)->as_table();
+		}
+		table = child;
+	}
+	return table;
+}
+
+void LayerAccountTable(
+		toml::table &account,
+		toml::table &global,
+		const std::vector<QString> &path,
+		const Settings &globalSettings,
+		bool followListMembers,
+		LayerSettingsResult &result) {
+	for (auto &&[key, value] : account) {
+		const auto name = Text(key.str());
+		const auto exception = SettingsScopeOverride(path, name);
+		const auto scope = exception ? *exception : SettingsScope(path, name);
+		const auto rootNamespace = path.empty() && std::any_of(
+			SettingsScopeRegistry().begin(),
+			SettingsScopeRegistry().end(),
+			[&](const SettingsScopeTable &entry) {
+				return entry.name == name && !entry.rootKey;
+			});
+		if (rootNamespace && scope == SettingScope::PerAccount
+			&& !value.is_table()) {
+			continue;
+		}
+		if (!exception && (rootNamespace || (scope != SettingScope::PerAccount
+			&& scope != SettingScope::FileLocal))) {
+			if (const auto table = value.as_table()) {
+				auto nested = path;
+				nested.push_back(name);
+				if (table->empty()
+					&& SettingsScope(path, name) == SettingScope::AppWide) {
+					result.inactive.push_back({ LayerKeySource(path, name, value),
+						SettingsInactiveReason::AppWide });
+				}
+				LayerAccountTable(
+					*table,
+					global,
+					nested,
+					globalSettings,
+					followListMembers,
+					result);
+				continue;
+			}
+		}
+		if (scope == SettingScope::AppWide) {
+			result.inactive.push_back({ LayerKeySource(path, name, value),
+				SettingsInactiveReason::AppWide });
+			continue;
+		} else if (scope != SettingScope::PerAccount
+			&& scope != SettingScope::FileLocal) {
+			continue;
+		}
+		if (exception && scope == SettingScope::PerAccount
+			&& path.size() == 2 && path.front() == u"lists"_q) {
+			if (followListMembers) {
+				result.inactive.push_back({ LayerKeySource(path, name, value),
+					SettingsInactiveReason::FollowListMembers });
+				continue;
+			} else if (!globalSettings.list(path[1])) {
+				result.inactive.push_back({ LayerKeySource(path, name, value),
+					SettingsInactiveReason::UndefinedGlobalList });
+				continue;
+			}
+		}
+		const auto destination = LayerTableAt(global, path);
+		destination->insert_or_assign(key.str(), std::move(value));
+		result.applied.push_back(LayerKeySource(
+			path,
+			name,
+			*destination->get(key.str())));
+	}
+}
+
+} // namespace
+
+LayerSettingsResult LayerSettings(
+		const QString &globalText,
+		const QString &globalPath,
+		const QString &accountText,
+		const QString &accountPath,
+		const SettingsLayerOptions &options) {
+	auto result = LayerSettingsResult();
+	const auto global = SelectLayerFile(
+		globalText,
+		globalPath,
+		options.globalPresent,
+		options.globalGood,
+		result.global);
+	auto account = SelectLayerFile(
+		accountText,
+		accountPath,
+		options.accountPresent,
+		options.accountGood,
+		result.account);
+	const auto utf8 = global.source.text.toUtf8();
+	auto merged = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		global.source.path.toStdString());
+	if (!merged) {
+		result.effective.error = u"the selected global source could not be reparsed"_q;
+		return result;
+	}
+	RemoveInheritedFileLocal(merged.table(), {});
+	const auto &globalSettings = result.global.usedGood
+		? result.global.good->parsed.settings
+		: result.global.current.parsed.settings;
+	LayerAccountTable(
+		account.tree,
+		merged.table(),
+		{},
+		globalSettings,
+		options.followListMembers,
+		result);
+	result.effective = ReadSettingsTree(merged.table());
+	result.effective.warnings.clear();
 	return result;
 }
 

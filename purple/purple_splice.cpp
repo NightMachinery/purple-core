@@ -10,6 +10,8 @@ option) any later version.
 #include <QtCore/QStringList>
 
 #include <algorithm>
+#include <iterator>
+#include <map>
 
 #define TOML_EXCEPTIONS 0
 #include <toml.hpp>
@@ -1737,7 +1739,520 @@ struct BudgetValue {
 	return result;
 }
 
+struct ScopeHeader {
+	std::vector<QString> path;
+	const toml::table *table = nullptr;
+	int line = 0;
+	bool array = false;
+	bool comment = false;
+};
+
+struct ScopeEdit {
+	qsizetype from = 0;
+	qsizetype till = 0;
+	QString replacement;
+};
+
+[[nodiscard]] std::optional<ScopeHeader> ReadScopeHeader(const QString &line) {
+	const auto text = line.trimmed();
+	if (!text.startsWith('[')) {
+		return std::nullopt;
+	}
+	const auto array = text.startsWith(u"[["_q);
+	const auto start = array ? 2 : 1;
+	auto quote = QChar();
+	auto escaped = false;
+	for (auto i = start; i < text.size(); ++i) {
+		const auto ch = text[i];
+		if (escaped) {
+			escaped = false;
+		} else if (!quote.isNull()) {
+			if (quote == QChar('"') && ch == '\\') {
+				escaped = true;
+			} else if (ch == quote) {
+				quote = QChar();
+			}
+		} else if (ch == '\'' || ch == '"') {
+			quote = ch;
+		} else if (ch == ']') {
+			if (array && (i + 1 >= text.size() || text[i + 1] != ']')) {
+				return std::nullopt;
+			}
+			const auto tail = text.mid(i + (array ? 2 : 1)).trimmed();
+			const auto path = SettingsTablePath(text.mid(start, i - start));
+			if (!path || (!tail.isEmpty() && !tail.startsWith('#'))) {
+				return std::nullopt;
+			}
+			return ScopeHeader{ *path, nullptr, 0, array, !tail.isEmpty() };
+		}
+	}
+	return std::nullopt;
+}
+
+void CollectScopeHeaders(
+		const toml::node &node,
+		const std::vector<QString> &path,
+		const QStringList &lines,
+		std::map<int, ScopeHeader> &headers) {
+	if (const auto table = node.as_table()) {
+		if (!table->is_inline() && !path.empty()) {
+			const auto line = int(table->source().begin.line);
+			if (line >= 1 && line <= lines.size()) {
+				auto header = ReadScopeHeader(lines[line - 1]);
+				if (header && header->path == path) {
+					header->line = line;
+					header->table = table;
+					headers.emplace(line, *header);
+				}
+			}
+		}
+		for (const auto &[key, value] : *table) {
+			auto child = path;
+			child.push_back(Text(key.str()));
+			CollectScopeHeaders(value, child, lines, headers);
+		}
+	} else if (const auto array = node.as_array()) {
+		for (const auto &value : *array) {
+			CollectScopeHeaders(value, path, lines, headers);
+		}
+	}
+}
+
+[[nodiscard]] qsizetype ScopeLineOffset(const QString &text, int line) {
+	auto at = qsizetype(0);
+	for (auto current = 1; current < line; ++current) {
+		const auto next = text.indexOf('\n', at);
+		if (next < 0) {
+			return text.size();
+		}
+		at = next + 1;
+	}
+	return at;
+}
+
+[[nodiscard]] bool SoleScopeKey(const QString &line, const QString &key) {
+	auto quote = QChar();
+	auto escaped = false;
+	for (auto i = qsizetype(0); i < line.size(); ++i) {
+		const auto ch = line[i];
+		if (escaped) {
+			escaped = false;
+		} else if (!quote.isNull()) {
+			if (quote == QChar('"') && ch == '\\') {
+				escaped = true;
+			} else if (ch == quote) {
+				quote = QChar();
+			}
+		} else if (ch == '\'' || ch == '"') {
+			quote = ch;
+		} else if (ch == '=') {
+			const auto utf8 = (line.left(i) + u" = 0\n"_q).toUtf8();
+			auto parsed = toml::parse(std::string_view(utf8.constData(), utf8.size()));
+			return parsed && parsed.table().size() == 1
+				&& Text(parsed.table().begin()->first.str()) == key
+				&& parsed.table().begin()->second.is_integer();
+		}
+	}
+	return false;
+}
+
+[[nodiscard]] std::optional<ScopeEdit> ScopeAssignment(
+		const QString &text,
+		const QStringList &lines,
+		const toml::key &key,
+		const toml::node &value) {
+	const auto first = int(key.source().begin.line);
+	const auto last = int(value.source().end.line);
+	if (first < 1 || last < first || last > lines.size()
+		|| !SoleScopeKey(lines[first - 1], Text(key.str()))) {
+		return std::nullopt;
+	}
+	return ScopeEdit{
+		ScopeLineOffset(text, first),
+		ScopeLineOffset(text, last + 1),
+		QString(),
+	};
+}
+
+[[nodiscard]] const toml::table *ScopeTableAt(
+		const toml::table &root,
+		const std::vector<QString> &path) {
+	auto result = &root;
+	for (const auto &part : path) {
+		const auto key = part.toUtf8();
+		const auto node = result->get(std::string_view(key.constData(), key.size()));
+		result = node ? node->as_table() : nullptr;
+		if (!result) {
+			return nullptr;
+		}
+	}
+	return result;
+}
+
+[[nodiscard]] toml::table *ScopeTableAt(
+		toml::table &root,
+		const std::vector<QString> &path) {
+	return const_cast<toml::table*>(ScopeTableAt(
+		static_cast<const toml::table&>(root), path));
+}
+
+[[nodiscard]] bool HasStructuredScopeOverride(
+		const toml::node &node,
+		const std::vector<QString> &path) {
+	if (const auto table = node.as_table()) {
+		for (const auto &[key, value] : *table) {
+			const auto name = Text(key.str());
+			const auto array = value.as_array();
+			if (SettingsScopeOverride(path, name)
+				&& (value.is_table() || (array && std::any_of(
+					array->begin(),
+					array->end(),
+					[](const toml::node &element) {
+						return !element.is_value();
+					})))) {
+				return true;
+			}
+			auto child = path;
+			child.push_back(name);
+			if (HasStructuredScopeOverride(value, child)) {
+				return true;
+			}
+		}
+	} else if (const auto array = node.as_array()) {
+		for (const auto &element : *array) {
+			if (HasStructuredScopeOverride(element, path)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+[[nodiscard]] bool HasRetainedScope(
+		const toml::node &node,
+		const std::vector<QString> &path) {
+	if (SettingsScope(path, QString()) != SettingScope::AppWide) {
+		return true;
+	}
+	if (const auto table = node.as_table()) {
+		for (const auto &[key, value] : *table) {
+			auto child = path;
+			child.push_back(Text(key.str()));
+			if (value.is_table() || (value.is_array()
+				&& value.as_array()->is_array_of_tables())) {
+				if (HasRetainedScope(value, child)) {
+					return true;
+				}
+			} else if (SettingsScope(path, Text(key.str())) != SettingScope::AppWide) {
+				return true;
+			}
+		}
+	} else if (const auto array = node.as_array()) {
+		for (const auto &value : *array) {
+			if (HasRetainedScope(value, path)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+[[nodiscard]] bool WithinScopeRemoval(
+		qsizetype at,
+		const std::vector<ScopeEdit> &edits) {
+	return std::any_of(edits.begin(), edits.end(), [&](const ScopeEdit &edit) {
+		return edit.from <= at && at < edit.till;
+	});
+}
+
+[[nodiscard]] bool CollectScopeAssignments(
+		const toml::table &table,
+		const std::vector<QString> &path,
+		const QString &text,
+		const QStringList &lines,
+		const std::map<int, ScopeHeader> &headers,
+		std::vector<ScopeEdit> &edits) {
+	for (const auto &[key, value] : table) {
+		auto child = path;
+		child.push_back(Text(key.str()));
+		const auto at = ScopeLineOffset(text, int(key.source().begin.line));
+		const auto array = value.as_array();
+		const auto inlineArray = array && array->is_array_of_tables()
+			&& key.source().begin.line > 0
+			&& key.source().begin.line <= lines.size()
+			&& SoleScopeKey(lines[int(key.source().begin.line) - 1], Text(key.str()));
+		if (WithinScopeRemoval(at, edits)
+			&& !value.is_table() && !(value.is_array()
+				&& value.as_array()->is_array_of_tables() && !inlineArray)) {
+			continue;
+		}
+		if (const auto nested = value.as_table()) {
+			if (nested->is_inline() && WithinScopeRemoval(at, edits)) {
+				continue;
+			}
+			if (nested->is_inline() && !HasRetainedScope(value, child)) {
+				const auto edit = ScopeAssignment(text, lines, key, value);
+				if (!edit) {
+					return false;
+				}
+				edits.push_back(*edit);
+			} else if (!CollectScopeAssignments(*nested, child, text, lines, headers, edits)) {
+				return false;
+			}
+		} else if (array && array->is_array_of_tables()) {
+			if (!HasRetainedScope(value, child)
+				&& array->source().begin.line == key.source().begin.line
+				&& SoleScopeKey(lines[int(key.source().begin.line) - 1], Text(key.str()))) {
+				const auto edit = ScopeAssignment(text, lines, key, value);
+				if (!edit) {
+					return false;
+				}
+				edits.push_back(*edit);
+			} else {
+				for (const auto &element : *array) {
+					if (!element.is_table()
+						|| !CollectScopeAssignments(*element.as_table(), child, text, lines, headers, edits)) {
+						return false;
+					}
+				}
+			}
+		} else if (SettingsScope(path, Text(key.str())) == SettingScope::AppWide) {
+			const auto header = headers.find(int(table.source().begin.line));
+			if (table.is_inline() || (!path.empty()
+				&& (header == headers.end() || header->second.path != path
+					|| header->second.array))) {
+				return false;
+			}
+			const auto edit = ScopeAssignment(text, lines, key, value);
+			if (!edit) {
+				return false;
+			}
+			edits.push_back(*edit);
+		}
+	}
+	return true;
+}
+
+void FilterAppWideScope(toml::table &table, const std::vector<QString> &path) {
+	auto remove = std::vector<std::string>();
+	for (auto &&[key, value] : table) {
+		auto child = path;
+		child.push_back(Text(key.str()));
+		if (value.is_table() || (value.is_array() && value.as_array()->is_array_of_tables())) {
+			if (!HasRetainedScope(value, child)) {
+				remove.emplace_back(key.str());
+			} else if (const auto nested = value.as_table()) {
+				FilterAppWideScope(*nested, child);
+			} else {
+				for (auto &element : *value.as_array()) {
+					if (const auto nested = element.as_table()) {
+						FilterAppWideScope(*nested, child);
+					}
+				}
+			}
+		} else if (SettingsScope(path, Text(key.str())) == SettingScope::AppWide) {
+			remove.emplace_back(key.str());
+		}
+	}
+	for (const auto &key : remove) {
+		table.erase(key);
+	}
+}
+
+[[nodiscard]] SpliceResult ApplyScopeEdits(
+		const QString &text,
+		const QString &path,
+		std::vector<ScopeEdit> edits,
+		const toml::table &expected) {
+	std::sort(edits.begin(), edits.end(), [](const ScopeEdit &a, const ScopeEdit &b) {
+		return a.from > b.from;
+	});
+	auto result = text;
+	auto boundary = text.size();
+	for (const auto &edit : edits) {
+		if (edit.from < 0 || edit.till < edit.from || edit.till > boundary) {
+			return Refuse(text, u"the removal overlaps another source region"_q);
+		}
+		result.replace(edit.from, edit.till - edit.from, edit.replacement);
+		boundary = edit.from;
+	}
+	const auto utf8 = result.toUtf8();
+	auto parsed = toml::parse(std::string_view(utf8.constData(), utf8.size()), path.toStdString());
+	if (!parsed || !(parsed.table() == expected)) {
+		return Refuse(text, u"the removal would change unrelated settings structure"_q);
+	}
+	auto splice = SpliceResult();
+	splice.text = result;
+	splice.changed = result != text;
+	return splice;
+}
+
 } // namespace
+
+SpliceResult RemoveTableKey(
+		const QString &text,
+		const QString &path,
+		const QString &table,
+		const QString &key) {
+	const auto address = SettingsTablePath(table);
+	if (!address || key.isEmpty()) {
+		return Refuse(text, u"the reset needs a valid table path and literal key"_q);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(std::string_view(utf8.constData(), utf8.size()), path.toStdString());
+	if (!parsed) {
+		return Refuse(text, u"settings.toml must parse before a key can be reset"_q);
+	}
+	const auto found = ScopeTableAt(parsed.table(), *address);
+	if (!found) {
+		const auto *current = &parsed.table();
+		for (const auto &part : *address) {
+			const auto name = part.toUtf8();
+			const auto node = current->get(std::string_view(name.constData(), name.size()));
+			if (!node) {
+				return Unchanged(text);
+			}
+			current = node->as_table();
+			if (!current) {
+				return Refuse(text, u"the reset cannot address an array-of-tables or scalar"_q);
+			}
+		}
+		return Refuse(text, u"the reset could not locate its table"_q);
+	}
+	const auto name = key.toUtf8();
+	const auto view = std::string_view(name.constData(), name.size());
+	const auto value = found->get(view);
+	if (!value) {
+		return Unchanged(text);
+	} else if (found->is_inline() || value->is_table()
+		|| (value->is_array() && std::any_of(value->as_array()->begin(),
+			value->as_array()->end(), [](const toml::node &entry) {
+				return !entry.is_value();
+			}))) {
+		return Refuse(text, u"reset supports separate scalar or plain-array assignments only"_q);
+	}
+	const auto lines = text.split('\n');
+	auto headers = std::map<int, ScopeHeader>();
+	CollectScopeHeaders(parsed.table(), {}, lines, headers);
+	const auto header = headers.find(int(found->source().begin.line));
+	if (!address->empty() && (header == headers.end()
+		|| header->second.path != *address || header->second.array)) {
+		return Refuse(text, u"give the reset table its own normal header first"_q);
+	}
+	auto edits = std::vector<ScopeEdit>();
+	for (const auto &[entry, node] : *found) {
+		if (entry.str() == view) {
+			const auto edit = ScopeAssignment(text, lines, entry, node);
+			if (!edit) {
+				return Refuse(text, u"reset cannot remove an inline or dotted assignment"_q);
+			}
+			edits.push_back(*edit);
+			break;
+		}
+	}
+	if (edits.empty()) {
+		return Refuse(text, u"the reset has no proven assignment source region"_q);
+	}
+	auto removeHeader = !address->empty() && found->size() == 1
+		&& !header->second.comment;
+	if (removeHeader) {
+		const auto next = std::next(header);
+		const auto stop = next == headers.end() ? lines.size() + 1 : next->first;
+		for (auto line = header->first + 1; line < stop; ++line) {
+			const auto offset = ScopeLineOffset(text, line);
+			if (!WithinScopeRemoval(offset, edits) && !lines[line - 1].trimmed().isEmpty()) {
+				removeHeader = false;
+				break;
+			}
+		}
+	}
+	auto expected = parsed.table();
+	ScopeTableAt(expected, *address)->erase(view);
+	if (removeHeader) {
+		edits.push_back({ ScopeLineOffset(text, header->first),
+			ScopeLineOffset(text, header->first + 1), QString() });
+		auto parts = *address;
+		while (!parts.empty()) {
+			const auto child = parts.back().toUtf8();
+			const auto full = parts;
+			parts.pop_back();
+			const auto parent = ScopeTableAt(expected, parts);
+			if (!parent) {
+				break;
+			}
+			const auto node = parent->get(std::string_view(child.constData(), child.size()));
+			if (!node || !node->is_table() || !node->as_table()->empty()) {
+				break;
+			}
+			const auto explicitHeader = std::any_of(headers.begin(), headers.end(), [&](const auto &entry) {
+				return entry.second.path == full;
+			});
+			if (full != *address && explicitHeader) {
+				break;
+			}
+			parent->erase(std::string_view(child.constData(), child.size()));
+		}
+	}
+	return ApplyScopeEdits(text, path, std::move(edits), expected);
+}
+
+SpliceResult RemoveAppWideSettings(const QString &text, const QString &path) {
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(std::string_view(utf8.constData(), utf8.size()), path.toStdString());
+	if (!parsed) {
+		return Refuse(text, u"settings.toml must parse before app-wide settings can be removed"_q);
+	}
+	if (HasStructuredScopeOverride(parsed.table(), {})) {
+		return Refuse(text, u"app-wide removal cannot edit structured values at named scope exceptions"_q);
+	}
+	const auto version = parsed.table().get("version");
+	const auto integer = version ? version->as_integer() : nullptr;
+	if (version && (!integer || integer->get() < 1 || integer->get() > 2)) {
+		return Refuse(text, u"app-wide removal supports only whole or layered file versions 1 and 2"_q);
+	}
+	const auto lines = text.split('\n');
+	auto headers = std::map<int, ScopeHeader>();
+	CollectScopeHeaders(parsed.table(), {}, lines, headers);
+	auto edits = std::vector<ScopeEdit>();
+	for (auto i = headers.begin(); i != headers.end(); ++i) {
+		if (HasRetainedScope(*i->second.table, i->second.path)) {
+			continue;
+		}
+		const auto next = std::next(i);
+		const auto stop = next == headers.end() ? lines.size() + 1 : next->first;
+		edits.push_back({ ScopeLineOffset(text, i->first),
+			ScopeLineOffset(text, stop), QString() });
+	}
+	if (!CollectScopeAssignments(parsed.table(), {}, text, lines, headers, edits)) {
+		return Refuse(text, u"rewrite the affected dotted, inline, or mixed array-of-tables syntax before removal"_q);
+	}
+	if (integer && integer->get() != 2) {
+		const auto at = Position{ int(version->source().begin.line),
+			int(version->source().begin.column) };
+		const auto end = FindValueEnd(lines, at);
+		if (!end || end->line != at.line) {
+			return Refuse(text, u"the version has no supported scalar source region"_q);
+		}
+		edits.push_back({ ScopeLineOffset(text, at.line) + at.column - 1,
+			ScopeLineOffset(text, end->line) + end->index, u"2"_q });
+	} else if (!version) {
+		const auto prefix = text.contains(u"\r\n"_q)
+			? u"version = 2\r\n"_q : u"version = 2\n"_q;
+		const auto first = std::find_if(edits.begin(), edits.end(), [](const ScopeEdit &edit) {
+			return edit.from == 0;
+		});
+		if (first == edits.end()) {
+			edits.push_back({ 0, 0, prefix });
+		} else {
+			first->replacement = prefix + first->replacement;
+		}
+	}
+	auto expected = parsed.table();
+	FilterAppWideScope(expected, {});
+	expected.insert_or_assign("version", int64(2));
+	return ApplyScopeEdits(text, path, std::move(edits), expected);
+}
+
 
 SpliceResult AddListMember(
 		const QString &text,

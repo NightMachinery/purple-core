@@ -21,15 +21,43 @@ option) any later version.
 // easier to prove outside a running app.
 namespace Purple {
 
-// The schema this build speaks, and what a file's own `version' is measured
-// against. It moves only when a key changes MEANING, because that is the only
-// change an older build gets wrong rather than merely misses: adding a key
-// costs an old build nothing, since it ignores what it has never heard of.
-//
-// So it is not a build number and not a date. Bumping it on every release
-// would make it noise, and a warning nobody has a reason to act on is a
-// warning everybody learns to skip.
-inline constexpr auto kSettingsVersion = 1;
+inline constexpr auto kDefaultSettingsVersion = 1;
+inline constexpr auto kSettingsVersion = kDefaultSettingsVersion;
+inline constexpr auto kHighestSettingsVersion = 2;
+
+enum class SettingScope : uchar {
+	Unknown,
+	AppWide,
+	PerAccount,
+	FileLocal,
+};
+
+struct SettingsScopeException {
+	QString table;
+	QString key;
+	SettingScope scope = SettingScope::Unknown;
+};
+
+struct SettingsScopeTable {
+	QString name;
+	SettingScope scope = SettingScope::Unknown;
+	std::vector<SettingsScopeException> exceptions;
+	bool future = false;
+	bool rootKey = false;
+};
+
+[[nodiscard]] const std::vector<SettingsScopeTable> &SettingsScopeRegistry();
+[[nodiscard]] std::optional<std::vector<QString>> SettingsTablePath(
+	const QString &text);
+[[nodiscard]] std::optional<SettingScope> SettingsScopeOverride(
+	const std::vector<QString> &table,
+	const QString &key);
+[[nodiscard]] SettingScope SettingsScope(
+	const std::vector<QString> &table,
+	const QString &key);
+[[nodiscard]] SettingScope SettingsScope(
+	const QString &table,
+	const QString &key);
 
 // Peer ids exactly as written in the file. Turning these into tdesktop PeerIds
 // is the engine's job; the parser stays ignorant of what a peer is.
@@ -930,7 +958,7 @@ struct Settings {
 	// one - every file written before the key existed is - and that is read in
 	// silence rather than warned about, since an absent key here is a fact
 	// about when the file was written and not a mistake in it.
-	int version = kSettingsVersion;
+	int version = kDefaultSettingsVersion;
 
 	Premium premium;
 	Notifications notifications;
@@ -967,11 +995,72 @@ struct ParseResult {
 	Settings settings;
 	std::vector<QString> warnings;
 	QString error;
+	std::vector<QString> readRoots;
 
 	[[nodiscard]] bool ok() const {
 		return error.isEmpty();
 	}
 };
+
+struct SettingsLayerText {
+	QString text;
+	QString path;
+};
+
+struct SettingsLayerOptions {
+	bool followListMembers = false;
+	bool globalPresent = true;
+	bool accountPresent = true;
+	std::optional<SettingsLayerText> globalGood;
+	std::optional<SettingsLayerText> accountGood;
+};
+
+struct SettingsLayerFileParse {
+	QString path;
+	ParseResult parsed;
+	bool present = true;
+};
+
+struct SettingsLayerFileReport {
+	SettingsLayerFileParse current;
+	std::optional<SettingsLayerFileParse> good;
+	bool usable = false;
+	bool usedGood = false;
+};
+
+struct SettingsLayerKey {
+	std::vector<QString> table;
+	QString key;
+	QString path;
+	int line = 0;
+	int column = 0;
+};
+
+enum class SettingsInactiveReason : uchar {
+	AppWide,
+	UndefinedGlobalList,
+	FollowListMembers,
+};
+
+struct SettingsInactiveKey {
+	SettingsLayerKey source;
+	SettingsInactiveReason reason = SettingsInactiveReason::AppWide;
+};
+
+struct LayerSettingsResult {
+	ParseResult effective;
+	SettingsLayerFileReport global;
+	SettingsLayerFileReport account;
+	std::vector<SettingsInactiveKey> inactive;
+	std::vector<SettingsLayerKey> applied;
+};
+
+[[nodiscard]] LayerSettingsResult LayerSettings(
+	const QString &globalText,
+	const QString &globalPath,
+	const QString &accountText,
+	const QString &accountPath,
+	const SettingsLayerOptions &options = {});
 
 [[nodiscard]] ParseResult ParseSettings(
 	const QString &text,
