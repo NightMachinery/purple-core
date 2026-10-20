@@ -540,6 +540,8 @@ struct Peek {
 	bool endOnScreenLock = true;
 	bool endOnAppLock = true;
 	bool endOnAppLockMobile = false;
+	bool exitHiddenChats = true;
+	std::optional<int> startDelaySeconds;
 };
 
 // Declared here so the two readers below can sit with the keys they read,
@@ -556,6 +558,7 @@ struct Settings;
 // `.value_or(0)' at each call site.
 [[nodiscard]] int PeekTapSeconds(const Settings &settings);
 [[nodiscard]] int PeekHotkeySeconds(const Settings &settings);
+[[nodiscard]] bool PeekExitHiddenChats(const Settings &settings);
 
 // The lengths a peek control offers: the chips a sheet shows and the positions
 // a dial snaps to, shortest first. One minute to one hour.

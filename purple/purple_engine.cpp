@@ -1045,6 +1045,15 @@ ScheduleStatus ScheduleStatusNow(
 	return result;
 }
 
+int PeekStartDelaySeconds(
+		const Settings &settings,
+		const DeviceIdentity &device) {
+	return settings.peek.startDelaySeconds.value_or(
+		!device.cls.trimmed().compare(u"mobile"_q, Qt::CaseInsensitive)
+			? kPeekStartDelayMobileDefaultSeconds
+			: 0);
+}
+
 int PeekTapSeconds(const Settings &settings, const DeviceIdentity &device) {
 	// Compared the way a ruleset's `device' is - case ignored, and trimmed -
 	// because the class reaches here through the same hand-written strings.

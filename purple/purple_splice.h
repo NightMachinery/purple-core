@@ -104,6 +104,11 @@ struct SpliceResult {
 	const QString &key,
 	bool value);
 
+[[nodiscard]] SpliceResult SetPeekStartDelay(
+	const QString &text,
+	const QString &path,
+	int seconds);
+
 // The same op for a string, written as a TOML basic string with '"' and '\'
 // escaped. Used for [schedule] outside, the one string the app sets on the
 // user's behalf.

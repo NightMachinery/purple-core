@@ -1354,6 +1354,18 @@ void WarnUnknownLists(
 	flag("end_on_screen_lock_p", result.endOnScreenLock);
 	flag("end_on_app_lock_p", result.endOnAppLock);
 	flag("end_on_app_lock_mobile_p", result.endOnAppLockMobile);
+	flag("exit_hidden_chats_p", result.exitHiddenChats);
+	if (const auto delay = table.get("start_delay_seconds")) {
+		const auto integer = delay->as_integer();
+		const auto value = integer ? delay->value<int>() : std::optional<int>();
+		if (value && *value >= 0) {
+			result.startDelaySeconds = *value;
+		} else {
+			warnings.push_back(u"peek: 'start_delay_seconds' should be a "
+				"non-negative whole number of seconds (%1), keeping the "
+				"device default."_q.arg(At(*delay)));
+		}
+	}
 	return result;
 }
 
@@ -1993,6 +2005,10 @@ LastSeenReason ReasonFor(LastSeenShape shape, bool byMe) {
 
 int PeekTapSeconds(const Settings &settings) {
 	return settings.peek.tapSeconds.value_or(settings.peek.autoOffSeconds);
+}
+
+bool PeekExitHiddenChats(const Settings &settings) {
+	return settings.peek.exitHiddenChats;
 }
 
 int PeekHotkeySeconds(const Settings &settings) {

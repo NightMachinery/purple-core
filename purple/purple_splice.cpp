@@ -2201,6 +2201,125 @@ SpliceResult SetTableBool(
 	return splice;
 }
 
+SpliceResult SetPeekStartDelay(
+		const QString &text,
+		const QString &path,
+		int value) {
+	if (value < 0) {
+		return Refuse(text, u"Peek delay must be a non-negative number of seconds."_q);
+	}
+	const auto table = u"peek"_q;
+	const auto key = u"start_delay_seconds"_q;
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()),
+		path.toStdString());
+	if (!parsed) {
+		const auto &error = parsed.error();
+		return Refuse(text, u"%1:%2: %3"_q
+			.arg(error.source().begin.line)
+			.arg(error.source().begin.column)
+			.arg(Text(error.description())));
+	}
+	const auto tableUtf8 = table.toUtf8();
+	const auto keyUtf8 = key.toUtf8();
+	const auto tableView = std::string_view(
+		tableUtf8.constData(),
+		tableUtf8.size());
+	const auto keyView = std::string_view(keyUtf8.constData(), keyUtf8.size());
+	const auto tableNode = parsed.table().get(tableView);
+	const auto existing = tableNode ? tableNode->as_table() : nullptr;
+	const auto node = existing ? existing->get(keyView) : nullptr;
+	const auto integer = node ? node->as_integer() : nullptr;
+	if (integer && integer->get() == value) {
+		return Unchanged(text);
+	}
+
+	auto lines = text.split('\n');
+	const auto line = node ? int(node->source().begin.line) : 0;
+	auto done = false;
+	if (line >= 1 && line <= lines.size()) {
+		auto &target = lines[line - 1];
+		const auto assign = target.indexOf('=');
+		if (assign >= 0) {
+			auto from = assign + 1;
+			while (from < target.size() && target[from].isSpace()) {
+				++from;
+			}
+			auto till = from;
+			while (till < target.size()
+				&& !target[till].isSpace()
+				&& target[till] != '#') {
+				++till;
+			}
+			if (till > from) {
+				target.replace(
+					from,
+					till - from,
+					QString::number(value));
+				done = true;
+			}
+		}
+	}
+	auto result = QString();
+	if (done) {
+		result = lines.join('\n');
+	} else {
+		const auto width = existing
+			? BlockKeyWidth(*existing, lines)
+			: std::optional<int>();
+		const auto assignment = u"%1 = %2"_q
+			.arg(AlignedKey(key, width), QString::number(value));
+		if (existing && existing->is_inline()) {
+			return Refuse(text, u"[%1] is written inline; rewrite it as a table "
+				"before setting '%2' from the app."_q.arg(table, key));
+		}
+		const auto header = existing ? int(existing->source().begin.line) : 0;
+		if (header >= 1 && header <= lines.size()) {
+			if (DeclaresTable(lines[header - 1], table)) {
+				lines.insert(header, assignment);
+			} else if (lines[header - 1].trimmed().startsWith('[')) {
+				lines.insert(header - 1, u"[%1]"_q.arg(TableKey(table)));
+				lines.insert(header, assignment);
+				lines.insert(header + 1, QString());
+			} else {
+				return Refuse(text, u"[%1] is written as dotted keys (line %2); "
+					"give it a [%1] header before setting '%3' from the app."_q
+					.arg(table)
+					.arg(header)
+					.arg(key));
+			}
+			result = lines.join('\n');
+		} else {
+			result = text;
+			if (!result.isEmpty()) {
+				if (!result.endsWith('\n')) {
+					result += '\n';
+				}
+				result += '\n';
+			}
+			result += u"[%1]\n%2\n"_q.arg(table, assignment);
+		}
+	}
+
+	const auto verifyUtf8 = result.toUtf8();
+	auto verify = toml::parse(
+		std::string_view(verifyUtf8.constData(), verifyUtf8.size()),
+		path.toStdString());
+	if (!verify) {
+		return Refuse(text, u"the edit would not parse back"_q);
+	}
+	const auto node2 = verify.table()[tableView][keyView].node();
+	const auto written = node2 ? node2->as_integer() : nullptr;
+	if (!written || written->get() != value) {
+		return Refuse(text, u"the edit did not set %1.%2"_q.arg(table, key));
+	}
+	auto splice = SpliceResult();
+	splice.text = result;
+	splice.changed = true;
+	return splice;
+}
+
 SpliceResult SetScheduleRule(
 		const QString &text,
 		const QString &path,

@@ -711,6 +711,11 @@ struct ScheduleStatus {
 // it: five minutes. Named rather than written at the one place that needs it,
 // because the number is documented and both apps will want to show it.
 inline constexpr auto kPeekTapMobileDefaultSeconds = 5 * 60;
+inline constexpr auto kPeekStartDelayMobileDefaultSeconds = 10;
+
+[[nodiscard]] int PeekStartDelaySeconds(
+	const Settings &settings,
+	const DeviceIdentity &device);
 
 // How long a peek started by tapping the control lasts on THIS device:
 // `[peek] tap_mobile' on a phone, and `[peek] tap' else `[peek] auto_off'

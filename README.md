@@ -385,3 +385,15 @@ version" grant is stated in each source file's header, which is where the
 version 3 desktop fork gets its right to link this in.
 
 `tomlplusplus/toml.hpp` is third-party and stays under its own MIT license.
+
+## Global Peek controls
+
+`[peek] exit_hidden_chats_p` defaults to true. The optional integer
+`start_delay_seconds` stays unset when absent: `PeekStartDelaySeconds(settings,
+device)` supplies desktop 0 / mobile 10, while an explicit shared value including 0
+wins. `PeekExitHiddenChats(settings)` reads the global exit option.
+`SetPeekStartDelay` edits that scalar without serializing the rest of the TOML.
+The clients own ephemeral countdown/abort UI, delayed setting changes and chat
+navigation. No pending activation or binary serialization fields are added.
+Focused regression cases live in TestPeekControls; run the existing core suite
+when qualifying this change.

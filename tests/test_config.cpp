@@ -4506,6 +4506,75 @@ tap_mobile = "2m"
 	}
 }
 
+void TestPeekControls() {
+	Begin("global peek controls");
+	const auto desktop = Device(u"desktop"_q, u"macos"_q, u"desktop"_q);
+	const auto mobile = Device(u"phone"_q, u"android"_q, u" Mobile "_q);
+	const auto absent = Parse(QString());
+	CHECK(absent.ok());
+	CHECK(Purple::PeekExitHiddenChats(absent.settings));
+	CHECK(!absent.settings.peek.startDelaySeconds.has_value());
+	CHECK_EQ(Purple::PeekStartDelaySeconds(absent.settings, desktop), 0);
+	CHECK_EQ(Purple::PeekStartDelaySeconds(absent.settings, mobile), 10);
+	CHECK_EQ(Purple::PeekStartDelaySeconds(absent.settings, Purple::DeviceIdentity()), 0);
+	const auto explicitZero = Parse(u"[peek]\nstart_delay_seconds = 0\nexit_hidden_chats_p = false\n"_q);
+	CHECK(explicitZero.ok());
+	CHECK(explicitZero.warnings.empty());
+	CHECK(!Purple::PeekExitHiddenChats(explicitZero.settings));
+	CHECK_EQ(Purple::PeekStartDelaySeconds(explicitZero.settings, desktop), 0);
+	CHECK_EQ(Purple::PeekStartDelaySeconds(explicitZero.settings, mobile), 0);
+	const auto shared = Parse(u"[peek]\nstart_delay_seconds = 17\n[presets.work]\nlist_order = []\n[presets.other]\nlist_order = []\n"_q);
+	CHECK(shared.ok());
+	CHECK_EQ(Purple::PeekStartDelaySeconds(shared.settings, desktop), 17);
+	CHECK_EQ(Purple::PeekStartDelaySeconds(shared.settings, mobile), 17);
+	CHECK(Purple::Resolve(shared.settings, u"work"_q).has_value());
+	CHECK(Purple::Resolve(shared.settings, u"other"_q).has_value());
+	const auto perPreset = Parse(u"[presets.work]\nlist_order = []\nstart_delay_seconds = 90\nexit_hidden_chats_p = false\n"_q);
+	CHECK(perPreset.ok());
+	CHECK(Purple::PeekExitHiddenChats(perPreset.settings));
+	CHECK_EQ(Purple::PeekStartDelaySeconds(perPreset.settings, mobile), 10);
+	const auto badFlag = Parse(u"[peek]\nexit_hidden_chats_p = 0\n"_q);
+	CHECK(badFlag.ok());
+	CHECK(!badFlag.warnings.empty());
+	CHECK(Purple::PeekExitHiddenChats(badFlag.settings));
+	for (const auto value : { u"-1"_q, u"1.5"_q, u"true"_q, u"\"10\""_q,
+		u"2147483648"_q, u"[10]"_q }) {
+		const auto invalid = Parse(u"[peek]\nstart_delay_seconds = %1\n"_q.arg(value));
+		CHECK(invalid.ok());
+		CHECK(!invalid.warnings.empty());
+		CHECK(!invalid.settings.peek.startDelaySeconds.has_value());
+		CHECK_EQ(Purple::PeekStartDelaySeconds(invalid.settings, mobile), 10);
+	}
+	const auto text = u"# keep header\n[peek]\nstart_delay_seconds   =   12   # keep note\nunknown_key = [1, 2]\n[future]\nvalue = 'preserve'\n"_q;
+	const auto changed = Purple::SetPeekStartDelay(text, u"test.toml"_q, 0);
+	CHECK(changed.ok());
+	CHECK(changed.changed);
+	CHECK_EQ(changed.text, QString(text).replace(u"=   12"_q, u"=   0"_q));
+	CHECK_EQ(Purple::PeekStartDelaySeconds(Parse(changed.text).settings, mobile), 0);
+	const auto same = Purple::SetPeekStartDelay(changed.text, u"test.toml"_q, 0);
+	CHECK(same.ok());
+	CHECK(!same.changed);
+	CHECK_EQ(same.text, changed.text);
+	const auto negative = Purple::SetPeekStartDelay(text, u"test.toml"_q, -1);
+	CHECK(!negative.ok());
+	CHECK_EQ(negative.text, text);
+	const auto invalid = Purple::SetPeekStartDelay(u"[peek\n"_q, u"test.toml"_q, 3);
+	CHECK(!invalid.ok());
+	CHECK_EQ(invalid.text, u"[peek\n"_q);
+	const auto appended = Purple::SetPeekStartDelay(u"[future]\nx = 1\n"_q, u"test.toml"_q, 8);
+	CHECK(appended.ok());
+	CHECK(appended.text.startsWith(u"[future]\nx = 1\n"_q));
+	CHECK_EQ(Purple::PeekStartDelaySeconds(Parse(appended.text).settings, mobile), 8);
+	const auto inlineText = u"peek = { other = true }\n"_q;
+	const auto inlineEdit = Purple::SetPeekStartDelay(inlineText, u"test.toml"_q, 8);
+	CHECK(!inlineEdit.ok());
+	CHECK_EQ(inlineEdit.text, inlineText);
+	const auto flag = Purple::SetTableBool(text, u"test.toml"_q, u"peek"_q, u"exit_hidden_chats_p"_q, false);
+	CHECK(flag.ok());
+	CHECK(!Purple::PeekExitHiddenChats(Parse(flag.text).settings));
+	CHECK(flag.text.contains(u"unknown_key = [1, 2]"_q));
+}
+
 void TestPeekLocks() {
 	Begin("peek locks");
 
@@ -14047,6 +14116,7 @@ int main() {
 	TestMentionGate();
 	TestPeek();
 	TestPeekLengths();
+	TestPeekControls();
 	TestPeekLocks();
 	TestPeekState();
 	TestNamedExplicitly();
