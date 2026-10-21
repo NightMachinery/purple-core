@@ -13,6 +13,7 @@ option) any later version.
 // Run with purple/test_config.sh.
 
 #include "purple/purple_engine.h"
+#include "purple/purple_account_files.h"
 #include "purple/purple_config_sync.h"
 #include "purple/purple_config_diff.h"
 #include "purple/purple_config_payload.h"
@@ -15210,7 +15211,226 @@ future = { nested = [1, 2] }
 	}
 }
 
+
+void TestAccountFilesAndStartupOwner() {
+	using namespace Purple;
+	Section = "AccountFiles and startup owner";
+	const auto a = AccountKey{ 0, 101 };
+	const auto b = AccountKey{ 0, 202 };
+	const auto test = AccountKey{ 1, 101 };
+	const auto ownerA = u"root_file_account = '0-101'\n"_q;
+	const auto ownerB = u"root_file_account = '0-202'\n"_q;
+	const auto localA = u"global_account = '1-101'\nroot_file_account = '0-101'\n"
+		u"[account_work_mode]\n'0-202' = 'stock'\n"_q;
+	const auto device = DeviceAccountFiles();
+	CHECK(device.state == u"state.toml"_q);
+	CHECK(device.localChoice == u"local.toml"_q);
+	CHECK(device.ownerRecord == u"accounts/root.toml"_q);
+	for (const auto layout : { AccountFileLayout::Desktop, AccountFileLayout::Android }) {
+		const auto root = ResolveAccountFiles(a, a, layout);
+		CHECK(root.has_value());
+		CHECK(root->directory.isEmpty());
+		CHECK(root->settings == u"settings.toml"_q);
+		CHECK(root->good == u"settings.toml.good"_q);
+		CHECK(root->backup == u"settings.toml.bak"_q);
+		CHECK(root->importBackup == u"settings.toml.import.bak"_q);
+		CHECK(root->syncDirectory == u"sync"_q);
+		CHECK(root->syncStore == u"sync/state.json"_q);
+		CHECK(root->history == (layout == AccountFileLayout::Desktop
+			? u"sync/history"_q : u"sync-history"_q));
+		CHECK(root->fingerprintFile == u"state.toml"_q);
+		CHECK(root->fingerprintStorage == AccountFingerprintStorage::DeviceState);
+		for (const auto account : { b, test }) {
+			const auto files = ResolveAccountFiles(account, a, layout);
+			const auto prefix = (account == b) ? u"accounts/0-202/"_q : u"accounts/1-101/"_q;
+			CHECK(files.has_value());
+			CHECK(files->directory == ((account == b) ? u"accounts/0-202"_q : u"accounts/1-101"_q));
+			CHECK(files->settings == prefix + u"settings.toml"_q);
+			CHECK(files->good == prefix + u"settings.toml.good"_q);
+			CHECK(files->backup == prefix + u"settings.toml.bak"_q);
+			CHECK(files->importBackup == prefix + u"settings.toml.import.bak"_q);
+			CHECK(files->syncDirectory == prefix + u"sync"_q);
+			CHECK(files->syncStore == prefix + u"sync/state.json"_q);
+			CHECK(files->history == prefix + ((layout == AccountFileLayout::Desktop)
+				? u"sync/history"_q : u"sync-history"_q));
+			CHECK(files->fingerprintFile == prefix + u"send-state.toml"_q);
+			CHECK(files->fingerprintStorage == AccountFingerprintStorage::AccountSendState);
+		}
+		const auto testRoot = ResolveAccountFiles(test, test, layout);
+		CHECK(testRoot && testRoot->settings == u"settings.toml"_q);
+		CHECK(!ResolveAccountFiles(a, std::nullopt, layout));
+		for (const auto bad : { AccountKey{ -1, 101 }, AccountKey{ 2, 101 }, AccountKey{ 0, 0 }, AccountKey{ 1, -2 } }) {
+			CHECK(!ResolveAccountFiles(bad, a, layout));
+			CHECK(!ResolveAccountFiles(a, bad, layout));
+		}
+	}
+	CHECK(!ResolveAccountFiles(a, a, static_cast<AccountFileLayout>(9)));
+	const auto held = [&](const AccountOwnerStartupPlan &plan) {
+		CHECK(plan.permissions.rootSettingsForAllAccounts);
+		CHECK(!plan.permissions.loadAccountFiles);
+		CHECK(!plan.permissions.settingsSync);
+		CHECK(!plan.permissions.launchOffers);
+		CHECK(!plan.permissions.messageImports);
+		CHECK(!plan.permissions.automaticSend);
+		CHECK(plan.permissions.manualSend);
+		CHECK(plan.permissions.manualShare);
+	};
+	const auto ordered = [&](const AccountOwnerStartupPlan &plan, const AccountKey &owner) {
+		CHECK(plan.status == AccountOwnerStartupStatus::PendingOwnerWrites);
+		CHECK(!plan.startupOwner);
+		CHECK(plan.pendingOwner == owner);
+		CHECK(plan.writes.size() == 2);
+		if (plan.writes.size() == 2) {
+			CHECK(plan.writes[0].target == AccountOwnerWriteTarget::OwnerRecordCopy2);
+			CHECK(plan.writes[0].relativePath == u"accounts/root.toml"_q);
+			CHECK(plan.writes[1].target == AccountOwnerWriteTarget::LocalChoiceCopy1);
+			CHECK(plan.writes[1].relativePath == u"local.toml"_q);
+			CHECK(ParseOwnerRecord(plan.writes[0].text, u"fixture"_q).account == owner);
+			const auto local = ParseLocalChoice(plan.writes[1].text, u"fixture"_q);
+			CHECK(local.ok());
+			CHECK(local.choice.rootFileAccount == owner);
+			CHECK(local.choice.globalAccount == owner);
+		}
+		held(plan);
+	};
+	const auto snapshots = std::vector<OwnerFileSnapshot>{
+		{ false, {} }, { true, {} }, { true, u"not toml ["_q },
+		{ true, u"root_file_account = '0-001'"_q }, { true, ownerA }, { true, ownerB },
+	};
+	for (auto first = 0; first != int(snapshots.size()); ++first) {
+		for (auto second = 0; second != int(snapshots.size()); ++second) {
+			auto input = AccountOwnerStartupInput();
+			input.localChoice = snapshots[first];
+			input.ownerRecord = snapshots[second];
+			const auto plan = PlanAccountOwnerStartup(input);
+			if (first >= 4 || second >= 4) {
+				const auto owner = ((second >= 4) ? second : first) == 4 ? a : b;
+				CHECK(plan.status == AccountOwnerStartupStatus::Owned);
+				CHECK(plan.startupOwner == owner);
+				CHECK(!plan.pendingOwner);
+				CHECK(plan.globalAccount == owner);
+				CHECK(!plan.permissions.rootSettingsForAllAccounts);
+				CHECK(plan.permissions.loadAccountFiles && plan.permissions.settingsSync);
+				CHECK(plan.permissions.launchOffers && plan.permissions.messageImports);
+				CHECK(plan.permissions.automaticSend);
+				CHECK(plan.permissions.manualSend && plan.permissions.manualShare);
+				const auto disagree = first >= 4 && second >= 4 && first != second;
+				CHECK(plan.restoredHandEditedOwnerNotice == disagree);
+				const auto writeCount = (second < 4 || first < 4 || disagree) ? 1 : 0;
+				CHECK(plan.writes.size() == writeCount);
+				if (writeCount) {
+					const auto copy2 = second < 4;
+					CHECK(plan.writes[0].target == (copy2 ? AccountOwnerWriteTarget::OwnerRecordCopy2
+						: AccountOwnerWriteTarget::LocalChoiceCopy1));
+					CHECK(ParseOwnerRecord(plan.writes[0].text, u"fixture"_q).account == owner);
+				}
+			} else {
+				CHECK(!plan.startupOwner && !plan.pendingOwner);
+				CHECK(plan.writes.empty());
+				CHECK(plan.status == ((first || second) ? AccountOwnerStartupStatus::SingleFileError
+					: AccountOwnerStartupStatus::WaitingForFirstSignIn));
+				CHECK(plan.error.isEmpty() == !(first || second));
+				held(plan);
+			}
+		}
+	}
+	auto input = AccountOwnerStartupInput();
+	input.localChoice = { true, localA };
+	input.ownerRecord = { true, ownerB };
+	auto plan = PlanAccountOwnerStartup(input);
+	CHECK(plan.startupOwner == b);
+	CHECK(plan.globalAccount == test);
+	CHECK(plan.restoredHandEditedOwnerNotice);
+	CHECK(plan.localChoice.accountWorkMode.at(u"0-202"_q) == AccountWorkMode::Stock);
+	const auto repaired = ParseLocalChoice(plan.writes[0].text, u"fixture"_q);
+	CHECK(repaired.choice.globalAccount == test);
+	CHECK(repaired.choice.rootFileAccount == b);
+	CHECK(repaired.choice.accountWorkMode.at(u"0-202"_q) == AccountWorkMode::Stock);
+	input.localChoice.text = plan.writes[0].text;
+	plan = PlanAccountOwnerStartup(input);
+	CHECK(!plan.restoredHandEditedOwnerNotice && plan.writes.empty());
+	CHECK(plan.startupOwner == b && plan.globalAccount == test);
+	input.chosenAccount = a;
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input = {};
+	input.localChoice = { true, u"global_account='1-101'\nroot_file_account='bad'\n[account_work_mode]\n'0-202'='stock'"_q };
+	input.ownerRecord = { true, ownerA };
+	plan = PlanAccountOwnerStartup(input);
+	CHECK(plan.startupOwner == a && plan.globalAccount == test);
+	CHECK(plan.localChoice.accountWorkMode.at(u"0-202"_q) == AccountWorkMode::Stock);
+	input = {};
+	input.accountsDirectoryPresent = true;
+	input.signedInAccounts = { { a, false, true } };
+	plan = PlanAccountOwnerStartup(input);
+	CHECK(plan.status == AccountOwnerStartupStatus::SingleFileError);
+	CHECK(!plan.pendingOwner);
+	held(plan);
+	input.chosenAccount = a;
+	ordered(PlanAccountOwnerStartup(input), a);
+	input.signedInAccounts[0].hasAccountDirectory = true;
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input.signedInAccounts = { { b, false, false } };
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input = {};
+	for (const auto account : { a, test }) {
+		input.signedInAccounts = { { account, false, false } };
+		ordered(PlanAccountOwnerStartup(input), account);
+	}
+	input.signedInAccounts = { { a, false, false }, { b, false, false }, { test, false, false } };
+	plan = PlanAccountOwnerStartup(input);
+	CHECK(plan.status == AccountOwnerStartupStatus::NeedsChoice);
+	CHECK(plan.eligibleChoices.size() == 3);
+	held(plan);
+	input.signedInAccounts[2].rootBindingMatches = true;
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::NeedsChoice);
+	input.signedInAccounts[2].rootBindingMatches = false;
+	input.signedInAccounts[1].rootBindingMatches = true;
+	ordered(PlanAccountOwnerStartup(input), b);
+	input.signedInAccounts[0].rootBindingMatches = true;
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::NeedsChoice);
+	input.chosenAccount = test;
+	plan = PlanAccountOwnerStartup(input);
+	ordered(plan, test);
+	auto interrupted = AccountOwnerStartupInput();
+	interrupted.ownerRecord = { true, plan.writes[0].text };
+	interrupted.signedInAccounts = { { a, false, false } };
+	const auto resumed = PlanAccountOwnerStartup(interrupted);
+	CHECK(resumed.status == AccountOwnerStartupStatus::Owned);
+	CHECK(resumed.startupOwner == test);
+	CHECK(resumed.writes.size() == 1);
+	CHECK(resumed.writes[0].target == AccountOwnerWriteTarget::LocalChoiceCopy1);
+	interrupted.localChoice = { true, resumed.writes[0].text };
+	const auto later = PlanAccountOwnerStartup(interrupted);
+	CHECK(later.startupOwner == test && later.writes.empty());
+	input = {};
+	input.signedInAccounts = { { a, false, false }, { a, false, true } };
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input.signedInAccounts = { { AccountKey{ 2, 101 }, false, false } };
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input.signedInAccounts = { { a, true, false } };
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input = {};
+	input.localChoice = { false, ownerA };
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input = {};
+	input.ownerRecord = { false, ownerA };
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input = {};
+	input.ownerRecord = { true, {} };
+	input.signedInAccounts = { { a, false, true } };
+	plan = PlanAccountOwnerStartup(input);
+	CHECK(plan.status == AccountOwnerStartupStatus::SingleFileError);
+	CHECK(!plan.pendingOwner && plan.writes.empty());
+	held(plan);
+	input.chosenAccount = b;
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+	input = {};
+	input.chosenAccount = AccountKey{ 0, 0 };
+	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
+}
+
 int main() {
+	TestAccountFilesAndStartupOwner();
 	TestVersionAwareLayerSettings();
 	TestStructuredScopeExceptionRefusal();
 	TestSettingsScopeAndRemoval();

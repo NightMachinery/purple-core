@@ -29,6 +29,7 @@ if [ ! -d "$QtPrefix/frameworks/QtCore.framework" ]; then
 fi
 
 Sources=(
+    purple/purple_account_files.cpp
     purple/purple_local_choice.cpp
     purple/purple_settings.cpp
     purple/purple_splice.cpp

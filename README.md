@@ -433,3 +433,6 @@ fallback texts and separate diagnostics. It is SOURCE_IMPLEMENTED_UNQUALIFIED:
 no compiler or test execution is claimed. See [settings layering](docs/settings-layering.md)
 for the API, presence/fallback contract, list membership, source order and
 remaining frontend/integration obligations.
+
+The pure account path and startup ownership model is documented in
+[Account files and startup ownership](docs/account-files-owner-recovery.md).
