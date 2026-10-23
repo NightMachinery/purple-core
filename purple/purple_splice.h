@@ -8,8 +8,10 @@ option) any later version.
 #pragma once
 
 #include "purple/purple_settings.h"
+#include "purple/purple_local_choice.h"
 
 #include <functional>
+#include <map>
 
 // The only writes the app ever makes to settings.toml. The file is hand-owned
 // and its comments are the point of it being TOML at all, so nothing here
@@ -41,6 +43,24 @@ struct SpliceResult {
 	const QString &list,
 	PeerIdValue id,
 	const MemberTitle &title);
+
+[[nodiscard]] SpliceResult SetListMembers(
+	const QString &text,
+	const QString &path,
+	const QString &list,
+	const std::vector<PeerIdValue> &ids,
+	const MemberTitle &title);
+
+[[nodiscard]] std::map<PeerIdValue, QString> ListMemberComments(
+	const QString &text,
+	const QString &path,
+	const QString &list);
+
+[[nodiscard]] SpliceResult SetAccountWorkMode(
+	const QString &text,
+	const QString &path,
+	const AccountKey &account,
+	AccountWorkMode mode);
 
 [[nodiscard]] SpliceResult RemoveListMember(
 	const QString &text,

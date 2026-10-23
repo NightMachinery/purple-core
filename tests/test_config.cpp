@@ -13922,6 +13922,357 @@ void TestSyncPublishPlanner() {
 		== Purple::SyncOwnMessageError::NotFound);
 }
 
+void TestSetListMembersAndComments() {
+	using namespace Purple;
+	Begin("SetListMembers and inherited comments");
+	const auto list = u"work.one"_q;
+	const auto global = u"version = 1\n# global file\n[lists.'work.one'] # list note\n"
+		"title = 'Work'\nkinds = ['groups']\nfuture = { x = [1, 2] }\n"
+		"members  = [ # opening note\n"
+		"  # independent note\n"
+		"  11,  # Alpha\n"
+		"  22,  # Beta\n"
+		"] # closing note\n"
+		"[lists.other]\nmembers = [99]\n"
+		"[unknown]\ntext = '''\n[lists.fake]\n'''\n"_q;
+	const auto comments = ListMemberComments(global, Path(), list);
+	CHECK(comments == (std::map<PeerIdValue, QString>{
+		{ 11, u"Alpha"_q }, { 22, u"Beta"_q } }));
+	const auto title = [&](PeerIdValue id) {
+		const auto i = comments.find(id);
+		return i != comments.end() ? i->second : u"New chat"_q;
+	};
+	const auto appended = SetListMembers(global, Path(), list, { 11, 22, 33 }, title);
+	CHECK(appended.ok());
+	CHECK(appended.changed);
+	CHECK_EQ(appended.text, QString(global).replace(
+		u"  22,  # Beta\n"_q, u"  22,  # Beta\n  33, # New chat\n"_q));
+	CHECK(ListMembers(appended.text, Path(), list)
+		== (std::vector<PeerIdValue>{ 11, 22, 33 }));
+	CHECK_EQ(SetListMembers(global, Path(), list, { 11, 22 }, {}).text, global);
+	CHECK(!SetListMembers(global, Path(), list, { 11, 22 }, {}).changed);
+	const auto removed = SetListMembers(appended.text, Path(), list, { 22, 33 }, {});
+	CHECK(removed.ok());
+	CHECK_EQ(removed.text, QString(appended.text).replace(u"  11,  # Alpha\n"_q, QString()));
+	const auto reordered = SetListMembers(global, Path(), list, { 22, 11 }, {});
+	CHECK(reordered.ok());
+	CHECK_EQ(reordered.text, QString(global).replace(
+		u"  11,  # Alpha\n  22,  # Beta\n"_q,
+		u"  22,  # Beta\n  11,  # Alpha\n"_q));
+	CHECK(ListMemberComments(reordered.text, Path(), list) == comments);
+	const auto empty = SetListMembers(global, Path(), list, {}, {});
+	CHECK(empty.ok());
+	CHECK_EQ(empty.text, QString(global).replace(u"  11,  # Alpha\n"_q, QString())
+		.replace(u"  22,  # Beta\n"_q, QString()));
+	CHECK(ParseSettings(empty.text, Path()).ok());
+	CHECK(ListMembers(empty.text, Path(), list).empty());
+	const auto account = u"version = 2\n# account\n[last_seen]\ntrade_p = false # keep\n"
+		"[unknown]\nfuture = [3, 4]\n"_q;
+	const auto fork = SetListMembers(account, Path(), list, { 11, 33 }, title);
+	CHECK(fork.ok());
+	CHECK(fork.text.startsWith(account));
+	CHECK(!fork.text.contains(u"title ="_q));
+	CHECK(!fork.text.contains(u"kinds ="_q));
+	CHECK(!fork.text.contains(u"lists.other"_q));
+	CHECK(ListMemberComments(fork.text, Path(), list)
+		== (std::map<PeerIdValue, QString>{ { 11, u"Alpha"_q }, { 33, u"New chat"_q } }));
+	const auto own = LayerSettings(global, Path(), fork.text, u"account.toml"_q);
+	CHECK(own.effective.ok());
+	const auto work = own.effective.settings.list(list);
+	CHECK(work && work->members == (std::vector<PeerIdValue>{ 11, 33 }));
+	CHECK(work && work->title == u"Work"_q);
+	const auto other = own.effective.settings.list(u"other"_q);
+	CHECK(other && other->members == (std::vector<PeerIdValue>{ 99 }));
+	auto options = SettingsLayerOptions();
+	options.followListMembers = true;
+	const auto follow = LayerSettings(global, Path(), fork.text, Path(), options);
+	const auto followed = follow.effective.settings.list(list);
+	CHECK(followed && followed->members == (std::vector<PeerIdValue>{ 11, 22 }));
+	const auto unfork = RemoveTableKey(fork.text, Path(), u"lists.'work.one'"_q, u"members"_q);
+	CHECK(unfork.ok());
+	CHECK_EQ(unfork.text, account + '\n');
+	const auto inherited = LayerSettings(global, Path(), unfork.text, Path());
+	const auto restored = inherited.effective.settings.list(list);
+	CHECK(restored && restored->members == (std::vector<PeerIdValue>{ 11, 22 }));
+	CHECK_EQ(global, u"version = 1\n# global file\n[lists.'work.one'] # list note\n"
+		"title = 'Work'\nkinds = ['groups']\nfuture = { x = [1, 2] }\n"
+		"members  = [ # opening note\n  # independent note\n"
+		"  11,  # Alpha\n  22,  # Beta\n] # closing note\n"
+		"[lists.other]\nmembers = [99]\n[unknown]\ntext = '''\n[lists.fake]\n'''\n"_q);
+	for (const auto name : { u"plain"_q, u"a.b"_q, u"a\"b\\c"_q, u"💜.work"_q,
+			u"a] # b"_q, u" work "_q }) {
+		const auto made = SetListMembers(u"version = 2\n"_q, Path(), name, { 7, -8 }, {});
+		CHECK(made.ok());
+		CHECK(ListMembers(made.text, Path(), name) == (std::vector<PeerIdValue>{ 7, -8 }));
+		CHECK(!SetListMembers(made.text, Path(), name, { 7, -8 }, {}).changed);
+	}
+	const auto noMembers = u"[lists.work]\ntitle   = 'Work' # keep\nunknown = 1\n"_q;
+	const auto added = SetListMembers(noMembers, Path(), u"work"_q, {}, {});
+	CHECK(added.ok());
+	CHECK_EQ(added.text, u"[lists.work]\nmembers = [\n]\ntitle   = 'Work' # keep\nunknown = 1\n"_q);
+	const auto newEmpty = SetListMembers(QString(), Path(), list, {}, {});
+	CHECK(newEmpty.ok());
+	CHECK_EQ(newEmpty.text, u"[lists.\"work.one\"]\nmembers = [\n]\n"_q);
+	const auto compact = u"[lists.work]\nmembers = [11, 22, # Beta\n"
+		" # independent\n 33] # array note\nunknown = '# 9'\n"_q;
+	const auto compactComments = ListMemberComments(compact, Path(), u"work"_q);
+	CHECK(compactComments == (std::map<PeerIdValue, QString>{ { 22, u"Beta"_q } }));
+	const auto expanded = SetListMembers(compact, Path(), u"work"_q, { 22, 44 }, {});
+	CHECK(expanded.ok());
+	CHECK_EQ(expanded.text, u"[lists.work]\nmembers = [\n  # independent\n"
+		"  22, # Beta\n  44,\n] # array note\nunknown = '# 9'\n"_q);
+	CHECK(ListMemberComments(expanded.text, Path(), u"work"_q) == compactComments);
+	const auto unicode = u"lists.'💜.work'.members = [11, 22] # keep\nunknown = 3\n"_q;
+	const auto unicodeEdit = SetListMembers(unicode, Path(), u"💜.work"_q, { 22 }, {});
+	CHECK(unicodeEdit.ok());
+	CHECK(unicodeEdit.text.startsWith(u"lists.'💜.work'.members = ["_q));
+	CHECK(unicodeEdit.text.endsWith(u"] # keep\nunknown = 3\n"_q));
+	CHECK(ListMembers(unicodeEdit.text, Path(), u"💜.work"_q) == (std::vector<PeerIdValue>{ 22 }));
+	const auto spaced = u"[lists.work]\nmembers = [\n  1, # Alpha   team\tname\n]\n"_q;
+	const auto spacedComments = ListMemberComments(spaced, Path(), u"work"_q);
+	CHECK_EQ(spacedComments.at(1), u"Alpha   team\tname"_q);
+	const auto spacedFork = SetListMembers(u"version = 2\n"_q, Path(), u"work"_q,
+		{ 1 }, [&](PeerIdValue id) { return spacedComments.at(id); });
+	CHECK(spacedFork.ok());
+	CHECK(ListMemberComments(spacedFork.text, Path(), u"work"_q) == spacedComments);
+	auto titleCalls = std::vector<PeerIdValue>();
+	const auto freshOnly = SetListMembers(u"[lists.work]\nmembers = [1, 2]\n"_q,
+		Path(), u"work"_q, { 2, 3 }, [&](PeerIdValue id) {
+			titleCalls.push_back(id);
+			return u"Fresh\nname"_q;
+		});
+	CHECK(freshOnly.ok());
+	CHECK(titleCalls == (std::vector<PeerIdValue>{ 3 }));
+	CHECK_EQ(ListMemberComments(freshOnly.text, Path(), u"work"_q).at(3), u"Fresh name"_q);
+	const auto noComma = SetListMembers(u"[lists.work]\nmembers = [\n  11 # first\n]\n"_q,
+		Path(), u"work"_q, { 11, 22 }, {});
+	CHECK(noComma.ok());
+	CHECK_EQ(noComma.text, u"[lists.work]\nmembers = [\n  11, # first\n  22,\n]\n"_q);
+	const auto crlf = QString(global).replace(u"\n"_q, u"\r\n"_q);
+	const auto crlfEdit = SetListMembers(crlf, Path(), list, { 22, 33 }, title);
+	CHECK(crlfEdit.ok());
+	CHECK(!QString(crlfEdit.text).remove(u"\r\n"_q).contains('\n'));
+	CHECK(crlfEdit.text.contains(u"  33, # New chat\r\n"_q));
+	const auto crlfFork = SetListMembers(u"version = 2\r\n"_q, Path(), list, { 11 }, title);
+	CHECK(crlfFork.ok());
+	CHECK(!QString(crlfFork.text).remove(u"\r\n"_q).contains('\n'));
+	for (const auto bad : {
+			u"[lists.work\n"_q, u"lists = 1\n"_q,
+			u"lists = { work = { members = [1] } }\n"_q,
+			u"[lists]\nwork = { members = [1] }\n"_q,
+			u"[lists]\nwork = 1\n"_q,
+			u"[lists.work]\nmembers = 'bad'\n"_q,
+			u"[lists.work]\nmembers = [1, 'future']\n"_q,
+			u"[lists.work]\nmembers = [[1]]\n"_q,
+			u"[[lists.work]]\nmembers = [1]\n"_q }) {
+		const auto refused = SetListMembers(bad, Path(), u"work"_q, { 2 }, {});
+		CHECK(!refused.ok());
+		CHECK(!refused.changed);
+		CHECK_EQ(refused.text, bad);
+	}
+	const auto removeBeforeLast = SetListMembers(
+		u"[lists.work]\nmembers = [\n  11, # first\n  22 # last\n]\n"_q,
+		Path(), u"work"_q, { 22 }, {});
+	CHECK(removeBeforeLast.ok());
+	CHECK_EQ(removeBeforeLast.text,
+		u"[lists.work]\nmembers = [\n  22 # last\n]\n"_q);
+	const auto headless = SetListMembers(u"[lists.work]"_q, Path(), u"work"_q, { 1 }, {});
+	CHECK(headless.ok());
+	CHECK_EQ(headless.text, u"[lists.work]\nmembers = [\n  1,\n]\n"_q);
+	const auto crlfHeadless = SetListMembers(u"version = 2\r\n[lists.work]"_q,
+		Path(), u"work"_q, { 1 }, {});
+	CHECK(crlfHeadless.ok());
+	CHECK_EQ(crlfHeadless.text, u"version = 2\r\n[lists.work]\r\nmembers = [\r\n  1,\r\n]\r\n"_q);
+	const auto literalReset = RemoveTableKey(
+		u"[lists.\"work.one\"]\nmembers = []\n[lists.work]\nmembers = [9]\n"_q,
+		Path(), u"lists.\"work.one\""_q, u"members"_q);
+	CHECK(literalReset.ok());
+	CHECK_EQ(literalReset.text, u"[lists.work]\nmembers = [9]\n"_q);
+	const auto commentedReset = RemoveTableKey(
+		u"[lists.\"work.one\"] # keep\nmembers = []\n"_q,
+		Path(), u"lists.\"work.one\""_q, u"members"_q);
+	CHECK(commentedReset.ok());
+	CHECK_EQ(commentedReset.text, u"[lists.\"work.one\"] # keep\n"_q);
+	for (const auto array : { u"[1, 2, 3]"_q, u"[\n1,\n2,\n3\n]"_q,
+			u"[1, # first\n2, # second\n3, # third\n]"_q,
+			u"[ # top\n # middle\n1, 2, 3\n # bottom\n]"_q,
+			u"[0x1, 0o2, 0b11]"_q, u"[\n  1,\n  2,\n  3,\n]"_q }) {
+		const auto original = u"version = 2\n[lists.'work.one']\n"
+			"future = { nested = [1, 2] }\nmembers   = %1 # tail\n"
+			"[unknown]\nkeep = 'unchanged'\n"_q.arg(array);
+		for (const auto &ids : std::vector<std::vector<PeerIdValue>>{
+				{}, { 1 }, { 2, 3 }, { 3, 2, 1 }, { 1, 2, 3 }, { 1, 2, 3, 4 },
+				{ 4, 4, 2 }, { std::numeric_limits<PeerIdValue>::min(),
+					std::numeric_limits<PeerIdValue>::max() } }) {
+			const auto edited = SetListMembers(original, Path(), list, ids, {});
+			CHECK(edited.ok());
+			CHECK(ListMembers(edited.text, Path(), list) == ids);
+			CHECK(edited.text.contains(u"future = { nested = [1, 2] }\n"_q));
+			CHECK(edited.text.endsWith(u"] # tail\n[unknown]\nkeep = 'unchanged'\n"_q));
+			CHECK(ParseSettings(edited.text, Path()).ok());
+			const auto roundTrip = SetListMembers(edited.text, Path(), list, ids, {});
+			CHECK(roundTrip.ok() && !roundTrip.changed);
+			CHECK_EQ(roundTrip.text, edited.text);
+			const auto comments = ListMemberComments(edited.text, Path(), list);
+			const auto before = ListMemberComments(original, Path(), list);
+			for (const auto &[id, comment] : before) {
+				if (std::find(ids.begin(), ids.end(), id) != ids.end()) {
+					const auto i = comments.find(id);
+					CHECK(i != comments.end() && i->second == comment);
+				}
+			}
+			for (const auto note : { u"# top"_q, u"# middle"_q, u"# bottom"_q }) {
+				CHECK(!original.contains(note) || edited.text.contains(note));
+			}
+		}
+	}
+	CHECK(!SetListMembers(QString(), Path(), u"*reserved"_q, {}, {}).ok());
+	CHECK(!SetListMembers(QString(), Path(), QString(), {}, {}).ok());
+	CHECK(ListMemberComments(u"invalid = ["_q, Path(), list).empty());
+	CHECK(ListMemberComments(global, Path(), u"missing"_q).empty());
+}
+
+void TestSpliceBomAndEscapedListNames() {
+	using namespace Purple;
+	Begin("BOM source offsets and escaped list names");
+	const auto listInput = u"\ufefflists.work.members=[1]\n"_q;
+	const auto listEdit = SetListMembers(listInput, Path(), u"work"_q, { 1, 2 }, {});
+	CHECK(listEdit.ok() && listEdit.changed);
+	CHECK(listEdit.text.toUtf8()
+		== u"\ufefflists.work.members=[\n  1,\n  2,\n]\n"_q.toUtf8());
+	CHECK(!SetListMembers(listEdit.text, Path(), u"work"_q, { 1, 2 }, {}).changed);
+	const auto canonical = u"\ufefflists.work.members=[ # opening\n  1, # first\n]\n"_q;
+	const auto canonicalEdit = SetListMembers(canonical, Path(), u"work"_q, { 1, 2 }, {});
+	CHECK(canonicalEdit.ok() && canonicalEdit.changed);
+	CHECK(canonicalEdit.text.toUtf8()
+		== u"\ufefflists.work.members=[ # opening\n  1, # first\n  2,\n]\n"_q.toUtf8());
+	CHECK_EQ(ListMemberComments(canonicalEdit.text, Path(), u"work"_q).at(1), u"first"_q);
+	const auto account = AccountKey{ 0, 42 };
+	const auto localInput = u"\ufeffaccount_work_mode.\"0-42\"=\"own\"\n"_q;
+	const auto localEdit = SetAccountWorkMode(localInput, Path(), account, AccountWorkMode::Follow);
+	CHECK(localEdit.ok() && localEdit.changed);
+	CHECK(localEdit.text.toUtf8()
+		== u"\ufeffaccount_work_mode.\"0-42\"=\"follow\"\n"_q.toUtf8());
+	CHECK(!SetAccountWorkMode(localEdit.text, Path(), account, AccountWorkMode::Follow).changed);
+	const auto inlineInput = u"\ufeffaccount_work_mode = { '💜' = 7, '0-42' = 'own' } # keep\n"_q;
+	const auto inlineEdit = SetAccountWorkMode(inlineInput, Path(), account, AccountWorkMode::Stock);
+	CHECK(inlineEdit.ok() && inlineEdit.changed);
+	CHECK(inlineEdit.text.toUtf8()
+		== u"\ufeffaccount_work_mode = { '💜' = 7, '0-42' = \"stock\" } # keep\n"_q.toUtf8());
+	const auto laterInput = u"\ufeff# preamble\naccount_work_mode.'0-42' = 'own'\n"_q;
+	const auto laterEdit = SetAccountWorkMode(laterInput, Path(), account, AccountWorkMode::Follow);
+	CHECK(laterEdit.ok());
+	CHECK(laterEdit.text.toUtf8()
+		== u"\ufeff# preamble\naccount_work_mode.'0-42' = \"follow\"\n"_q.toUtf8());
+	const auto embedded = u"[account_work_mode]\n'\ufeff' = 'future'\n'0-42' = 'own'\n"_q;
+	const auto embeddedEdit = SetAccountWorkMode(embedded, Path(), account, AccountWorkMode::Stock);
+	CHECK(embeddedEdit.ok());
+	CHECK(embeddedEdit.text.toUtf8()
+		== u"[account_work_mode]\n'\ufeff' = 'future'\n'0-42' = \"stock\"\n"_q.toUtf8());
+	for (const auto &entry : std::vector<std::pair<QString, QString>>{
+			{ u"work\nteam"_q, u"work\\nteam"_q },
+			{ u" work\r\nteam "_q, u" work\\r\\nteam "_q },
+			{ u"work\tteam"_q, u"work\\tteam"_q },
+			{ u"work\b\fteam"_q, u"work\\b\\fteam"_q },
+			{ u"work\u0001\u007fteam"_q, u"work\\u0001\\u007fteam"_q } }) {
+		const auto &[name, escaped] = entry;
+		const auto global = u"[lists.\"%1\"]\nmembers=[1]\n"_q.arg(escaped);
+		CHECK(ParseSettings(global, Path()).ok());
+		CHECK(ListMembers(global, Path(), name) == (std::vector<PeerIdValue>{ 1 }));
+		const auto existing = SetListMembers(global, Path(), name, { 1, 2 }, {});
+		CHECK(existing.ok() && existing.changed);
+		CHECK(existing.text.toUtf8()
+			== u"[lists.\"%1\"]\nmembers=[\n  1,\n  2,\n]\n"_q.arg(escaped).toUtf8());
+		const auto fork = SetListMembers(u"version=2\n"_q, Path(), name, { 1, 2 }, {});
+		CHECK(fork.ok() && fork.changed);
+		CHECK(ListMembers(fork.text, Path(), name) == (std::vector<PeerIdValue>{ 1, 2 }));
+		CHECK(ParseSettings(fork.text, Path()).ok());
+		const auto layered = LayerSettings(global, Path(), fork.text, Path());
+		const auto list = layered.effective.settings.list(name);
+		CHECK(list && list->members == (std::vector<PeerIdValue>{ 1, 2 }));
+		CHECK(!SetListMembers(fork.text, Path(), name, { 1, 2 }, {}).changed);
+	}
+	const auto exactName = u" work\r\nteam "_q;
+	const auto exactFork = SetListMembers(u"version=2\n"_q, Path(), exactName, { 1, 2 }, {});
+	CHECK(exactFork.ok());
+	CHECK(exactFork.text.toUtf8()
+		== u"version=2\n\n[lists.\" work\\u000d\\u000ateam \"]\nmembers = [\n  1,\n  2,\n]\n"_q.toUtf8());
+}
+
+void TestSetAccountWorkModeSplice() {
+	using namespace Purple;
+	Begin("Local Work Mode choice splice");
+	const auto account = AccountKey{ 0, 42 };
+	const auto global = AccountKey{ 0, 11 };
+	const auto original = u"# local preamble\nroot_file_account = '0-11' # startup owner\n"
+		"global_account = '0-11'\nunknown = [1, 2]\n"
+		"[account_work_mode] # choices\n'0-42'  =  'own' # account note\n"
+		"'1-42' = 'stock' # other environment\nfuture = { text = '# 💜' }\n"
+		"[unknown_table]\ntext = '''\n[account_work_mode]\n'''\n"_q;
+	for (const auto mode : { AccountWorkMode::Own, AccountWorkMode::Follow, AccountWorkMode::Stock }) {
+		const auto edited = SetAccountWorkMode(original, u"local.toml"_q, account, mode);
+		CHECK(edited.ok());
+		CHECK(edited.changed == (mode != AccountWorkMode::Own));
+		const auto value = mode == AccountWorkMode::Own ? u"own"_q
+			: mode == AccountWorkMode::Follow ? u"follow"_q : u"stock"_q;
+		CHECK_EQ(edited.text, mode == AccountWorkMode::Own ? original
+			: QString(original).replace(u"'own' # account note"_q,
+				u"\"%1\" # account note"_q.arg(value)));
+		const auto parsed = ParseLocalChoice(edited.text, u"local.toml"_q);
+		CHECK(parsed.ok());
+		CHECK(AccountWorkModeFor(parsed.choice, account, global) == mode);
+		CHECK(AccountWorkModeFor(parsed.choice, AccountKey{ 1, 42 }, global) == AccountWorkMode::Stock);
+		CHECK(parsed.choice.rootFileAccount == global);
+		CHECK(parsed.choice.globalAccount == global);
+		CHECK(!SetAccountWorkMode(edited.text, Path(), account, mode).changed);
+		const auto back = SetAccountWorkMode(edited.text, Path(), account, AccountWorkMode::Own);
+		CHECK(back.ok());
+		CHECK(AccountWorkModeFor(ParseLocalChoice(back.text, Path()).choice,
+			account, global) == AccountWorkMode::Own);
+	}
+	const auto first = SetAccountWorkMode(QString(), Path(), account, AccountWorkMode::Own);
+	CHECK(first.ok());
+	CHECK_EQ(first.text, u"[account_work_mode]\n\"0-42\" = \"own\"\n"_q);
+	const auto added = SetAccountWorkMode(u"[account_work_mode]"_q,
+		Path(), account, AccountWorkMode::Stock);
+	CHECK(added.ok());
+	CHECK_EQ(added.text, u"[account_work_mode]\n\"0-42\" = \"stock\"\n"_q);
+	const auto missing = SetAccountWorkMode(u"unknown = 7\r\n"_q, Path(), account, AccountWorkMode::Follow);
+	CHECK(missing.ok());
+	CHECK_EQ(missing.text, u"unknown = 7\r\n\r\n[account_work_mode]\r\n\"0-42\" = \"follow\"\r\n"_q);
+	const auto crlf = QString(original).replace(u"\n"_q, u"\r\n"_q);
+	const auto replaced = SetAccountWorkMode(crlf, Path(), account, AccountWorkMode::Stock);
+	CHECK(replaced.ok());
+	CHECK(!QString(replaced.text).remove(u"\r\n"_q).contains('\n'));
+	const auto inserted = SetAccountWorkMode(crlf, Path(), AccountKey{ 0, 55 }, AccountWorkMode::Follow);
+	CHECK(inserted.ok());
+	CHECK(!QString(inserted.text).remove(u"\r\n"_q).contains('\n'));
+	CHECK(inserted.text.contains(u"\"0-55\" = \"follow\"\r\n"_q));
+	const auto dotted = u"account_work_mode.'0-42' = 'own' # keep\nunknown = 3\n"_q;
+	const auto dottedEdit = SetAccountWorkMode(dotted, Path(), account, AccountWorkMode::Follow);
+	CHECK(dottedEdit.ok());
+	CHECK_EQ(dottedEdit.text, u"account_work_mode.'0-42' = \"follow\" # keep\nunknown = 3\n"_q);
+	const auto inlineText = u"account_work_mode = { '💜' = 7, '0-42' = 'own' } # keep\n"_q;
+	const auto inlineEdit = SetAccountWorkMode(inlineText, Path(), account, AccountWorkMode::Stock);
+	CHECK(inlineEdit.ok());
+	CHECK_EQ(inlineEdit.text, u"account_work_mode = { '💜' = 7, '0-42' = \"stock\" } # keep\n"_q);
+	for (const auto bad : { u"[broken"_q, u"account_work_mode = 3\n"_q,
+			u"account_work_mode = { '0-11' = 'own' }\n"_q,
+			u"account_work_mode.'0-11' = 'own'\n"_q }) {
+		const auto refused = SetAccountWorkMode(bad, Path(), account, AccountWorkMode::Follow);
+		CHECK(!refused.ok());
+		CHECK(!refused.changed);
+		CHECK_EQ(refused.text, bad);
+	}
+	CHECK(!SetAccountWorkMode(original, Path(), AccountKey{ 2, 42 }, AccountWorkMode::Own).ok());
+	CHECK(!SetAccountWorkMode(original, Path(), account, AccountWorkMode(-1)).ok());
+	const auto globalFollow = SetAccountWorkMode(original, Path(), global, AccountWorkMode::Follow);
+	CHECK(globalFollow.ok());
+	const auto choice = ParseLocalChoice(globalFollow.text, Path());
+	CHECK(AccountWorkModeFor(choice.choice, global, global) == AccountWorkMode::Own);
+	CHECK(!choice.warnings.empty());
+}
+
 } // namespace
 
 void TestSyncInventory() {
@@ -15430,6 +15781,9 @@ void TestAccountFilesAndStartupOwner() {
 }
 
 int main() {
+	TestSpliceBomAndEscapedListNames();
+	TestSetListMembersAndComments();
+	TestSetAccountWorkModeSplice();
 	TestAccountFilesAndStartupOwner();
 	TestVersionAwareLayerSettings();
 	TestStructuredScopeExceptionRefusal();

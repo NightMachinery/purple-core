@@ -1,8 +1,7 @@
 # Account identity and device-local choice codecs
 
-SOURCE_UNQUALIFIED: these sources and the prepared additions to `test_config`
-have not been compiled or executed. Existing qualification of the other core
-units does not qualify this unit.
+The production codecs and their `test_config` cases compile and pass in the
+standalone core harness. Native client integration remains a separate check.
 
 ## Identity contract
 
@@ -56,6 +55,15 @@ comes from startup fallback instead, the client must supply the corresponding
 note when it applies the choice. No settings layering, list resolution or
 chat refresh occurs here.
 
+## Lossless Work Mode edits
+
+`SetAccountWorkMode` in `purple_splice.h` edits one account's local Work Mode
+choice while preserving unrelated text and unknown fields. Use it for the
+account chooser after initialization; the whole-template writers below retain
+their existing serialization contract. See
+[list member writes](list-member-writes.md) for the splice's refusals and the
+own-list fork workflow. No local choice is written to a synced settings file.
+
 ## Root-file ownership
 
 `ParseOwnerRecord(text, path)` reads the same `root_file_account` key from
@@ -101,7 +109,7 @@ the hand-owned settings splicer and the sync JSON envelope, whose existing
 unknown-field preservation contracts are unchanged. No local choice, display
 name or owner record is added to a synced settings document.
 
-## Prepared qualification and remaining integration
+## Headless checks and remaining integration
 
 The existing `test_config` program gains production-function cases covering
 canonical boundaries, overflow/path rejection, production/test separation,
@@ -114,16 +122,16 @@ substitute parser, policy mirror or new runner is introduced. The existing
 `test_sync_flow` source is unchanged because this unit does not change a sync
 transition.
 
-A separately admitted qualification must compile the new production TU and
-the genuine tests against Qt Core and vendored toml++, execute the prepared
-cases, and retain actual results. Independent source review follows. Neither
-compilation nor execution has occurred for this candidate.
+`tests/run.sh` compiles the production TU and genuine tests against Qt Core
+and vendored toml++. Both test programs passed; the current counts are recorded
+in [list member writes](list-member-writes.md). Native client integration and
+independent source review remain separate from these headless checks.
 
 Remaining account work includes owner-copy reconciliation and durable write
 ordering, migration and single-file mode, client account discovery and file
 watching, signed-in identity checks, registry/layering/list membership, ordered
 refresh, per-account stores and Relink, frontend build integration, UI and
 native verification. Shared Peek runtime state remains device-wide; list
-structure remains app-wide and members become per account only in the later
-layering work. No transport, playlist or live-file behavior is implemented by
+structure remains app-wide. Per-account layering and lossless member forks are
+provided by the core layering and splice APIs. No transport, playlist or live-file behavior is implemented by
 this codec unit.

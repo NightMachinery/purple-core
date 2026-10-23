@@ -33,7 +33,10 @@ struct Position {
 // A display name is arbitrary user-controlled text and this ends up on a line
 // of TOML, so anything that could break out of the comment has to go. Only line
 // breaks can: everything after '#' is comment until end of line.
-[[nodiscard]] QString CommentText(const MemberTitle &title, PeerIdValue id) {
+[[nodiscard]] QString CommentText(
+		const MemberTitle &title,
+		PeerIdValue id,
+		bool preserveSpacing = false) {
 	if (!title) {
 		return QString();
 	}
@@ -42,11 +45,11 @@ struct Position {
 		return QString();
 	}
 	for (auto &ch : result) {
-		if (ch == '\n' || ch == '\r' || ch == '\t') {
+		if (ch == '\n' || ch == '\r' || (!preserveSpacing && ch == '\t')) {
 			ch = ' ';
 		}
 	}
-	result = result.simplified();
+	result = preserveSpacing ? result.trimmed() : result.simplified();
 	return result.isEmpty() ? QString() : (u" # "_q + result);
 }
 
@@ -145,8 +148,10 @@ struct Position {
 [[nodiscard]] QString MemberLine(
 		const QString &indent,
 		PeerIdValue id,
-		const MemberTitle &title) {
-	return indent + QString::number(id) + u","_q + CommentText(title, id);
+		const MemberTitle &title,
+		bool preserveSpacing = false) {
+	return indent + QString::number(id) + u","_q
+		+ CommentText(title, id, preserveSpacing);
 }
 
 // A whole canonical array, written out: the '[' left on whatever came before
@@ -159,11 +164,12 @@ struct Position {
 		const QString &tail,
 		const std::vector<PeerIdValue> &ids,
 		const MemberTitle &title,
-		const QString &ending) {
+		const QString &ending,
+		bool preserveCommentSpacing = false) {
 	const auto indent = keyIndent + QString::fromLatin1(kDefaultIndent);
 	auto result = QStringList{ head + u"["_q + ending };
 	for (const auto id : ids) {
-		result.push_back(MemberLine(indent, id, title) + ending);
+		result.push_back(MemberLine(indent, id, title, preserveCommentSpacing) + ending);
 	}
 	result.push_back(keyIndent + u"]"_q + tail);
 	return result;
@@ -381,8 +387,12 @@ struct Position {
 	for (const auto ch : name) {
 		if (ch == '"' || ch == '\\') {
 			escaped += '\\';
+			escaped += ch;
+		} else if (ch.unicode() < 0x20 || ch.unicode() == 0x7f) {
+			escaped += u"\\u%1"_q.arg(int(ch.unicode()), 4, 16, QChar('0'));
+		} else {
+			escaped += ch;
 		}
-		escaped += ch;
 	}
 	return '"' + escaped + '"';
 }
@@ -1830,6 +1840,75 @@ void CollectScopeHeaders(
 	return at;
 }
 
+[[nodiscard]] qsizetype SourceColumn(
+		const QString &line,
+		int column,
+		bool firstLine) {
+	auto index = qsizetype(firstLine && line.startsWith(QChar(0xfeff)) ? 1 : 0);
+	for (auto current = 1; current < column && index < line.size(); ++current) {
+		if (line[index].isHighSurrogate() && index + 1 < line.size()
+			&& line[index + 1].isLowSurrogate()) {
+			++index;
+		}
+		++index;
+	}
+	return index;
+}
+
+[[nodiscard]] ScopeEdit ValueEdit(
+		const QString &text,
+		const QStringList &lines,
+		const toml::node &node,
+		const QString &replacement) {
+	const auto &source = node.source();
+	const auto first = int(source.begin.line);
+	const auto last = int(source.end.line);
+	return {
+		ScopeLineOffset(text, first)
+			+ SourceColumn(lines[first - 1], int(source.begin.column), first == 1),
+		ScopeLineOffset(text, last)
+			+ SourceColumn(lines[last - 1], int(source.end.column), last == 1),
+		replacement,
+	};
+}
+
+using MemberCommentLines = std::map<int, std::pair<PeerIdValue, QString>>;
+
+[[nodiscard]] MemberCommentLines ReadMemberCommentLines(
+		const QStringList &lines,
+		const toml::array &array) {
+	auto result = MemberCommentLines();
+	for (const auto &element : array) {
+		const auto integer = element.as_integer();
+		if (!integer) {
+			continue;
+		}
+		const auto &source = element.source();
+		const auto number = int(source.end.line);
+		const auto &line = lines[number - 1];
+		const auto tail = line.mid(SourceColumn(line, int(source.end.column), number == 1));
+		const auto hash = tail.indexOf('#');
+		if (hash < 0) {
+			continue;
+		}
+		const auto before = tail.left(hash).trimmed();
+		if (before.isEmpty() || before == u","_q) {
+			result.emplace(number, std::pair{
+				integer->get(), tail.mid(hash + 1).trimmed() });
+		}
+	}
+	return result;
+}
+
+[[nodiscard]] std::map<PeerIdValue, QString> MemberComments(
+		const MemberCommentLines &lines) {
+	auto result = std::map<PeerIdValue, QString>();
+	for (const auto &[line, comment] : lines) {
+		result.emplace(comment.first, comment.second);
+	}
+	return result;
+}
+
 [[nodiscard]] bool SoleScopeKey(const QString &line, const QString &key) {
 	auto quote = QChar();
 	auto escaped = false;
@@ -2253,6 +2332,263 @@ SpliceResult RemoveAppWideSettings(const QString &text, const QString &path) {
 	return ApplyScopeEdits(text, path, std::move(edits), expected);
 }
 
+
+SpliceResult SetAccountWorkMode(
+		const QString &text,
+		const QString &path,
+		const AccountKey &account,
+		AccountWorkMode mode) {
+	const auto key = AccountKeyText(account.environment, account.userId);
+	auto value = QString();
+	switch (mode) {
+	case AccountWorkMode::Own: value = u"own"_q; break;
+	case AccountWorkMode::Follow: value = u"follow"_q; break;
+	case AccountWorkMode::Stock: value = u"stock"_q; break;
+	}
+	if (!key || value.isEmpty()) {
+		return Refuse(text, u"the Work Mode choice needs a valid account and mode"_q);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()), path.toStdString());
+	if (!parsed) {
+		return Refuse(text, u"local.toml must parse before changing Work Mode"_q);
+	}
+	const auto node = parsed.table().get("account_work_mode");
+	const auto table = node ? node->as_table() : nullptr;
+	if (node && !table) {
+		return Refuse(text, u"account_work_mode must be a table"_q);
+	}
+	const auto keyUtf8 = key->toUtf8();
+	const auto keyView = std::string_view(keyUtf8.constData(), keyUtf8.size());
+	const auto existing = table ? table->get(keyView) : nullptr;
+	if (existing && existing->value<std::string_view>() == value.toStdString()) {
+		return Unchanged(text);
+	}
+	const auto lines = text.split('\n');
+	const auto newline = text.contains(u"\r\n"_q) ? u"\r\n"_q : u"\n"_q;
+	auto edits = std::vector<ScopeEdit>();
+	if (existing) {
+		edits.push_back(ValueEdit(text, lines, *existing, QuotedValue(value)));
+	} else if (table) {
+		const auto header = int(table->source().begin.line);
+		const auto declared = ReadScopeHeader(lines[header - 1]);
+		if (table->is_inline() || !declared
+			|| declared->path != std::vector<QString>{ u"account_work_mode"_q }
+			|| declared->array) {
+			return Refuse(text, u"give account_work_mode its own normal header first"_q);
+		}
+		const auto at = ScopeLineOffset(text, header + 1);
+		const auto assignment = Indentation(lines[header - 1])
+			+ AlignedKey(QuotedValue(*key), BlockKeyWidth(*table, lines))
+			+ u" = "_q + QuotedValue(value) + newline;
+		edits.push_back({ at, at,
+			(at == text.size() && !text.endsWith('\n') ? newline : QString())
+				+ assignment });
+	} else {
+		const auto prefix = text.isEmpty() ? QString()
+			: text.endsWith('\n') ? newline : newline + newline;
+		edits.push_back({ text.size(), text.size(), prefix
+			+ u"[account_work_mode]"_q + newline
+			+ QuotedValue(*key) + u" = "_q + QuotedValue(value) + newline });
+	}
+	auto expected = parsed.table();
+	if (!table) {
+		expected.insert("account_work_mode", toml::table());
+	}
+	expected.get_as<toml::table>("account_work_mode")->insert_or_assign(
+		keyView, value.toStdString());
+	return ApplyScopeEdits(text, path, std::move(edits), expected);
+}
+
+SpliceResult SetListMembers(
+		const QString &text,
+		const QString &path,
+		const QString &list,
+		const std::vector<PeerIdValue> &ids,
+		const MemberTitle &title) {
+	if (list.trimmed().isEmpty() || list.startsWith('*')) {
+		return Refuse(text, u"a list needs a nonempty, unreserved name"_q);
+	}
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()), path.toStdString());
+	if (!parsed) {
+		return Refuse(text, u"settings.toml must parse before setting list members"_q);
+	}
+	const auto listUtf8 = list.toUtf8();
+	const auto listView = std::string_view(listUtf8.constData(), listUtf8.size());
+	const auto listsNode = parsed.table().get("lists");
+	const auto lists = listsNode ? listsNode->as_table() : nullptr;
+	const auto listNode = lists ? lists->get(listView) : nullptr;
+	const auto table = listNode ? listNode->as_table() : nullptr;
+	if ((listsNode && (!lists || lists->is_inline()))
+		|| (listNode && (!table || table->is_inline()))) {
+		return Refuse(text, u"list members need normal lists tables"_q);
+	}
+	const auto members = table ? table->get("members") : nullptr;
+	const auto array = members ? members->as_array() : nullptr;
+	if (members && (!array || std::any_of(array->begin(), array->end(),
+			[](const toml::node &element) { return !element.is_integer(); }))) {
+		return Refuse(text, u"list members must be an array of integer ids"_q);
+	}
+	const auto before = array ? IdsOf(*array) : std::vector<PeerIdValue>();
+	if (array && before == ids) {
+		return Unchanged(text);
+	}
+	auto lines = text.split('\n');
+	const auto ending = text.contains(u"\r\n"_q) ? u"\r"_q : QString();
+	const auto newline = ending + '\n';
+	auto edits = std::vector<ScopeEdit>();
+	if (!array) {
+		auto indent = QString();
+		auto width = std::optional<int>();
+		auto at = text.size();
+		auto prefix = QString();
+		if (table) {
+			const auto header = int(table->source().begin.line);
+			const auto declared = ReadScopeHeader(lines[header - 1]);
+			if (!declared || declared->array
+				|| declared->path != std::vector<QString>{ u"lists"_q, list }) {
+				return Refuse(text, u"give the list its own normal header first"_q);
+			}
+			at = ScopeLineOffset(text, header + 1);
+			indent = Indentation(lines[header - 1]);
+			width = BlockKeyWidth(*table, lines);
+			if (at == text.size() && !text.endsWith('\n')) {
+				prefix = newline;
+			}
+		} else {
+			prefix = text.isEmpty() ? QString()
+				: text.endsWith('\n') ? newline : newline + newline;
+			prefix += u"[lists.%1]"_q.arg(TableKey(list)) + newline;
+		}
+		const auto written = IdArrayLines(indent,
+			indent + AlignedKey(u"members"_q, width) + u" = "_q,
+			ending, ids, title, ending, true).join('\n') + '\n';
+		edits.push_back({ at, at, prefix + written });
+	} else {
+		const auto edit = ValueEdit(text, lines, *array, QString());
+		const auto first = int(array->source().begin.line);
+		const auto last = int(array->source().end.line);
+		const auto open = Position{ first, int(SourceColumn(lines[first - 1],
+			int(array->source().begin.column), first == 1)) + 1 };
+		const auto close = Position{ last, int(SourceColumn(lines[last - 1],
+			int(array->source().end.column), last == 1)) };
+		auto replacement = QString();
+		if (IsCanonical(lines, open, close)) {
+			auto saved = std::map<PeerIdValue, std::vector<QString>>();
+			auto indent = Indentation(lines[first - 1])
+				+ QString::fromLatin1(kDefaultIndent);
+			for (auto line = first + 1; line < last; ++line) {
+				if (const auto id = MemberOnLine(lines[line - 1])) {
+					if (saved.empty()) {
+						indent = Indentation(lines[line - 1]);
+					}
+					saved[*id].push_back(lines[line - 1]);
+				}
+			}
+			auto used = std::map<PeerIdValue, size_t>();
+			const auto memberLine = [&](PeerIdValue id, bool needsComma) {
+				const auto i = saved.find(id);
+				const auto index = used[id]++;
+				if (i == saved.end() || index >= i->second.size()) {
+					return MemberLine(indent, id, title, true) + ending;
+				}
+				auto line = i->second[index];
+				const auto hash = line.indexOf('#');
+				const auto end = hash < 0 ? line.size() : hash;
+				if (needsComma && !line.left(end).trimmed().endsWith(',')) {
+					auto comma = end;
+					while (comma > 0 && line[comma - 1].isSpace()) {
+						--comma;
+					}
+					line.insert(comma, ',');
+				}
+				return line;
+			};
+			auto next = size_t(0);
+			auto body = QStringList{ lines[first - 1].mid(open.column - 1) };
+			for (auto line = first + 1; line < last; ++line) {
+				if (!MemberOnLine(lines[line - 1])) {
+					body.push_back(lines[line - 1]);
+				} else if (next < ids.size()) {
+					body.push_back(memberLine(ids[next], next + 1 < ids.size()));
+					++next;
+				}
+			}
+			while (next < ids.size()) {
+				body.push_back(memberLine(ids[next], next + 1 < ids.size()));
+				++next;
+			}
+			body.push_back(lines[last - 1].left(close.column));
+			replacement = body.join('\n');
+		} else {
+			const auto commentLines = ReadMemberCommentLines(lines, *array);
+			auto comments = MemberComments(commentLines);
+			for (const auto id : before) {
+				comments.try_emplace(id);
+			}
+			const auto resolve = [&](PeerIdValue id) {
+				const auto i = comments.find(id);
+				return i != comments.end() ? i->second
+					: title ? title(id) : QString();
+			};
+			const auto indent = Indentation(lines[first - 1]);
+			auto body = IdArrayLines(indent, QString(), QString(),
+				ids, resolve, ending, true);
+			for (auto line = last; line >= first; --line) {
+				const auto from = line == first ? open.column : 0;
+				const auto till = line == last ? close.column - 1
+					: int(lines[line - 1].size());
+				const auto content = lines[line - 1].mid(from, till - from);
+				const auto hash = content.indexOf('#');
+				if (hash < 0) {
+					continue;
+				}
+				if (!commentLines.contains(line)) {
+					body.insert(1, indent + QString::fromLatin1(kDefaultIndent)
+						+ content.mid(hash).trimmed() + ending);
+				}
+			}
+			replacement = body.join('\n');
+		}
+		edits.push_back({ edit.from, edit.till, replacement });
+	}
+	auto expected = parsed.table();
+	if (!lists) {
+		expected.insert("lists", toml::table());
+	}
+	const auto expectedLists = expected.get_as<toml::table>("lists");
+	if (!table) {
+		expectedLists->insert(listView, toml::table());
+	}
+	auto values = toml::array();
+	for (const auto id : ids) {
+		values.push_back(id);
+	}
+	expectedLists->get_as<toml::table>(listView)->insert_or_assign(
+		"members", std::move(values));
+	return ApplyScopeEdits(text, path, std::move(edits), expected);
+}
+
+std::map<PeerIdValue, QString> ListMemberComments(
+		const QString &text,
+		const QString &path,
+		const QString &list) {
+	const auto utf8 = text.toUtf8();
+	auto parsed = toml::parse(
+		std::string_view(utf8.constData(), utf8.size()), path.toStdString());
+	if (!parsed) {
+		return {};
+	}
+	auto ignored = QString();
+	const auto table = FindListTable(parsed.table(), list, ignored);
+	const auto node = table ? table->get("members") : nullptr;
+	const auto array = node ? node->as_array() : nullptr;
+	return array ? MemberComments(ReadMemberCommentLines(text.split('\n'), *array))
+		: std::map<PeerIdValue, QString>();
+}
 
 SpliceResult AddListMember(
 		const QString &text,

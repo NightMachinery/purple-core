@@ -9,12 +9,15 @@ It is a repository of its own because two apps need exactly this code and
 nothing around it. Every policy in the Work Mode spec is a rule about data, and
 rules about data are far easier to prove outside a running app than inside one.
 
-## Account identity and local choices (source candidate)
+## Account identity and local choices
 
-The account-key and device-local TOML codecs are implemented but remain
-SOURCE_UNQUALIFIED. Their prepared cases have not been compiled or run.
+The account-key and device-local TOML codecs are covered by the standalone
+core harness, including lossless Work Mode choice edits.
 See [the codec contract](docs/account-local-choice.md) for startup ownership
 boundaries, defaults, writer behavior and the remaining integration work.
+
+List-member edits, inherited-comment copying and lossless device-local Work
+Mode choice edits are documented in [list member writes](docs/list-member-writes.md).
 
 ## What is here
 
