@@ -3,8 +3,8 @@
 The shared peer codec, mark parser, eligibility check and resolver perform no
 Telegram requests or filesystem I/O. They consume facts supplied by the client.
 These local contracts do not establish search coverage, broadcast ownership or
-server error mappings. Moving existing streams still requires client carry and
-journal execution before a returned state can be committed.
+server error mappings. The [carry journal](sync-chat-carry.md) defines settings carry and recovery.
+Clients execute its actions before a returned state/cache can be committed.
 
 ## Peer tokens
 
@@ -80,7 +80,8 @@ mark. Absent, Unknown and NotRun hints do not select a chat, and Q is only a hin
 before the normal complete settings inventory.
 
 Eligible marks sort newest first, then by larger canonical chat string, then
-larger message id. Ineligible marks cannot win. The newest eligible newer-version
+larger message id. `SyncChatMarkOutranks` shares that comparison with the carry
+journal, so a losing Switch mark cannot be committed as a completed move. Ineligible marks cannot win. The newest eligible newer-version
 mark holds posting and retains the effective cache as the read chat. A mark
 that would change the winner requires a fresh direct reread; otherwise the
 result is VerifyMark, with posting held. The adapter must keep R2 until evidence
@@ -132,7 +133,11 @@ is independent of the `settings.toml` schema and the sync envelope major version
 normalizes the target and refuses any staged file, pending config/library
 sequence or pending config key. The required `stagePresent` fact must describe
 all streams under the client's account operation lock, including orphan stages.
-A same-chat request is a no-op, retaining version 1 for implicit self. A real
+Ordinary callers must treat every stage as unresolved here. The
+[carry commit helper](sync-chat-carry.md) separately consumes its one exact
+journal-owned stage through verified N readback before calling this transition;
+its retained bytes then serve only crash recovery until the state write retires
+them. A same-chat request is a no-op, retaining version 1 for implicit self. A real
 move returns version 2, the new chat and an empty own-message ledger, including
 removal of its preserved JSON copy. Install/device/space/binding, counters,
 config ancestry, seen sequences and issued record hashes survive. Moving back
@@ -160,8 +165,8 @@ S1/S2/S8 still gate discovery coverage, tag/search behavior, fallback selection
 and R2 removal. S3 gates the broadcast ownership branch. S7 gates raw R3 reply
 mapping; network/flood/ambiguous outcomes must remain Unknown. S10 gates Q's
 caption-versus-filename query. F2 pointers, broad broadcast defaults and any
-arbitrary-chat fallback remain inactive. Forward/carry probes and the move
-journal belong to the next batch. Tests of supplied facts are local contract
+arbitrary-chat fallback remain inactive. Forward/carry probes remain required; the pure [carry journal](sync-chat-carry.md)
+does not establish their server behavior. Tests of supplied facts are local contract
 checks, not evidence that these Telegram probes ran.
 
 ## Verification

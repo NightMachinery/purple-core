@@ -90,6 +90,7 @@ constexpr auto kBindingTokenBytes = 16;
 [[nodiscard]] bool ReadStream(
 		const QJsonObject &object,
 		SyncLocalStreamState &stream,
+		bool allowAbandoned,
 		SyncLocalError &error) {
 	for (const auto &field : {
 		u"seq"_q,
@@ -117,7 +118,21 @@ constexpr auto kBindingTokenBytes = 16;
 	stream.pendingSeq = uint64_t(pending.toDouble());
 	stream.confirmedSeq = uint64_t(confirmed.toDouble());
 	stream.ownHash = hash.toString();
-	if ((stream.pendingSeq == 0 && stream.confirmedSeq != stream.seq)
+	if (object.contains(u"abandoned_seq"_q)) {
+		const auto abandoned = object.value(u"abandoned_seq"_q);
+		if (!allowAbandoned || !SafeInteger(abandoned)
+			|| abandoned.toDouble() < 1) {
+			error = SyncLocalError::InvalidCounters;
+			return false;
+		}
+		stream.abandonedSeq = uint64_t(abandoned.toDouble());
+	}
+	if ((stream.abandonedSeq != 0
+			&& (stream.abandonedSeq != stream.seq
+				|| stream.pendingSeq != 0
+				|| stream.confirmedSeq >= stream.seq))
+		|| (stream.pendingSeq == 0 && stream.confirmedSeq != stream.seq
+			&& stream.abandonedSeq != stream.seq)
 		|| (stream.pendingSeq != 0
 			&& (stream.pendingSeq != stream.seq
 				|| stream.confirmedSeq >= stream.seq))) {
@@ -161,6 +176,12 @@ constexpr auto kBindingTokenBytes = 16;
 				entry,
 			});
 		}
+	}
+	if (stream.abandonedSeq != 0
+		&& (stream.issuedRecords.empty()
+			|| stream.issuedRecords.back().seq != stream.abandonedSeq)) {
+		error = SyncLocalError::InvalidIssuedRecords;
+		return false;
 	}
 	return true;
 }
@@ -270,6 +291,11 @@ void WriteStream(QJsonObject &object, const SyncLocalStreamState &stream) {
 	object.insert(u"pending_seq"_q, QJsonValue(qint64(stream.pendingSeq)));
 	object.insert(u"confirmed_seq"_q, QJsonValue(qint64(stream.confirmedSeq)));
 	object.insert(u"own_hash"_q, stream.ownHash);
+	if (stream.abandonedSeq) {
+		object.insert(u"abandoned_seq"_q, QJsonValue(qint64(stream.abandonedSeq)));
+	} else {
+		object.remove(u"abandoned_seq"_q);
+	}
 	if (!stream.issuedRecords.empty()
 		|| object.contains(u"issued_records"_q)) {
 		auto entries = QJsonArray();
@@ -494,8 +520,8 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 	state.bindingToken = bindingToken.toString();
 	state.preserved = document;
 	auto error = SyncLocalError::None;
-	if (!ReadStream(config.toObject(), state.config, error)
-		|| !ReadStream(library.toObject(), state.library, error)
+	if (!ReadStream(config.toObject(), state.config, state.version == 2, error)
+		|| !ReadStream(library.toObject(), state.library, false, error)
 		|| !ReadConfig(config.toObject(), state.configData, error)) {
 		return Invalid(error);
 	}
@@ -527,7 +553,8 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 	for (const auto stream : { &state.config, &state.library }) {
 		if (stream->seq > kMaximumSafeInteger
 			|| stream->pendingSeq > kMaximumSafeInteger
-			|| stream->confirmedSeq > kMaximumSafeInteger) {
+			|| stream->confirmedSeq > kMaximumSafeInteger
+			|| stream->abandonedSeq > kMaximumSafeInteger) {
 			return { {}, SyncLocalStatus::Invalid,
 				SyncLocalError::InvalidCounters };
 		}
@@ -766,6 +793,7 @@ SyncPublishDecision PlanSyncPublish(
 			}
 		}
 		if (local.confirmedSeq == 0
+			|| local.abandonedSeq != 0
 			|| desiredPayloadHash != local.ownHash) {
 			return observations.ready
 				? SyncPublishDecision{ SyncPublishAction::ReserveAndStage }
@@ -1049,6 +1077,7 @@ SyncReservation ReserveSyncSeq(
 	auto &streamState = Select(next, stream);
 	++streamState.seq;
 	streamState.pendingSeq = streamState.seq;
+	streamState.abandonedSeq = 0;
 	streamState.ownHash = payloadHash;
 	const auto issued = streamState.seq;
 	return { std::move(next), issued };

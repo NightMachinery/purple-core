@@ -23,7 +23,10 @@ Mode choice edits are documented in [list member writes](docs/list-member-writes
 
 The shared [sync chat core](docs/sync-chat-core.md) provides typed peer tokens,
 mark grammar, conservative eligibility, deterministic resolution from supplied
-facts, and chat-scoped state v2 with a pending-safe move transition. Server discovery/ownership probes and client carry remain separate work.
+facts, and chat-scoped state v2 with a pending-safe move transition. The
+[carry journal](docs/sync-chat-carry.md) plans settings transfer, readback,
+state/cache commit and crash recovery. Client execution and server probes remain
+separate work.
 
 ## Received-content archive
 
@@ -403,9 +406,10 @@ harness and drives them against several hundred fixture documents - far too
 slow to iterate on through a full app build, which is the point.
 `tests/test_sync_flow.cpp` runs the settings sync flow end to end on in-memory
 devices; `tests/test_sync_chat.cpp` covers peer tokens, marks, eligibility and
-chat resolution. `tests/test_archive.cpp` covers archive events, transactions,
-media and purges; `tests/test_archive_codec.cpp` covers identity and codec
-compatibility. `run.sh` compiles the core once and runs all five.
+chat resolution. `tests/test_sync_chat_carry.cpp` covers carry, scoped readback,
+ordered commits and crash recovery. `tests/test_archive.cpp` covers archive
+events, transactions, media and purges; `tests/test_archive_codec.cpp` covers
+identity and codec compatibility. `run.sh` compiles the core once and runs all six.
 
 ```sh
 QT_PREFIX=/path/to/qt tests/run.sh

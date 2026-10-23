@@ -39,6 +39,7 @@ struct SyncLocalStreamState {
 	uint64_t confirmedSeq = 0;
 	QString ownHash;
 	std::vector<SyncIssuedRecord> issuedRecords;
+	uint64_t abandonedSeq = 0;
 };
 
 struct SyncLocalConfigState {

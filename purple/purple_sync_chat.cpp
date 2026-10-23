@@ -75,6 +75,14 @@ void Readers(
 
 }
 
+bool SyncChatMarkOutranks(
+		const SyncChatCache &a,
+		const SyncChatCache &b) {
+	const auto first = NormalizeCache(a, 0);
+	const auto second = NormalizeCache(b, 0);
+	return first && second && Newer(*first, *second);
+}
+
 SyncChatMarkParseResult ParseSyncChatMark(
 		const QString &text,
 		bool hasMedia,
@@ -238,7 +246,7 @@ SyncChatResolution ResolveSyncChat(const SyncChatResolveInput &input) {
 		}
 	}
 	std::sort(marks.begin(), marks.end(), [](const auto &a, const auto &b) {
-		return Newer(a.location, b.location);
+		return SyncChatMarkOutranks(a.location, b.location);
 	});
 	const auto newest = std::find_if(marks.begin(), marks.end(),
 		[](const auto &mark) { return bool(mark.eligibility); });
@@ -254,7 +262,7 @@ SyncChatResolution ResolveSyncChat(const SyncChatResolveInput &input) {
 			|| input.cacheRead == SyncChatDirectRead::Unknown);
 	const auto useCache = cacheUsable
 		&& (newest == marks.end()
-			|| !Newer(newest->location, *result.cache));
+			|| !SyncChatMarkOutranks(newest->location, *result.cache));
 	if (useCache) {
 		result.action = SyncChatAction::Use;
 		result.winner = result.cache;
@@ -282,7 +290,7 @@ SyncChatResolution ResolveSyncChat(const SyncChatResolveInput &input) {
 	Readers(result, newest->eligibility, input.readerWarningAccepted);
 	if (result.cache
 		&& result.cache->chat != newest->location.chat
-		&& !Newer(newest->location, *result.cache)) {
+		&& !SyncChatMarkOutranks(newest->location, *result.cache)) {
 		result.olderAlternative = newest->location.chat;
 		Searching(result, input.searchRetriesCompleted);
 		return result;
@@ -301,7 +309,7 @@ SyncChatResolution ResolveSyncChat(const SyncChatResolveInput &input) {
 			[&](const auto &mark) {
 				return mark.eligibility && mark.readable
 					&& mark.location.chat != newest->location.chat
-					&& Newer(newest->location, mark.location);
+					&& SyncChatMarkOutranks(newest->location, mark.location);
 			});
 		if (source != marks.end()) {
 			result.source = source->location.chat;

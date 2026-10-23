@@ -126,6 +126,10 @@ struct SyncChatCache {
 	[[nodiscard]] bool operator==(const SyncChatCache &) const = default;
 };
 
+[[nodiscard]] bool SyncChatMarkOutranks(
+	const SyncChatCache &a,
+	const SyncChatCache &b);
+
 enum class SyncChatRecordPresence {
 	Unknown,
 	Empty,
