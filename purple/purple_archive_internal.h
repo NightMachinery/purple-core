@@ -21,7 +21,10 @@ namespace Purple::ArchiveInternal {
 	const ArchiveContent &content, ArchiveCompleteness completeness,
 	const QString &revision);
 [[nodiscard]] bool IsObservation(const ArchiveObservation &observation);
+[[nodiscard]] QJsonObject SourceBindingObject(const ArchiveSourceBinding &binding);
 [[nodiscard]] bool IsSource(const ArchiveSource &source);
+[[nodiscard]] bool SourceOwnedBy(const ArchiveSource &source,
+	const ArchiveMessageKey &key, const QString &version);
 [[nodiscard]] bool IsOrigin(ArchiveOrigin origin);
 [[nodiscard]] bool IsCompleteness(ArchiveCompleteness completeness);
 [[nodiscard]] bool IsContentCompleteness(const ArchiveContent &content,

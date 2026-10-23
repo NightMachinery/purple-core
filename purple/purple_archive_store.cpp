@@ -89,6 +89,11 @@ QString EventFingerprint(const ArchiveEvent &event) {
 			{ u"representation"_q, event.source->representation },
 			{ u"bytes"_q, QString::fromLatin1(event.source->bytes.toBase64()) },
 		};
+		if (event.source->binding) {
+			auto object = source.toObject();
+			object.insert(u"binding"_q, SourceBindingObject(*event.source->binding));
+			source = object;
+		}
 	}
 	const auto object = QJsonObject{
 		{ u"order"_q, QString::number(event.order) },
@@ -443,7 +448,7 @@ ArchiveTransaction PlanArchiveEvent(const ArchiveState &state, const ArchiveEven
 		|| event.origin == ArchiveOrigin::AuthoritativeEdit
 		|| event.origin == ArchiveOrigin::Hydration;
 	if (event.content.has_value() != bodyEvent
-		|| (event.source && !bodyEvent)
+		|| (event.source && !bodyEvent && event.origin != ArchiveOrigin::SendMetadata)
 		|| ((IsDeletion(event.origin) || event.origin == ArchiveOrigin::AuthoritativeEdit)
 			&& !event.order)) {
 		return Refuse(ArchivePlanStatus::Invalid);
@@ -506,7 +511,26 @@ ArchiveTransaction PlanArchiveEvent(const ArchiveState &state, const ArchiveEven
 			|| event.targetRevision != message->versions.back().revision) {
 			return Refuse(ArchivePlanStatus::Stale);
 		}
-		auto &observation = message->versions.back().observation;
+		auto &head = message->versions.back();
+		if (event.source) {
+			if (message->payloadPurged) { return Refuse(ArchivePlanStatus::Purged); }
+			const auto &source = *event.source;
+			if (!source.binding || !SourceOwnedBy(source, event.key, head.id)
+				|| source.contentHash != ArchiveContentHash(head.content)
+				|| event.expectedContentHash != source.contentHash
+				|| source.revision != head.revision
+				|| source.representation != head.observation.representation
+				|| head.completeness != ArchiveCompleteness::Complete) {
+				return Refuse(ArchivePlanStatus::Stale);
+			}
+			if (head.source) {
+				auto previous = *head.source;
+				if (!previous.binding) { previous.binding = source.binding; }
+				if (previous != source) { return Refuse(ArchivePlanStatus::Conflict); }
+			}
+			head.source = source;
+		}
+		auto &observation = head.observation;
 		for (auto i = event.observation.context.begin(); i != event.observation.context.end(); ++i) {
 			observation.context.insert(i.key(), i.value());
 		}

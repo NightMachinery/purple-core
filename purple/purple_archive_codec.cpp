@@ -28,6 +28,8 @@ QJsonValue Write(const ArchiveMediaDescriptor &value);
 bool Read(const QJsonValue &json, ArchiveMediaDescriptor &value, bool &unsupported);
 QJsonValue Write(const ArchiveContent &value);
 bool Read(const QJsonValue &json, ArchiveContent &value, bool &unsupported);
+QJsonValue Write(const ArchiveSourceBinding &value);
+bool Read(const QJsonValue &json, ArchiveSourceBinding &value, bool &unsupported);
 QJsonValue Write(const ArchiveSource &value);
 bool Read(const QJsonValue &json, ArchiveSource &value, bool &unsupported);
 QJsonValue Write(const ArchiveObservation &value);
@@ -274,6 +276,11 @@ public:
 		}
 	}
 
+	template <typename T>
+	void optionalField(const QString &key, T &value) {
+		if (_object.contains(key)) { field(key, value); }
+	}
+
 	[[nodiscard]] bool ok() const { return _valid; }
 	[[nodiscard]] QJsonObject remaining() { return std::move(_object); }
 
@@ -363,6 +370,20 @@ bool Read(const QJsonValue &json, ArchiveContent &value, bool &unsupported) {
 	return reader.ok();
 }
 
+QJsonValue Write(const ArchiveSourceBinding &value) {
+	return ArchiveInternal::SourceBindingObject(value);
+}
+
+bool Read(const QJsonValue &json, ArchiveSourceBinding &value, bool &unsupported) {
+	auto reader = ObjectReader(json, unsupported);
+	reader.field(u"key"_q, value.key);
+	reader.field(u"version"_q, value.version);
+	reader.optionalField(u"localMessageId"_q, value.localMessageId);
+	reader.optionalField(u"randomId"_q, value.randomId);
+	value.preserved = reader.remaining();
+	return reader.ok();
+}
+
 QJsonValue Write(const ArchiveSource &value) {
 	auto object = value.preserved;
 	object.insert(u"kind"_q, Write(value.kind));
@@ -370,6 +391,7 @@ QJsonValue Write(const ArchiveSource &value) {
 	object.insert(u"representation"_q, Write(value.representation));
 	object.insert(u"bytes"_q, Write(value.bytes));
 	object.insert(u"revision"_q, Write(value.revision));
+	if (value.binding) { object.insert(u"binding"_q, Write(value.binding)); }
 	return object;
 }
 
@@ -380,6 +402,7 @@ bool Read(const QJsonValue &json, ArchiveSource &value, bool &unsupported) {
 	reader.field(u"representation"_q, value.representation);
 	reader.field(u"bytes"_q, value.bytes);
 	reader.field(u"revision"_q, value.revision);
+	reader.optionalField(u"binding"_q, value.binding);
 	value.preserved = reader.remaining();
 	return reader.ok();
 }
@@ -486,7 +509,7 @@ bool Read(const QJsonValue &json, ArchiveVersion &value, bool &unsupported) {
 	reader.field(u"missing"_q, value.missing);
 	reader.field(u"completeness"_q, value.completeness);
 	reader.field(u"observation"_q, value.observation);
-	reader.field(u"source"_q, value.source);
+	reader.optionalField(u"source"_q, value.source);
 	reader.field(u"media"_q, value.media);
 	reader.field(u"missingPreimage"_q, value.missingPreimage);
 	value.preserved = reader.remaining();
@@ -687,7 +710,8 @@ bool IsVersionSnapshot(const ArchiveVersionSnapshot &snapshot) {
 		|| !ArchiveInternal::IsObservation(version.observation)
 		|| !ArchiveInternal::IsContentCompleteness(version.content, version.completeness)
 		|| version.observation.representation != key.representation
-		|| (version.source && !ArchiveInternal::IsSource(*version.source))
+		|| (version.source && (!ArchiveInternal::IsSource(*version.source)
+			|| !ArchiveInternal::SourceOwnedBy(*version.source, key, version.id)))
 		|| version.media.size() != version.content.media.size()
 		|| snapshot.preserved.contains(u"format"_q) || snapshot.preserved.contains(u"schema"_q)
 		|| snapshot.preserved.contains(u"key"_q) || snapshot.preserved.contains(u"snapshot"_q)) {

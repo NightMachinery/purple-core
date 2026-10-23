@@ -237,12 +237,45 @@ bool IsObservation(const ArchiveObservation &observation) {
 			|| IsArchiveToken(observation.payloadFormat));
 }
 
+QJsonObject SourceBindingObject(const ArchiveSourceBinding &binding) {
+	auto chat = binding.key.chat.preserved;
+	chat.insert(u"kind"_q, int(binding.key.chat.kind));
+	chat.insert(u"id"_q, QString::number(binding.key.chat.id));
+	auto key = binding.key.preserved;
+	key.insert(u"account"_q, AccountKeyText(binding.key.account.environment,
+		binding.key.account.userId).value_or(QString()));
+	key.insert(u"chat"_q, chat);
+	key.insert(u"messageId"_q, QString::number(binding.key.messageId));
+	key.insert(u"collection"_q, int(binding.key.collection));
+	key.insert(u"collectionId"_q, QString::number(binding.key.collectionId));
+	key.insert(u"representation"_q, binding.key.representation);
+	auto object = binding.preserved;
+	object.insert(u"key"_q, key);
+	object.insert(u"version"_q, binding.version);
+	object.insert(u"localMessageId"_q, binding.localMessageId
+		? QJsonValue(QString::number(*binding.localMessageId)) : QJsonValue(QJsonValue::Null));
+	object.insert(u"randomId"_q, binding.randomId
+		? QJsonValue(QString::number(*binding.randomId)) : QJsonValue(QJsonValue::Null));
+	return object;
+}
+
 bool IsSource(const ArchiveSource &source) {
 	return SafeObject(source.preserved)
 		&& InRange(source.kind, ArchiveSourceKind::ReceivedMarkdownFile)
 		&& IsArchiveHash(source.contentHash)
 		&& IsArchiveToken(source.revision)
-		&& IsArchiveToken(source.representation);
+		&& IsArchiveToken(source.representation)
+		&& (!source.binding || (IsArchiveMessageKey(source.binding->key)
+			&& IsArchiveToken(source.binding->version)
+			&& SafeObject(source.binding->preserved)
+			&& (!source.binding->localMessageId || *source.binding->localMessageId != 0)
+			&& (!source.binding->randomId || *source.binding->randomId != 0)));
+}
+
+bool SourceOwnedBy(const ArchiveSource &source,
+		const ArchiveMessageKey &key, const QString &version) {
+	return !source.binding || (SameArchiveMessage(source.binding->key, key)
+		&& source.binding->version == version);
 }
 
 bool IsOrigin(ArchiveOrigin origin) {
@@ -394,7 +427,8 @@ bool IsArchiveState(const ArchiveState &state) {
 				|| !IsMissingSlots(version.missing, version.content, version.completeness, version.revision)
 				|| !IsObservation(version.observation)
 				|| version.observation.representation != message.key.representation
-				|| (version.source && !IsSource(*version.source))) {
+				|| (version.source && (!IsSource(*version.source)
+					|| !SourceOwnedBy(*version.source, message.key, version.id)))) {
 				return false;
 			}
 			previous = version.order;

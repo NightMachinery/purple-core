@@ -82,6 +82,15 @@ struct ArchiveContent {
 	friend bool operator==(const ArchiveContent &, const ArchiveContent &) = default;
 };
 
+struct ArchiveSourceBinding {
+	ArchiveMessageKey key;
+	QString version;
+	std::optional<int64> localMessageId;
+	std::optional<int64> randomId;
+	QJsonObject preserved;
+	friend bool operator==(const ArchiveSourceBinding &, const ArchiveSourceBinding &) = default;
+};
+
 struct ArchiveSource {
 	ArchiveSourceKind kind = ArchiveSourceKind::ComposeMarkdown;
 	QString contentHash;
@@ -89,6 +98,7 @@ struct ArchiveSource {
 	QByteArray bytes;
 	QString revision;
 	QJsonObject preserved;
+	std::optional<ArchiveSourceBinding> binding;
 	friend bool operator==(const ArchiveSource &, const ArchiveSource &) = default;
 };
 

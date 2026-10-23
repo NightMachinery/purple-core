@@ -1,9 +1,9 @@
 # Received-content archive core
 
 The archive is a separate, local-only contract. `purple_archive_model.*`,
-`purple_archive_store.*` and `purple_archive_codec.*` contain pure values,
-validation, reducers and transaction plans. They use Qt Core and the standard
-library. They do no SQL, file access, TL decoding, networking, key management,
+`purple_archive_store.*`, `purple_archive_codec.*` and `purple_archive_source.*`
+contain pure values, validation, reducers and transaction plans. They use Qt Core
+and the standard library. They do no SQL, file access, TL decoding, networking, key management,
 randomness, downloading or live-history mutation. Archive schema 1 has its own
 version line; settings and sync-state versions are unchanged.
 
@@ -57,7 +57,7 @@ semantic content from transport metadata.
 Completeness is explicit (`Partial`, `Complete`, `Opaque`). Context retains
 sender/reply/album information through client-normalized structured values.
 Source provenance is typed: actual compose Markdown or received Markdown-file
-bytes. `ArchiveSourceMatches` accepts a source only for a complete version
+bytes. `ArchiveSourceMatches` checks a source within a complete version
 whose canonical content hash, causal revision and representation match. A
 source carries the accepted event id in `source.revision`, which must equal
 `version.revision`; the same body seen again after intervening edits does not
@@ -65,6 +65,73 @@ make an earlier source eligible. The adapter must have verified actual
 provenance; rendering ordinary received entities as Markdown
 is not evidence of the author's source. Raw payloads and unknown blocks remain
 available as fallback even when no complete rendering is possible.
+
+## Genuine source for Copy as Markdown
+
+`ArchiveSource::bytes` holds the actual outgoing compose Markdown captured before
+normalization, or original `.md` document bytes. No source is represented by an
+absent optional `source` field (or JSON null). Ordinary received text/entities,
+serialized rich structures and the structural Markdown writer never constitute
+source provenance. The core does not infer or reconstruct incoming Markdown.
+
+The optional schema-1 `source.binding` records the full `ArchiveMessageKey`,
+retained body-version id and optional nonzero signed 64-bit `localMessageId` and
+`randomId`. The existing source hash, causal revision and representation bind
+those exact bytes to the verified body. Aliases and all wide ids are canonical
+decimal strings in JSON. Unknown source/binding/key/chat fields survive codecs.
+Old records without source or binding remain valid; unbound legacy sources use
+the structural writer until their full identity is verified. No schema bump is
+needed: this adds identity metadata inside the already version-owned source,
+and schema-1 purges already remove that whole payload with its body.
+
+`ChooseCopySource(state, request)` returns `GenuineSource` with exact bytes only
+for a complete full-body original whose retained key, version, causal revision,
+canonical content hash and displayed representation all match the bound source.
+The request also carries the capture generation. A matching hash alone never
+revives source after an intervening edit: A to B to A uses only source verified
+against the particular A revision requested. A selection, fragment, displayed
+translation, absent/unbound/stale source or incomplete body uses
+`StructuralWriter`. `partial` reports partial or opaque archived structures.
+The low-level `ArchiveSourceMatches` predicate alone is insufficient for copy
+eligibility because it does not check account/message ownership or generations.
+
+`validTarget` is false for invalid, missing, purged, wrong-account or stale copy
+requests. The client must abandon such work and must not write a clipboard from
+its cached result. `CurrentMessage` additionally requires the live retained head;
+`ArchivedVersion` explicitly allows an older retained version or a deleted
+message's retained body. These are read-only views, not live Telegram messages.
+The structural writer still owns full rendering and unsupported-block handling.
+
+### Capture, acknowledgement and client duties
+
+- Capture genuine bytes at the compose boundary before normalization. Keep them
+  with that account's pending local/random send identity until acknowledgement;
+  a pending send is not a received archive row. For a Markdown document, retain
+  its actual original bytes rather than exporting the displayed entities.
+- Verify the source against the complete normalized body that will be copied,
+  including caption, entities, rich structures and semantic extensions. The
+  adapter supplies this assertion; core cannot prove how bytes were obtained or
+  parse arbitrary client Markdown. Never rewrite an old source's hash/revision
+  merely to make it eligible after a changed server body or translation.
+- After the server key and accepted causal revision are known, attach the bound
+  source to a baseline, or use `PlanArchiveEvent` with `SendMetadata`, an exact
+  `targetVersion`, `targetRevision`, `expectedContentHash` and current generation.
+  This updates source/send metadata and a receipt, with no new body, edit event,
+  causal revision, body order or first-observed time. A different existing source
+  conflicts; an exact legacy source can gain its verified binding.
+- Bind every copy request to the actual full-body identity, displayed
+  representation, extent and current account state. Revalidate after asynchronous
+  work and before a clipboard write, including the requesting view's lifetime
+  and currently selected account. A stale UI context is not repaired by passing
+  an old account's still-readable archive state.
+- Store source bytes only with their account-owned version. Empty Edit History
+  removes prior sources with prior versions and retains the latest body's source;
+  Empty Trashbin removes every source of each purged deleted message. Both bump
+  generations, so queued pre-purge copies and binding events are refused. A fresh
+  request may still copy a retained latest body's source after an edit-history
+  purge. Pending source buffers must follow the same account/session cleanup and
+  cancellation boundaries in the adapter. Do not log source bodies or place
+  temporary plaintext exports in an evictable/shared cache.
 
 ## Events, refreshes and edits
 
@@ -295,11 +362,14 @@ performed by this batch.
 ## Verification
 
 `tests/run.sh` compiles all production archive modules and runs
-`test_archive` and `test_archive_codec`, alongside the existing config, flow
-and sync-chat suites. Regressions cover causal replay/order, same-second edits,
+`test_archive`, `test_archive_codec` and `test_archive_source`, alongside the
+existing config, flow, sync-chat and carry-recovery suites. Regressions cover
+causal replay/order, same-second edits,
 A to B to A, observation noise, exact-version hydration, unseen events,
 account/chat/secret/topic/migration/representation identities, full-width ids,
-source eligibility, unknown/future data, staging/failure/integrity, scoped
-purges, stale jobs/readers/commits, shared blobs/leases and crash-retried GC.
+source eligibility and full-body/fragment/translation choices, local/random-id
+binding without edits, legacy/unknown source fields, unknown/future data,
+staging/failure/integrity, scoped purges, stale jobs/readers/commits, shared
+blobs/leases and crash-retried GC.
 Client storage, TL adapters, encryption, actual byte reads and native UI remain
 future batches.
