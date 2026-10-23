@@ -7,9 +7,8 @@
 # proving that takes a few hundred fixture edits - far too slow to iterate on
 # through a full app build.
 #
-# Three programs run: test_config covers the parser, splicer, engine and sync
-# records; test_sync_flow covers the settings flow; test_sync_chat covers peer
-# tokens and chat decisions. All link against the same core objects.
+# Five programs run: config, settings flow, sync-chat decisions, archive
+# transitions and archive codecs. All link against the same core objects.
 #
 # Qt Core is the one thing this cannot vendor. On macOS it is looked for as a
 # framework under QT_PREFIX, defaulting to the merged prefix the tdesktop fork
@@ -31,6 +30,9 @@ fi
 Sources=(
     purple/purple_peer_token.cpp
     purple/purple_sync_chat.cpp
+    purple/purple_archive_model.cpp
+    purple/purple_archive_store.cpp
+    purple/purple_archive_codec.cpp
     purple/purple_account_files.cpp
     purple/purple_local_choice.cpp
     purple/purple_settings.cpp
@@ -83,7 +85,7 @@ if [ "$CompileStatus" != 0 ]; then
 fi
 
 Status=0
-for Test in test_config test_sync_flow test_sync_chat; do
+for Test in test_config test_sync_flow test_sync_chat test_archive test_archive_codec; do
     clang++ "${Flags[@]}" -o "$BuildPath/$Test" \
         "$RepoPath/tests/$Test.cpp" \
         "${Objects[@]}" \
