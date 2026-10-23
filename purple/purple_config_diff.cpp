@@ -14,6 +14,8 @@ option) any later version.
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
+#include <sstream>
 #include <string>
 #include <tuple>
 
@@ -893,6 +895,15 @@ ChangeUnits ChangeCollector::collect(const toml::table &root) const {
 	return common(a.order, b.order) == common(b.order, a.order);
 }
 
+[[nodiscard]] std::optional<QString> NodeValue(const toml::node *node) {
+	if (!node) {
+		return std::nullopt;
+	}
+	auto stream = std::ostringstream();
+	stream << toml::toml_formatter(*node);
+	return Utf8(stream.str());
+}
+
 void CollectKeyChanges(
 		std::vector<ConfigKeyChange> &result,
 		const QString &table,
@@ -944,7 +955,8 @@ void CollectKeyChanges(
 		? ConfigChangeKind::Removed
 		: ConfigChangeKind::Changed;
 	result.push_back({ kind, table, key, SettingsScope(table, key),
-		wholeUnit ? ConfigChangeAddressKind::Unit : ConfigChangeAddressKind::Key });
+		wholeUnit ? ConfigChangeAddressKind::Unit : ConfigChangeAddressKind::Key,
+		NodeValue(before), NodeValue(after) });
 }
 
 void CollectListDefinitionChange(
@@ -960,7 +972,9 @@ void CollectListDefinitionChange(
 	result.push_back({ newDefinition
 		? ConfigChangeKind::Added : ConfigChangeKind::Removed,
 		table, QString(), SettingsScope(table, QString()),
-		ConfigChangeAddressKind::ListDefinition });
+		ConfigChangeAddressKind::ListDefinition,
+		oldDefinition ? NodeValue(before->values.at(std::nullopt)) : std::nullopt,
+		newDefinition ? NodeValue(after->values.at(std::nullopt)) : std::nullopt });
 }
 
 [[nodiscard]] std::vector<ConfigKeyChange> KeyChanges(
@@ -988,7 +1002,9 @@ void CollectListDefinitionChange(
 		const auto kind = !before ? ConfigChangeKind::Added
 			: !after ? ConfigChangeKind::Removed : ConfigChangeKind::Changed;
 		result.push_back({ kind, table, QString(),
-			SettingsScope(table, QString()), ConfigChangeAddressKind::Unit });
+			SettingsScope(table, QString()), ConfigChangeAddressKind::Unit,
+			before ? std::make_optional(QString()) : std::nullopt,
+			after ? std::make_optional(QString()) : std::nullopt });
 	}
 	return result;
 }
@@ -1110,6 +1126,377 @@ ConfigChangeSummary SummarizeConfigChange(
 			? (folded < 0)
 			: (std::tie(a.label, a.table) < std::tie(b.label, b.table));
 	});
+	return result;
+}
+
+namespace {
+
+struct ImpactDocument {
+	toml::table tree;
+	Settings settings;
+};
+
+[[nodiscard]] bool ValidWorkMode(AccountWorkMode mode) {
+	return mode == AccountWorkMode::Own
+		|| mode == AccountWorkMode::Follow
+		|| mode == AccountWorkMode::Stock;
+}
+
+[[nodiscard]] std::optional<ImpactDocument> ImpactDocumentOf(
+		const ConfigImpactText &source) {
+	const auto bytes = source.present ? source.text : QByteArray();
+	auto tree = ParseToml(bytes);
+	if (!tree) {
+		return std::nullopt;
+	}
+	auto parsed = ParseSettings(QString::fromUtf8(bytes), QString());
+	if (!parsed.ok()) {
+		return std::nullopt;
+	}
+	return ImpactDocument{ std::move(*tree), std::move(parsed.settings) };
+}
+
+[[nodiscard]] bool ImpactNewerSchema(const ImpactDocument &document) {
+	const auto version = document.tree.get_as<int64_t>("version");
+	return document.settings.version > kHighestSettingsVersion
+		|| (version && version->get() > kHighestSettingsVersion);
+}
+
+[[nodiscard]] const toml::table *ImpactList(
+		const ImpactDocument &document,
+		const QString &name) {
+	const auto lists = document.tree.get_as<toml::table>("lists");
+	return lists ? lists->get_as<toml::table>(name.toStdString()) : nullptr;
+}
+
+[[nodiscard]] ConfigImpactUse ImpactUse(
+		const ConfigKeyChange &change,
+		bool present,
+		ConfigImpactFileRole role,
+		AccountWorkMode mode,
+		const Settings &global) {
+	if (!present) {
+		return ConfigImpactUse::Absent;
+	} else if (change.scope == SettingScope::Unknown) {
+		return ConfigImpactUse::Unknown;
+	} else if (change.scope == SettingScope::AppWide) {
+		return (role == ConfigImpactFileRole::Global)
+			? ConfigImpactUse::Used
+			: ConfigImpactUse::AppWideElsewhere;
+	}
+	const auto path = SettingsTablePath(change.table);
+	const auto members = path && path->size() == 2
+		&& path->front() == u"lists"_q
+		&& change.key == u"members"_q
+		&& change.addressKind == ConfigChangeAddressKind::Key;
+	if (members) {
+		if (mode == AccountWorkMode::Stock) {
+			return ConfigImpactUse::Stock;
+		} else if (role == ConfigImpactFileRole::Layered) {
+			if (mode == AccountWorkMode::Follow) {
+				return ConfigImpactUse::Follow;
+			} else if (!global.list((*path)[1])) {
+				return ConfigImpactUse::UndefinedList;
+			}
+		}
+	}
+	return ConfigImpactUse::Used;
+}
+
+[[nodiscard]] ConfigImpactFinding ImpactFinding(
+		ConfigImpactKind kind,
+		const ConfigKeyChange &change,
+		const QString &label,
+		const ConfigImpactInput &input,
+		const Settings &beforeGlobal,
+		const Settings &afterGlobal) {
+	auto result = ConfigImpactFinding();
+	result.kind = kind;
+	result.change = change;
+	result.label = label;
+	result.beforeUse = ImpactUse(change, change.beforeValue.has_value(),
+		input.role, input.workMode, beforeGlobal);
+	result.afterUse = ImpactUse(change, change.afterValue.has_value(),
+		input.role, input.workMode, afterGlobal);
+	return result;
+}
+
+[[nodiscard]] bool SameScheduleRules(
+		const toml::node &before,
+		const toml::node &after) {
+	const auto first = before.as_array();
+	const auto second = after.as_array();
+	if (!first || !second) {
+		return Same(before, after);
+	} else if (first->size() != second->size()) {
+		return false;
+	}
+	auto matched = std::vector<bool>(second->size());
+	for (const auto &rule : *first) {
+		auto found = false;
+		for (auto i = size_t(0); i != matched.size(); ++i) {
+			if (!matched[i] && Same(rule, (*second)[i])) {
+				matched[i] = true;
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] bool SameScheduleRuleset(
+		const toml::node &before,
+		const toml::node &after) {
+	const auto first = before.as_table();
+	const auto second = after.as_table();
+	if (!first || !second) {
+		return Same(before, after);
+	} else if (first->size() != second->size()) {
+		return false;
+	}
+	for (auto &&[key, value] : *first) {
+		const auto other = second->get(key.str());
+		if (!other || !(key.str() == "rules"
+			? SameScheduleRules(value, *other)
+			: Same(value, *other))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] int ScheduleLossCount(
+		const toml::node *before,
+		const toml::node *after,
+		const QString &path = u"schedule"_q) {
+	if (!before || (after && Same(*before, *after))) {
+		return 0;
+	}
+	if (const auto table = before->as_table()) {
+		const auto other = after ? after->as_table() : nullptr;
+		auto result = 0;
+		for (auto &&[key, value] : *table) {
+			result += ScheduleLossCount(&value,
+				other ? other->get(key.str()) : nullptr,
+				path + u'.' + Utf8(key.str()));
+		}
+		return result + ((!other && table->empty()) ? 1 : 0);
+	} else if (const auto array = before->as_array()) {
+		const auto other = after ? after->as_array() : nullptr;
+		auto matched = std::vector<bool>(other ? other->size() : 0);
+		auto result = 0;
+		for (const auto &value : *array) {
+			auto found = false;
+			for (auto i = size_t(0); i != matched.size(); ++i) {
+				if (!matched[i] && (path == u"schedule.rulesets"_q
+					? SameScheduleRuleset(value, (*other)[i])
+					: Same(value, (*other)[i]))) {
+					matched[i] = true;
+					found = true;
+					break;
+				}
+			}
+			result += !found;
+		}
+		return result + ((!other && array->empty()) ? 1 : 0);
+	}
+	return !after || before->type() != after->type() ? 1 : 0;
+}
+
+} // namespace
+
+ConfigChangeImpact AnalyzeConfigChange(const ConfigImpactInput &input) {
+	auto result = ConfigChangeImpact();
+	result.proposedText = input.proposed.text;
+	result.proposedPresent = input.proposed.present;
+	if ((input.role != ConfigImpactFileRole::Global
+		&& input.role != ConfigImpactFileRole::Layered)
+		|| !ValidWorkMode(input.workMode)) {
+		return result;
+	}
+	const auto before = ImpactDocumentOf(input.current);
+	const auto after = ImpactDocumentOf(input.proposed);
+	if (!before || !after) {
+		result.status = !before ? ConfigImpactStatus::InvalidCurrent
+			: ConfigImpactStatus::InvalidProposed;
+		return result;
+	}
+	const auto layered = input.role == ConfigImpactFileRole::Layered;
+	const auto global = layered ? ImpactDocumentOf(input.global)
+		: std::optional<ImpactDocument>();
+	if (layered && !global) {
+		result.status = ConfigImpactStatus::InvalidGlobal;
+		return result;
+	}
+	if (ImpactNewerSchema(*before) || ImpactNewerSchema(*after)
+		|| (global && ImpactNewerSchema(*global))) {
+		result.status = ConfigImpactStatus::NewerSchema;
+		return result;
+	}
+	auto accounts = std::vector<ImpactDocument>();
+	if (!layered) {
+		auto names = std::set<QString>();
+		for (const auto &account : input.accounts) {
+			if (account.account.isEmpty() || !ValidWorkMode(account.workMode)
+				|| !names.insert(account.account).second) {
+				result.account = account.account;
+				return result;
+			}
+			auto document = ImpactDocumentOf(account.file);
+			if (!document) {
+				result.status = ConfigImpactStatus::InvalidAccount;
+				result.account = account.account;
+				return result;
+			} else if (ImpactNewerSchema(*document)) {
+				result.status = ConfigImpactStatus::NewerSchema;
+				result.account = account.account;
+				return result;
+			}
+			accounts.push_back(std::move(*document));
+		}
+	}
+	result.status = ConfigImpactStatus::Ready;
+	result.summary = SummarizeConfigChange(
+		input.current.present ? input.current.text : QByteArray(),
+		input.proposed.present ? input.proposed.text : QByteArray());
+	const auto &beforeGlobal = layered ? global->settings : before->settings;
+	const auto &afterGlobal = layered ? global->settings : after->settings;
+	const auto add = [&](ConfigImpactKind kind, const ConfigKeyChange &change,
+			const QString &label, bool dangerous = false) {
+		auto finding = ImpactFinding(
+			kind, change, label, input, beforeGlobal, afterGlobal);
+		const auto inherited = [&](const Settings &global) {
+			const auto path = SettingsTablePath(change.table);
+			if (!path || path->size() != 2 || !global.list((*path)[1])) {
+				return false;
+			}
+			for (auto i = size_t(0); i != accounts.size(); ++i) {
+				const auto mode = input.accounts[i].workMode;
+				if (mode == AccountWorkMode::Stock) {
+					continue;
+				}
+				const auto table = ImpactList(accounts[i], (*path)[1]);
+				if (mode == AccountWorkMode::Follow
+					|| !table || !table->contains("members")) {
+					return true;
+				}
+			}
+			return false;
+		};
+		if (!layered) {
+			if (finding.beforeUse == ConfigImpactUse::Stock
+				&& inherited(beforeGlobal)) {
+				finding.beforeUse = ConfigImpactUse::Used;
+			}
+			if (finding.afterUse == ConfigImpactUse::Stock
+				&& inherited(afterGlobal)) {
+				finding.afterUse = ConfigImpactUse::Used;
+			}
+		}
+		finding.dangerous = dangerous;
+		result.dangerous = result.dangerous || dangerous;
+		result.findings.push_back(std::move(finding));
+	};
+	for (const auto &entry : result.summary.entries) {
+		for (const auto &change : entry.keys) {
+			add(ConfigImpactKind::ValueChanged, change, entry.label);
+			if (layered && change.scope == SettingScope::PerAccount
+				&& change.addressKind == ConfigChangeAddressKind::Key) {
+				if (change.kind == ConfigChangeKind::Added) {
+					add(ConfigImpactKind::Pinned, change, entry.label);
+				} else if (change.kind == ConfigChangeKind::Removed) {
+					add(ConfigImpactKind::Unpinned, change, entry.label);
+				}
+			}
+			if (change.kind != ConfigChangeKind::Removed) {
+				continue;
+			} else if (change.addressKind
+				== ConfigChangeAddressKind::ListDefinition) {
+				add(ConfigImpactKind::ListLoss, change, change.table, true);
+			} else if (change.scope == SettingScope::AppWide) {
+				add(ConfigImpactKind::AppWideLoss, change, entry.label, true);
+			} else if (change.scope == SettingScope::Unknown) {
+				add(ConfigImpactKind::UnknownRemoval, change, entry.label);
+			}
+		}
+	}
+	const auto collector = ChangeCollector(before->tree, after->tree);
+	const auto oldUnits = collector.collect(before->tree);
+	const auto newUnits = collector.collect(after->tree);
+	for (const auto &[id, unit] : oldUnits) {
+		const auto path = SettingsTablePath(unit.table);
+		if (!path || path->size() != 2 || path->front() != u"presets"_q
+			|| newUnits.contains(id)) {
+			continue;
+		}
+		add(ConfigImpactKind::PresetLoss,
+			{ ConfigChangeKind::Removed, unit.table, QString(),
+				SettingsScope(unit.table, QString()), ConfigChangeAddressKind::Unit,
+				NodeValue(unit.values.at(std::nullopt)), std::nullopt },
+			unit.label, true);
+	}
+	const auto oldSchedule = before->tree.get("schedule");
+	const auto newSchedule = after->tree.get("schedule");
+	const auto lostSchedule = ScheduleLossCount(oldSchedule, newSchedule);
+	if (lostSchedule) {
+		add(ConfigImpactKind::ScheduleLoss,
+			{ newSchedule ? ConfigChangeKind::Changed : ConfigChangeKind::Removed,
+				u"schedule"_q, QString(), SettingsScope(u"schedule"_q, QString()),
+				ConfigChangeAddressKind::Unit,
+				NodeValue(oldSchedule), NodeValue(newSchedule) },
+			u"Schedule settings"_q, true);
+		result.findings.back().beforeCount = lostSchedule;
+		result.findings.back().afterCount = 0;
+	}
+	for (const auto &list : before->settings.lists) {
+		const auto next = after->settings.list(list.name);
+		const auto id = u"lists."_q + DottedKey(list.name.toStdString());
+		const auto unit = newUnits.find(id);
+		if (next && unit != newUnits.end() && unit->second.definesList
+			&& (!list.members.empty() || !list.kinds.empty())
+			&& next->members.empty() && next->kinds.empty()) {
+			add(ConfigImpactKind::DefinedListEmptied,
+				{ ConfigChangeKind::Changed, id, QString(),
+					SettingsScope(id, QString()), ConfigChangeAddressKind::Unit,
+					NodeValue(ImpactList(*before, list.name)),
+					NodeValue(ImpactList(*after, list.name)) },
+				ChildLabel("lists", list.name), true);
+			result.findings.back().beforeCount = int(list.members.size());
+			result.findings.back().afterCount = 0;
+		}
+		if (layered || next) {
+			continue;
+		}
+		for (auto i = size_t(0); i != accounts.size(); ++i) {
+			const auto &account = input.accounts[i];
+			const auto own = accounts[i].settings.list(list.name);
+			const auto table = ImpactList(accounts[i], list.name);
+			const auto members = table ? table->get("members") : nullptr;
+			if (!own || !members || own->members.empty()) {
+				continue;
+			}
+			auto finding = ConfigImpactFinding();
+			finding.kind = ConfigImpactKind::StrandedMembers;
+			finding.change = { ConfigChangeKind::Changed, id, u"members"_q,
+				SettingsScope(id, u"members"_q), ConfigChangeAddressKind::Key,
+				NodeValue(members), NodeValue(members) };
+			finding.label = ChildLabel("lists", list.name);
+			finding.account = account.account;
+			finding.beforeUse = ImpactUse(finding.change, true,
+				ConfigImpactFileRole::Layered, account.workMode, before->settings);
+			finding.afterUse = ImpactUse(finding.change, true,
+				ConfigImpactFileRole::Layered, account.workMode, after->settings);
+			finding.beforeCount = int(own->members.size());
+			finding.afterCount = finding.beforeCount;
+			finding.dangerous = true;
+			result.dangerous = true;
+			result.findings.push_back(std::move(finding));
+		}
+	}
 	return result;
 }
 

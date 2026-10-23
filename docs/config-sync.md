@@ -346,6 +346,13 @@ version and is not treated as a fallback1 file.
 No entry is created for cosmetic edits, and a TOML parse refusal still returns
 no semantic entries.
 
+## Replacement impact
+
+`AnalyzeConfigChange` builds on these summary keys for global and layered
+account-file replacements. It reports local use, pin/unpin changes, app-wide
+loss, emptied definitions and stranded own members, with danger flags and
+unchanged proposed bytes. See [the API contract](config-change-impact.md).
+
 ## File-owned automatic-send fingerprints
 
 `ShouldAutoSend(settings, lastSentFingerprint, lastImportedFingerprint, bytes,

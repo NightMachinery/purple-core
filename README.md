@@ -87,7 +87,10 @@ Mode choice edits are documented in [list member writes](docs/list-member-writes
   definitions retain their app-wide existence facts in whole files, while v2
   member-only forks remain per-account. Explicit address kinds distinguish
   literal empty keys from whole-unit and list-definition facts.
-  See [`docs/config-sync.md`](docs/config-sync.md).
+  `AnalyzeConfigChange` adds role-aware use, pin/unpin and loss findings for
+  safe account-file replacements, preserving exact proposed bytes. See
+  [replacement impact](docs/config-change-impact.md) and
+  [config sync](docs/config-sync.md).
 - `purple/purple_sync_json.{h,cpp}` - validates and canonicalizes JSON for
   account-backed sync. It preserves every member, including unknown members,
   sorts object names by raw UTF-16 code units, emits compact UTF-8 with RFC 8785

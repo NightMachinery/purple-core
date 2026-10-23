@@ -15780,6 +15780,361 @@ void TestAccountFilesAndStartupOwner() {
 	CHECK(PlanAccountOwnerStartup(input).status == AccountOwnerStartupStatus::InvalidInput);
 }
 
+void TestConfigChangeImpact() {
+	Section = "config change impact";
+	using namespace Purple;
+	using Kind = ConfigImpactKind;
+	using Use = ConfigImpactUse;
+	using Status = ConfigImpactStatus;
+	const auto findings = [](const ConfigChangeImpact &impact, Kind kind) {
+		auto result = std::vector<const ConfigImpactFinding*>();
+		for (const auto &finding : impact.findings) {
+			if (finding.kind == kind) {
+				result.push_back(&finding);
+			}
+		}
+		return result;
+	};
+	const auto value = [&](const ConfigChangeImpact &impact,
+			const QString &table, const QString &key) {
+		for (const auto found : findings(impact, Kind::ValueChanged)) {
+			if (found->change.table == table && found->change.key == key
+				&& found->change.addressKind == ConfigChangeAddressKind::Key) {
+				return found;
+			}
+		}
+		return static_cast<const ConfigImpactFinding*>(nullptr);
+	};
+	auto input = ConfigImpactInput();
+	input.current.text = "[last_seen]\nreasons_p = true\ntrade_remember = '1h'\n";
+	input.proposed.text = "[last_seen]\nreasons_p = false\ntrade_remember = '2h'\n";
+	auto impact = AnalyzeConfigChange(input);
+	CHECK(impact.status == Status::Ready);
+	CHECK(impact.summary.parsed);
+	CHECK(!impact.dangerous);
+	CHECK(findings(impact, Kind::ValueChanged).size() == 2);
+	CHECK(value(impact, u"last_seen"_q, u"reasons_p"_q)->afterUse == Use::Used);
+	CHECK(value(impact, u"last_seen"_q, u"trade_remember"_q)->afterUse == Use::Used);
+	CHECK(*value(impact, u"last_seen"_q, u"reasons_p"_q)->change.beforeValue
+		== u"true"_q);
+	input.role = ConfigImpactFileRole::Layered;
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.status == Status::Ready);
+	CHECK(value(impact, u"last_seen"_q, u"reasons_p"_q)->afterUse == Use::Used);
+	CHECK(value(impact, u"last_seen"_q, u"trade_remember"_q)->afterUse
+		== Use::AppWideElsewhere);
+	CHECK(findings(impact, Kind::Pinned).empty());
+	input.current.text = "version = 2\n";
+	input.proposed.text = "version = 2\n[notifications]\npreview_always = []\n";
+	input.global.text = "[notifications]\npreview_always = []\n";
+	input.global.present = true;
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::Pinned).size() == 1);
+	CHECK(!impact.dangerous);
+	CHECK(findings(impact, Kind::Pinned).front()->beforeUse == Use::Absent);
+	CHECK(findings(impact, Kind::Pinned).front()->afterUse == Use::Used);
+	std::swap(input.current, input.proposed);
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::Unpinned).size() == 1);
+	CHECK(!impact.dangerous);
+	CHECK(!findings(impact, Kind::Unpinned).front()->change.afterValue);
+
+	input.current.text = "version = 2\n";
+	input.proposed.text = "version = 2\n[lists.\"w.仕事\"]\nmembers = [2]\n";
+	input.global.text = "[lists.\"w.仕事\"]\nmembers = [1]\n";
+	for (const auto mode : { AccountWorkMode::Own,
+			AccountWorkMode::Follow, AccountWorkMode::Stock }) {
+		input.workMode = mode;
+		impact = AnalyzeConfigChange(input);
+		const auto pinned = findings(impact, Kind::Pinned);
+		CHECK(pinned.size() == 1);
+		CHECK(pinned.front()->afterUse == (mode == AccountWorkMode::Own
+			? Use::Used : mode == AccountWorkMode::Follow ? Use::Follow : Use::Stock));
+		CHECK(findings(impact, Kind::ListLoss).empty());
+	}
+	input.workMode = AccountWorkMode::Own;
+	input.global.text.clear();
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::Pinned).front()->afterUse == Use::UndefinedList);
+	input.role = ConfigImpactFileRole::Global;
+	input.workMode = AccountWorkMode::Follow;
+	impact = AnalyzeConfigChange(input);
+	CHECK(value(impact, u"lists.\"w.仕事\""_q, u"members"_q)->afterUse == Use::Used);
+	CHECK(findings(impact, Kind::Pinned).empty());
+	input.workMode = AccountWorkMode::Stock;
+	impact = AnalyzeConfigChange(input);
+	CHECK(value(impact, u"lists.\"w.仕事\""_q, u"members"_q)->afterUse == Use::Stock);
+	input.accounts = { { u"B"_q, { {}, false }, AccountWorkMode::Own } };
+	impact = AnalyzeConfigChange(input);
+	CHECK(value(impact, u"lists.\"w.仕事\""_q, u"members"_q)->afterUse == Use::Used);
+	input.accounts[0].file = { input.proposed.text, true };
+	impact = AnalyzeConfigChange(input);
+	CHECK(value(impact, u"lists.\"w.仕事\""_q, u"members"_q)->afterUse == Use::Stock);
+	input.accounts[0].workMode = AccountWorkMode::Follow;
+	impact = AnalyzeConfigChange(input);
+	CHECK(value(impact, u"lists.\"w.仕事\""_q, u"members"_q)->afterUse == Use::Used);
+	input.accounts[0].workMode = AccountWorkMode::Stock;
+	impact = AnalyzeConfigChange(input);
+	CHECK(value(impact, u"lists.\"w.仕事\""_q, u"members"_q)->afterUse == Use::Stock);
+
+	input = ConfigImpactInput();
+	input.current.text = "[lists.work]\nmembers = [1, 2]\n";
+	input.proposed.text = "[lists.work]\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.dangerous);
+	CHECK(findings(impact, Kind::DefinedListEmptied).size() == 1);
+	CHECK(findings(impact, Kind::DefinedListEmptied).front()->beforeCount == 2);
+	CHECK(findings(impact, Kind::DefinedListEmptied).front()->dangerous);
+	CHECK(findings(impact, Kind::ListLoss).empty());
+	input.role = ConfigImpactFileRole::Layered;
+	input.global = { "[lists.work]\nmembers = [99]\n", true };
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.dangerous);
+	CHECK(findings(impact, Kind::DefinedListEmptied).size() == 1);
+	CHECK(findings(impact, Kind::Unpinned).size() == 1);
+	input.current.text.prepend("version = 2\n");
+	input.proposed.text = "version = 2\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(!impact.dangerous);
+	CHECK(findings(impact, Kind::DefinedListEmptied).empty());
+	CHECK(findings(impact, Kind::ListLoss).empty());
+	CHECK(findings(impact, Kind::Unpinned).size() == 1);
+	input.current.text = "version = 2\n[lists.work]\ntitle = 'Work'\nmembers = [1]\n";
+	input.proposed.text = "version = 2\n[lists.work]\ntitle = 'Work'\nmembers = []\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::DefinedListEmptied).size() == 1);
+	CHECK(impact.dangerous);
+	input.proposed.text += "kinds = ['groups']\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::DefinedListEmptied).empty());
+	CHECK(!impact.dangerous);
+	input.current.text = "[lists.work]\nkinds = ['groups']\n";
+	input.proposed.text = "[lists.work]\nkinds = []\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::DefinedListEmptied).size() == 1);
+
+	input = ConfigImpactInput();
+	input.current.text = "[lists.work]\nmembers = [1]\n";
+	input.proposed.text = "[lists.job]\nmembers = [1]\n";
+	const auto accountBytes = QByteArray("version = 2\n# B's text\n[lists.work]\nmembers = [2, 3]\n[future]\nkeep = 'exact'\n");
+	input.accounts = {
+		{ u"B"_q, { accountBytes, true }, AccountWorkMode::Own },
+		{ u"C"_q, { "version = 2\n[lists.work]\nmembers = [4]\n", true },
+			AccountWorkMode::Follow },
+	};
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.status == Status::Ready);
+	CHECK(findings(impact, Kind::ListLoss).size() == 1);
+	CHECK(findings(impact, Kind::StrandedMembers).size() == 2);
+	const auto stranded = findings(impact, Kind::StrandedMembers);
+	CHECK(stranded[0]->account == u"B"_q);
+	CHECK(stranded[0]->beforeCount == 2);
+	CHECK(stranded[0]->beforeUse == Use::Used);
+	CHECK(stranded[0]->afterUse == Use::UndefinedList);
+	CHECK(stranded[0]->change.beforeValue == stranded[0]->change.afterValue);
+	CHECK(stranded[1]->beforeUse == Use::Follow);
+	CHECK(stranded[1]->afterUse == Use::Follow);
+	CHECK(input.accounts[0].file.text == accountBytes);
+	CHECK(impact.proposedText == input.proposed.text);
+	const auto edit = SetListMembers(QString::fromUtf8(input.current.text),
+		u"A.toml"_q, u"work"_q, { 5 }, {});
+	CHECK(edit.error.isEmpty());
+	input.proposed.text = edit.text.toUtf8();
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.status == Status::Ready);
+	CHECK(input.accounts[0].file.text == accountBytes);
+	CHECK(findings(impact, Kind::StrandedMembers).empty());
+
+	input = ConfigImpactInput();
+	input.current.text = "[presets.work]\nlist_order = []\n[schedule]\noutside = 'normal'\n[[schedule.rulesets]]\nname = 'daily'\n[[schedule.rulesets.rules]]\nfrom = '09:00'\ntill = '10:00'\npreset = 'work'\n";
+	input.proposed.text = "version = 2\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.dangerous);
+	CHECK(findings(impact, Kind::PresetLoss).size() == 1);
+	CHECK(findings(impact, Kind::ScheduleLoss).size() == 1);
+	CHECK(!findings(impact, Kind::AppWideLoss).empty());
+	input.role = ConfigImpactFileRole::Layered;
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::PresetLoss).front()->beforeUse == Use::AppWideElsewhere);
+	CHECK(impact.dangerous);
+	input.current.text = "[schedule]\nrules = [{from='09:00', till='10:00', preset='work'}, {from='11:00', till='12:00', preset='work'}]\n";
+	input.proposed.text = "[schedule]\nrules = [{from='11:00', till='12:00', preset='work'}]\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::ScheduleLoss).size() == 1);
+	CHECK(impact.dangerous);
+	input.proposed.text = "[schedule]\nrules = [{from='11:00', till='12:00', preset='work'}, {from='09:00', till='10:00', preset='work'}]\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::ScheduleLoss).empty());
+	CHECK(!impact.dangerous);
+
+	input = ConfigImpactInput();
+	input.current.text = "# unknown bytes\n[future]\n\"\" = { x = 'hello' }\n";
+	input.proposed.text = "# retained exactly\n[future]\nkeep = \"雪\" # spacing\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.status == Status::Ready);
+	CHECK(!impact.dangerous);
+	CHECK(findings(impact, Kind::UnknownRemoval).size() == 1);
+	CHECK(findings(impact, Kind::AppWideLoss).empty());
+	CHECK(findings(impact, Kind::UnknownRemoval).front()->beforeUse == Use::Unknown);
+	CHECK(impact.proposedText == input.proposed.text);
+	input.current.text = "[premium]\nfuture_flag = true\n";
+	input.proposed.text.clear();
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::AppWideLoss).size() == 1);
+	CHECK(findings(impact, Kind::UnknownRemoval).empty());
+	input.current.text = "[lists.work]\nmembers = [1]\n";
+	input.proposed.text = "version = 2\n[lists.work]\nmembers = [1]\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(findings(impact, Kind::ListLoss).size() == 1);
+	CHECK(impact.dangerous);
+	CHECK(ParseSettings(QString::fromUtf8(input.current.text), {}).settings.version == 1);
+	CHECK(kDefaultSettingsVersion == 1);
+	CHECK(kHighestSettingsVersion == 2);
+
+	input = ConfigImpactInput();
+	input.current = { "not valid = [", false };
+	input.proposed = { "# empty but present\n", true };
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.status == Status::Ready);
+	CHECK(impact.findings.empty());
+	input.current.present = true;
+	CHECK(AnalyzeConfigChange(input).status == Status::InvalidCurrent);
+	input.current = { {}, false };
+	input.proposed.text = "bad = [";
+	CHECK(AnalyzeConfigChange(input).status == Status::InvalidProposed);
+	input.proposed = { "version = 3", true };
+	CHECK(AnalyzeConfigChange(input).status == Status::NewerSchema);
+	input.proposed = { {}, true };
+	input.role = ConfigImpactFileRole::Layered;
+	input.global = { "bad = [", true };
+	CHECK(AnalyzeConfigChange(input).status == Status::InvalidGlobal);
+	input.global.present = false;
+	CHECK(AnalyzeConfigChange(input).status == Status::Ready);
+	input.role = ConfigImpactFileRole::Global;
+	input.accounts = { { u"B"_q, { "bad = [", true } } };
+	CHECK(AnalyzeConfigChange(input).status == Status::InvalidAccount);
+	input.accounts[0].file = { "version = 3", true };
+	CHECK(AnalyzeConfigChange(input).status == Status::NewerSchema);
+	input.accounts[0].file = { {}, false };
+	CHECK(AnalyzeConfigChange(input).status == Status::Ready);
+	input.accounts.push_back(input.accounts.front());
+	CHECK(AnalyzeConfigChange(input).status == Status::InvalidContext);
+	input.accounts.clear();
+	input.workMode = static_cast<AccountWorkMode>(99);
+	CHECK(AnalyzeConfigChange(input).status == Status::InvalidContext);
+	input = ConfigImpactInput();
+	input.current.text = "[last_seen]\nreasons_p=true\n";
+	input.proposed.text = "# cosmetic\n[last_seen]\nreasons_p = true # same\n";
+	impact = AnalyzeConfigChange(input);
+	CHECK(impact.status == Status::Ready);
+	CHECK(impact.findings.empty());
+	CHECK(!impact.dangerous);
+}
+
+void TestConfigImpactReviewFixes() {
+	Section = "config impact review fixes";
+	using namespace Purple;
+	const auto checkNewer = [](const ConfigImpactInput &input) {
+		const auto impact = AnalyzeConfigChange(input);
+		CHECK(impact.status == ConfigImpactStatus::NewerSchema);
+		CHECK(impact.findings.empty());
+		CHECK(!impact.summary.parsed);
+	};
+	for (const auto &version : { QByteArray("3"), QByteArray("2147483647"),
+			QByteArray("2147483648"), QByteArray("9223372036854775807") }) {
+		const auto text = QByteArray("version=") + version + '\n';
+		auto input = ConfigImpactInput();
+		input.proposed.text = text;
+		checkNewer(input);
+		input = ConfigImpactInput();
+		input.current.text = text;
+		checkNewer(input);
+		input = ConfigImpactInput();
+		input.role = ConfigImpactFileRole::Layered;
+		input.global = { text, true };
+		checkNewer(input);
+		input = ConfigImpactInput();
+		input.accounts = { { u"B"_q, { text, true }, AccountWorkMode::Own } };
+		checkNewer(input);
+		CHECK(AnalyzeConfigChange(input).account == u"B"_q);
+		input.accounts[0].file.present = false;
+		CHECK(AnalyzeConfigChange(input).status == ConfigImpactStatus::Ready);
+	}
+	for (const auto &text : { QByteArray(), QByteArray("version='invalid'\n"),
+			QByteArray("version=0\n"), QByteArray("version=-1\n"),
+			QByteArray("version=-2147483649\n"), QByteArray("version=1.5\n"),
+			QByteArray("version=[]\n"), QByteArray("version={ schema=3 }\n") }) {
+		auto input = ConfigImpactInput();
+		input.proposed.text = text;
+		CHECK(AnalyzeConfigChange(input).status == ConfigImpactStatus::Ready);
+		CHECK(ParseSettings(QString::fromUtf8(text), {}).settings.version == 1);
+		input.current = input.proposed;
+		CHECK(AnalyzeConfigChange(input).status == ConfigImpactStatus::Ready);
+		input.role = ConfigImpactFileRole::Layered;
+		input.global = input.proposed;
+		CHECK(AnalyzeConfigChange(input).status == ConfigImpactStatus::Ready);
+		input.role = ConfigImpactFileRole::Global;
+		input.accounts = { { u"B"_q, input.proposed, AccountWorkMode::Own } };
+		CHECK(AnalyzeConfigChange(input).status == ConfigImpactStatus::Ready);
+	}
+	CHECK(kDefaultSettingsVersion == 1);
+	CHECK(kHighestSettingsVersion == 2);
+	CHECK(ParseSettings(u"version=2147483648\n"_q, {}).settings.version == 1);
+
+	auto input = ConfigImpactInput();
+	input.current.text = "[schedule]\n[[schedule.rulesets]]\nname='daily'\nrules=[{from='09:00',till='10:00',preset='work'},{from='11:00',till='12:00',preset='work'}]\n[presets.work]\nlist_order=[]\n";
+	input.proposed.text = "[schedule]\n[[schedule.rulesets]]\nname='daily'\nrules=[{from='11:00',till='12:00',preset='work'},{from='09:00',till='10:00',preset='work'}]\n[presets.work]\nlist_order=[]\n";
+	const auto hasScheduleLoss = [](const ConfigChangeImpact &impact) {
+		return std::any_of(impact.findings.begin(), impact.findings.end(),
+			[](const ConfigImpactFinding &finding) {
+				return finding.kind == ConfigImpactKind::ScheduleLoss;
+			});
+	};
+	auto impact = AnalyzeConfigChange(input);
+	CHECK(impact.status == ConfigImpactStatus::Ready);
+	CHECK(!hasScheduleLoss(impact));
+	CHECK(!impact.dangerous);
+	const auto oldSettings = ParseSettings(QString::fromUtf8(input.current.text), {}).settings;
+	const auto newSettings = ParseSettings(QString::fromUtf8(input.proposed.text), {}).settings;
+	auto unequalTargets = 0;
+	for (auto day = 0; day != 7; ++day) {
+		for (auto minute = 0; minute != 1440; ++minute) {
+			const auto at = QDateTime(QDate(2026, 10, 19).addDays(day),
+				QTime(minute / 60, minute % 60));
+			unequalTargets += ScheduleTarget(oldSettings.schedule, at)
+				!= ScheduleTarget(newSettings.schedule, at);
+		}
+	}
+	CHECK(unequalTargets == 0);
+	const auto reversed = input.proposed.text;
+	input.proposed.text = input.current.text;
+	input.proposed.text.replace(
+		",{from='11:00',till='12:00',preset='work'}", "");
+	impact = AnalyzeConfigChange(input);
+	CHECK(hasScheduleLoss(impact));
+	CHECK(impact.dangerous);
+	input.proposed.text = reversed;
+	input.proposed.text.replace("till='12:00'", "till='13:00'");
+	impact = AnalyzeConfigChange(input);
+	CHECK(hasScheduleLoss(impact));
+	CHECK(impact.dangerous);
+	input.proposed.text = reversed;
+	input.proposed.text.replace("name='daily'", "name='renamed'");
+	impact = AnalyzeConfigChange(input);
+	CHECK(hasScheduleLoss(impact));
+	CHECK(impact.dangerous);
+	input.proposed.text = reversed;
+	input.current.text.replace("name='daily'", "name='daily'\nextra=[1,2]");
+	input.proposed.text.replace("name='daily'", "name='daily'\nextra=[2,1]");
+	impact = AnalyzeConfigChange(input);
+	CHECK(hasScheduleLoss(impact));
+	CHECK(impact.dangerous);
+	input.proposed.text.replace("extra=[2,1]", "extra=[1,2]");
+	impact = AnalyzeConfigChange(input);
+	CHECK(!hasScheduleLoss(impact));
+	CHECK(!impact.dangerous);
+}
+
 int main() {
 	TestSpliceBomAndEscapedListNames();
 	TestSetListMembersAndComments();
@@ -15816,6 +16171,8 @@ int main() {
 	TestConfigDiff();
 	TestConfigChangeSummary();
 	TestScopedConfigChangesAndFileFingerprints();
+	TestConfigChangeImpact();
+	TestConfigImpactReviewFixes();
 	TestScopeDefinitionAndEmptyKeyRegressions();
 	TestScopeVersionFallbackFacts();
 	TestStructuredVersionFactCarrier();
