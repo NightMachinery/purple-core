@@ -220,7 +220,11 @@ duplicate composed names.
 `SyncConfigChoices(review, localPublishable)` lists what a choice dialog
 offers: each offered head that has a record (only the first for an update),
 then this device's settings when the file is publishable and keeping them is a
-valid choice. Each choice says whether it also publishes.
+valid choice. Each choice says whether it also publishes. The overload taking
+`ConfigImpactInput` additionally reviews actual replacements and superseded
+versions through the shared impact model. Require `impactReady` and keep
+`dangerous` choices out of default actions; the original overload is unreviewed.
+See [account recovery and review context](account-sync-recovery.md).
 
 `DescribeSyncConfigApplyFailure` sorts a failed apply into JoinedNotWritten,
 WrittenStateNotSaved, WrittenNotReadBack or NothingDone, carrying what the
@@ -361,3 +365,12 @@ review's conflict plan, rather than being resolved by Relink. Ownership proof is
 not permission to apply, publish, complete a pending post or accept a stale
 choice. Account-path identity, frontend binding behavior, token reuse and actual
 account/network isolation remain separate integration and native work.
+
+## Account recovery and Start again
+
+`PlanSyncAccountRecovery` combines verified account-directory identity, token
+claims and the root proof above into a typed verdict. `PlanSyncStartAgain` and
+`CompleteSyncStartAgain` describe a confirmed state/pending-only archive and
+block setup until exact readback. `PlanSyncSetupBindingToken` reuses a valid old
+preference token for a fresh store. See [the recovery contract](account-sync-recovery.md)
+for evidence, ordering, account isolation and the remaining client duties.

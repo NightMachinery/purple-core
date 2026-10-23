@@ -309,6 +309,23 @@ struct SyncPublishDecision {
 	const SyncLocalState &state);
 [[nodiscard]] std::optional<QString> FormatSyncBindingToken(
 	const QByteArray &entropy);
+enum class SyncSetupBindingStatus {
+	ReuseExisting,
+	CreateNew,
+	EntropyRequired,
+	InvalidPreferenceToken,
+};
+
+struct SyncSetupBindingPlan {
+	SyncSetupBindingStatus status = SyncSetupBindingStatus::EntropyRequired;
+	QString token;
+};
+
+[[nodiscard]] bool IsSyncBindingToken(const QByteArray &token);
+[[nodiscard]] SyncSetupBindingPlan PlanSyncSetupBindingToken(
+	const QByteArray &preferenceToken,
+	const QByteArray &newTokenEntropy = {});
+
 [[nodiscard]] SyncAccountBindingVerdict CheckSyncAccountBinding(
 	const SyncLocalState &state,
 	const QByteArray &accountPrefToken);

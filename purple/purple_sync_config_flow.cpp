@@ -11,10 +11,12 @@ option) any later version.
 #include "purple/purple_state.h"
 
 #include <QtCore/QCryptographicHash>
+#include <QtCore/QDateTime>
 
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <set>
 #include <utility>
 
 namespace Purple {
@@ -528,6 +530,245 @@ SyncConfigRelinkReview ReviewSyncConfigRelink(
 		|| (own.status == SyncOwnInventoryStatus::Absent
 			&& state.config.confirmedSeq == 0
 			&& state.library.confirmedSeq == 0);
+	return result;
+}
+
+namespace {
+
+[[nodiscard]] bool RecoveryStorePresent(const SyncRecoveryStore &store) {
+	return store.statePresent || store.pendingPresent;
+}
+
+[[nodiscard]] QByteArray RecoveryStagedConfig(
+		const SyncRecoveryStore &store,
+		const SyncLocalState &state) {
+	const auto name = u"config-%1.json"_q.arg(state.config.pendingSeq);
+	const auto found = store.pendingFiles.find(name);
+	return (store.pendingPresent && found != store.pendingFiles.end())
+		? found->second : QByteArray();
+}
+
+[[nodiscard]] bool SafePendingName(const QString &name) {
+	return !name.isEmpty() && name != u"."_q && name != u".."_q
+		&& std::none_of(name.begin(), name.end(), [](QChar ch) {
+			return ch == u'/' || ch == u'\\' || ch.unicode() < 0x20
+				|| ch.unicode() == 0x7f;
+		});
+}
+
+} // namespace
+
+SyncAccountRecoveryPlan PlanSyncAccountRecovery(
+		const SyncAccountRecoveryInput &input) {
+	auto result = SyncAccountRecoveryPlan();
+	result.files = ResolveAccountFiles(input.account, input.startupOwner, input.layout);
+	if (!result.files) {
+		return result;
+	} else if (!input.signedIn) {
+		result.status = SyncAccountRecoveryStatus::WaitingForSignIn;
+		return result;
+	} else if (!input.preferenceToken.isEmpty()
+		&& !IsSyncBindingToken(input.preferenceToken)) {
+		return result;
+	} else if (!input.discoveryComplete) {
+		result.status = SyncAccountRecoveryStatus::Incomplete;
+		return result;
+	}
+	auto preferences = std::set<QString>{
+		*AccountKeyText(input.account.environment, input.account.userId) };
+	auto preferenceTokens = std::set<QByteArray>();
+	if (!input.preferenceToken.isEmpty()) {
+		preferenceTokens.insert(input.preferenceToken);
+	}
+	for (const auto &preference : input.otherPreferences) {
+		const auto key = AccountKeyText(
+			preference.account.environment, preference.account.userId);
+		if (!key || (!preference.token.isEmpty()
+			&& !IsSyncBindingToken(preference.token))) {
+			return result;
+		} else if (!preferences.insert(*key).second
+			|| (!preference.token.isEmpty()
+				&& !preferenceTokens.insert(preference.token).second)) {
+			result.status = SyncAccountRecoveryStatus::Ambiguous;
+			return result;
+		}
+	}
+	auto states = std::vector<std::optional<SyncLocalState>>();
+	auto directories = std::set<QString>();
+	for (auto i = size_t(0); i != input.stores.size(); ++i) {
+		const auto &store = input.stores[i];
+		const auto key = store.directoryAccount
+			? AccountKeyText(store.directoryAccount->environment,
+				store.directoryAccount->userId)
+			: std::make_optional(QString());
+		if (!key || (!store.statePresent && !store.state.isEmpty())
+			|| (!store.pendingPresent && !store.pendingFiles.empty())
+			|| std::any_of(store.pendingFiles.begin(), store.pendingFiles.end(),
+				[](const auto &file) { return !SafePendingName(file.first); })) {
+			return result;
+		} else if (!directories.insert(*key).second) {
+			result.status = SyncAccountRecoveryStatus::Ambiguous;
+			return result;
+		}
+		const auto parsed = store.statePresent
+			? ParseSyncLocalState(store.state) : SyncLocalParseResult();
+		states.push_back(parsed ? std::make_optional(parsed.state) : std::nullopt);
+		const auto candidate = store.directoryAccount
+			? *store.directoryAccount == input.account
+			: input.account == *input.startupOwner;
+		if (candidate && RecoveryStorePresent(store)) {
+			if (result.store || (store.directoryAccount
+				&& input.account == *input.startupOwner)) {
+				result.status = SyncAccountRecoveryStatus::Ambiguous;
+				result.store.reset();
+				return result;
+			}
+			result.store = i;
+		}
+	}
+	for (auto i = size_t(0); i != states.size(); ++i) {
+		if (states[i] && !input.preferenceToken.isEmpty()
+			&& states[i]->bindingToken.toLatin1() == input.preferenceToken
+			&& (!result.store || *result.store != i)) {
+			result.status = SyncAccountRecoveryStatus::Ambiguous;
+			return result;
+		}
+	}
+	if (!result.store) {
+		result.status = SyncAccountRecoveryStatus::Setup;
+		return result;
+	}
+	const auto &state = states[*result.store];
+	if (!state || state->bindingToken.isEmpty()) {
+		result.status = SyncAccountRecoveryStatus::StartAgain;
+		result.offerStartAgain = true;
+		return result;
+	}
+	for (const auto &preference : input.otherPreferences) {
+		if (preference.token == state->bindingToken.toLatin1()) {
+			result.status = SyncAccountRecoveryStatus::Ambiguous;
+			return result;
+		}
+	}
+	for (auto i = size_t(0); i != states.size(); ++i) {
+		if (i != *result.store && states[i]
+			&& states[i]->bindingToken == state->bindingToken) {
+			result.status = SyncAccountRecoveryStatus::Ambiguous;
+			return result;
+		}
+	}
+	if (CheckSyncAccountBinding(*state, input.preferenceToken)
+		== SyncAccountBindingVerdict::Bound) {
+		result.status = SyncAccountRecoveryStatus::Bound;
+		return result;
+	}
+	if (input.stores[*result.store].directoryAccount) {
+		result.status = SyncAccountRecoveryStatus::AutoRelink;
+		result.restoreToken = state->bindingToken;
+		return result;
+	} else if (!input.cloud || !input.cloud->storeSpaceComplete) {
+		result.status = SyncAccountRecoveryStatus::Incomplete;
+		return result;
+	} else if (input.cloud->account != input.account
+		|| input.cloud->inventory.accountUserId != uint64_t(input.account.userId)) {
+		result.status = SyncAccountRecoveryStatus::Ambiguous;
+		return result;
+	}
+	const auto cloudStatus = InventoryStatus(input.cloud->inventory);
+	if (cloudStatus != SyncConfigReviewStatus::Ready) {
+		result.status = cloudStatus == SyncConfigReviewStatus::Incomplete
+			? SyncAccountRecoveryStatus::Incomplete
+			: SyncAccountRecoveryStatus::NeedsReview;
+		return result;
+	}
+	result.proof = ReviewSyncConfigRelink(input.cloud->inventory, *state,
+		uint64_t(input.account.userId),
+		RecoveryStagedConfig(input.stores[*result.store], *state), input.local);
+	if (result.proof->proven) {
+		result.status = SyncAccountRecoveryStatus::RootRelink;
+		result.restoreToken = state->bindingToken;
+	} else if (result.proof->review.status == SyncConfigReviewStatus::UsingLastGood
+		|| result.proof->review.status == SyncConfigReviewStatus::InvalidSettings) {
+		result.status = SyncAccountRecoveryStatus::NeedsReview;
+	} else {
+		result.status = SyncAccountRecoveryStatus::StartAgain;
+		result.offerStartAgain = true;
+	}
+	return result;
+}
+
+SyncStartAgainPlan PlanSyncStartAgain(const SyncStartAgainInput &input) {
+	auto result = SyncStartAgainPlan();
+	const auto recovery = PlanSyncAccountRecovery(input.recovery);
+	if (!recovery.offerStartAgain || !recovery.store || !recovery.files) {
+		return result;
+	} else if (input.operationInFlight
+		|| input.queue != SyncConfigSendQueue::Empty) {
+		result.status = SyncStartAgainStatus::Busy;
+		return result;
+	} else if (!input.confirmed) {
+		result.status = SyncStartAgainStatus::ConfirmationRequired;
+		return result;
+	}
+	const auto &store = input.recovery.stores[*recovery.store];
+	if (store.pendingPresent && !store.pendingComplete) {
+		result.status = SyncStartAgainStatus::Incomplete;
+		return result;
+	} else if (!input.archiveAvailable) {
+		result.status = SyncStartAgainStatus::ArchiveUnavailable;
+		return result;
+	}
+	const auto format = u"yyyyMMdd-HHmmss"_q;
+	const auto date = QDateTime::fromString(input.archiveDate, format);
+	if (!date.isValid() || date.toString(format) != input.archiveDate) {
+		result.status = SyncStartAgainStatus::InvalidDate;
+		return result;
+	}
+	result.status = SyncStartAgainStatus::Ready;
+	result.account = input.recovery.account;
+	result.archiveDirectory = recovery.files->syncDirectory
+		+ u"/orphaned-"_q + input.archiveDate;
+	result.history = recovery.files->history;
+	result.expected = store;
+	result.preferenceToken = input.recovery.preferenceToken;
+	if (store.pendingPresent) {
+		result.moves.push_back({ SyncOrphanMoveKind::PendingDirectory,
+			recovery.files->syncDirectory + u"/pending"_q,
+			result.archiveDirectory + u"/pending"_q });
+	}
+	if (store.statePresent) {
+		result.moves.push_back({ SyncOrphanMoveKind::StateFile,
+			recovery.files->syncStore, result.archiveDirectory + u"/state.json"_q });
+	}
+	return result;
+}
+
+SyncStartAgainCompletion CompleteSyncStartAgain(
+		const SyncStartAgainPlan &plan,
+		const SyncStartAgainObservation &observation,
+		const QByteArray &newTokenEntropy) {
+	auto result = SyncStartAgainCompletion();
+	if (plan.status != SyncStartAgainStatus::Ready || plan.moves.empty()
+		|| !AccountKeyText(plan.account.environment, plan.account.userId)) {
+		return result;
+	} else if (!observation.complete) {
+		result.status = SyncStartAgainCompletionStatus::Incomplete;
+		return result;
+	} else if (observation.account != plan.account
+		|| observation.preferenceToken != plan.preferenceToken
+		|| observation.originalStatePresent || observation.originalPendingPresent
+		|| observation.archivedState.has_value() != plan.expected.statePresent
+		|| observation.archivedPending.has_value() != plan.expected.pendingPresent
+		|| (observation.archivedState && *observation.archivedState != plan.expected.state)
+		|| (observation.archivedPending
+			&& *observation.archivedPending != plan.expected.pendingFiles)) {
+		result.status = SyncStartAgainCompletionStatus::NeedsRecheck;
+		return result;
+	}
+	result.status = SyncStartAgainCompletionStatus::SetupReady;
+	result.binding = PlanSyncSetupBindingToken(
+		observation.preferenceToken, newTokenEntropy);
+	result.clearAccountUndo = true;
 	return result;
 }
 

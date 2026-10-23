@@ -7,6 +7,7 @@ option) any later version.
 */
 #pragma once
 
+#include "purple/purple_account_files.h"
 #include "purple/purple_config_sync.h"
 #include "purple/purple_sync_inventory.h"
 #include "purple/purple_sync_local_state.h"
@@ -15,6 +16,7 @@ option) any later version.
 #include <QtCore/QString>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <vector>
 
@@ -142,6 +144,142 @@ struct SyncConfigRelinkReview {
 	uint64_t expectedAccountUserId,
 	const QByteArray &stagedRecord,
 	const SyncSettingsFile &local);
+
+struct SyncRecoveryStore {
+	std::optional<AccountKey> directoryAccount;
+	bool statePresent = false;
+	QByteArray state;
+	bool pendingPresent = false;
+	bool pendingComplete = false;
+	std::map<QString, QByteArray> pendingFiles;
+};
+
+struct SyncRecoveryPreference {
+	AccountKey account;
+	QByteArray token;
+};
+
+struct SyncRecoveryCloud {
+	AccountKey account;
+	bool storeSpaceComplete = false;
+	SyncAccountInventoryResult inventory;
+};
+
+struct SyncAccountRecoveryInput {
+	AccountKey account;
+	std::optional<AccountKey> startupOwner;
+	AccountFileLayout layout = AccountFileLayout::Desktop;
+	bool signedIn = false;
+	QByteArray preferenceToken;
+	bool discoveryComplete = false;
+	std::vector<SyncRecoveryStore> stores;
+	std::vector<SyncRecoveryPreference> otherPreferences;
+	std::optional<SyncRecoveryCloud> cloud;
+	SyncSettingsFile local;
+};
+
+enum class SyncAccountRecoveryStatus {
+	Bound,
+	AutoRelink,
+	RootRelink,
+	StartAgain,
+	Setup,
+	WaitingForSignIn,
+	Incomplete,
+	NeedsReview,
+	Ambiguous,
+	InvalidInput,
+};
+
+struct SyncAccountRecoveryPlan {
+	SyncAccountRecoveryStatus status = SyncAccountRecoveryStatus::InvalidInput;
+	std::optional<size_t> store;
+	std::optional<AccountFiles> files;
+	QString restoreToken;
+	std::optional<SyncConfigRelinkReview> proof;
+	bool offerStartAgain = false;
+};
+
+[[nodiscard]] SyncAccountRecoveryPlan PlanSyncAccountRecovery(
+	const SyncAccountRecoveryInput &input);
+
+enum class SyncConfigSendQueue {
+	Empty,
+	HoldsSyncRecord,
+};
+
+struct SyncStartAgainInput {
+	SyncAccountRecoveryInput recovery;
+	QString archiveDate;
+	bool archiveAvailable = false;
+	bool confirmed = false;
+	bool operationInFlight = false;
+	SyncConfigSendQueue queue = SyncConfigSendQueue::Empty;
+};
+
+enum class SyncOrphanMoveKind {
+	PendingDirectory,
+	StateFile,
+};
+
+struct SyncOrphanMove {
+	SyncOrphanMoveKind kind = SyncOrphanMoveKind::StateFile;
+	QString source;
+	QString destination;
+};
+
+enum class SyncStartAgainStatus {
+	Ready,
+	ConfirmationRequired,
+	Busy,
+	NotOffered,
+	Incomplete,
+	ArchiveUnavailable,
+	InvalidDate,
+};
+
+struct SyncStartAgainPlan {
+	SyncStartAgainStatus status = SyncStartAgainStatus::NotOffered;
+	AccountKey account;
+	QString archiveDirectory;
+	QString history;
+	SyncRecoveryStore expected;
+	QByteArray preferenceToken;
+	std::vector<SyncOrphanMove> moves;
+	bool preservesHistory = true;
+};
+
+[[nodiscard]] SyncStartAgainPlan PlanSyncStartAgain(
+	const SyncStartAgainInput &input);
+
+struct SyncStartAgainObservation {
+	AccountKey account;
+	bool complete = false;
+	bool originalStatePresent = true;
+	bool originalPendingPresent = true;
+	std::optional<QByteArray> archivedState;
+	std::optional<std::map<QString, QByteArray>> archivedPending;
+	QByteArray preferenceToken;
+};
+
+enum class SyncStartAgainCompletionStatus {
+	SetupReady,
+	InvalidPlan,
+	Incomplete,
+	NeedsRecheck,
+};
+
+struct SyncStartAgainCompletion {
+	SyncStartAgainCompletionStatus status
+		= SyncStartAgainCompletionStatus::InvalidPlan;
+	SyncSetupBindingPlan binding;
+	bool clearAccountUndo = false;
+};
+
+[[nodiscard]] SyncStartAgainCompletion CompleteSyncStartAgain(
+	const SyncStartAgainPlan &plan,
+	const SyncStartAgainObservation &observation,
+	const QByteArray &newTokenEntropy = {});
 
 [[nodiscard]] SyncConfigReview SyncConfigJoinedReview(
 	const SyncConfigReview &shown,
@@ -280,11 +418,6 @@ enum class SyncConfigPublishStatus {
 	OutcomeUnknown,
 	Cancelled,
 	StillSending,
-};
-
-enum class SyncConfigSendQueue {
-	Empty,
-	HoldsSyncRecord,
 };
 
 enum class SyncConfigPostStep {

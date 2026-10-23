@@ -2866,6 +2866,329 @@ void TestRootStoreRelinkProof() {
 	CHECK(!prove(missingFirstStaged, pendingCloud.inventory()).proven);
 }
 
+SyncAccountRecoveryInput RecoveryInput(
+		const Device &device,
+		const Cloud &cloud,
+		bool root = true) {
+	auto input = SyncAccountRecoveryInput();
+	input.account = { 0, root ? int64_t(kUserId) : int64_t(kUserId + 1) };
+	input.startupOwner = AccountKey{ 0, int64_t(kUserId) };
+	input.signedIn = true;
+	input.discoveryComplete = true;
+	input.local = device.local;
+	auto store = SyncRecoveryStore();
+	if (!root) {
+		store.directoryAccount = input.account;
+	}
+	store.statePresent = device.state.has_value();
+	store.state = device.stateBytes();
+	store.pendingPresent = !device.staged.isEmpty();
+	store.pendingComplete = true;
+	if (store.pendingPresent) {
+		store.pendingFiles[u"config-%1.json"_q.arg(device.state->config.pendingSeq)]
+			= device.staged;
+	}
+	input.stores.push_back(std::move(store));
+	input.cloud = SyncRecoveryCloud{ input.account, true, cloud.inventory() };
+	input.cloud->inventory.accountUserId = uint64_t(input.account.userId);
+	return input;
+}
+
+void TestAccountRecovery() {
+	Begin("account recovery verdicts");
+	using Status = SyncAccountRecoveryStatus;
+	auto cloud = Cloud();
+	auto device = Device('a');
+	device.setLocal(T0);
+	CHECK(Join(device, cloud.inventory()));
+	const auto original = device.stateBytes();
+	auto input = RecoveryInput(device, cloud);
+	CHECK(PlanSyncAccountRecovery(input).status == Status::RootRelink);
+	CHECK(PlanSyncAccountRecovery(input).restoreToken == device.state->bindingToken);
+	CHECK(PlanSyncAccountRecovery(input).proof->proven);
+	CHECK(!PlanSyncAccountRecovery(input).proof->review.bound);
+	input.preferenceToken = device.token();
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Bound);
+	input.preferenceToken = QByteArray(32, 'b');
+	CHECK(PlanSyncAccountRecovery(input).status == Status::RootRelink);
+	input.cloud.reset();
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Incomplete);
+	input = RecoveryInput(device, cloud);
+	input.cloud->storeSpaceComplete = false;
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Incomplete);
+	input.cloud->storeSpaceComplete = true;
+	input.discoveryComplete = false;
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Incomplete);
+	input.discoveryComplete = true;
+	input.cloud->account.environment = 1;
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Ambiguous);
+	input = RecoveryInput(device, cloud);
+	input.cloud->inventory.accountUserId += 1;
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Ambiguous);
+	input = RecoveryInput(device, cloud);
+	auto incomplete = cloud;
+	incomplete.scanComplete = false;
+	input.cloud->inventory = incomplete.inventory();
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Incomplete);
+	input = RecoveryInput(device, cloud);
+	input.local = MakeSyncSettingsFile(SyncSettingsFileStatus::Absent);
+	CHECK(PlanSyncAccountRecovery(input).status == Status::RootRelink);
+	input.local = MakeSyncSettingsFile(SyncSettingsFileStatus::Absent, {}, true);
+	CHECK(PlanSyncAccountRecovery(input).status == Status::NeedsReview);
+	CHECK(!PlanSyncAccountRecovery(input).offerStartAgain);
+	input.local = MakeSyncSettingsFile(SyncSettingsFileStatus::Invalid);
+	CHECK(PlanSyncAccountRecovery(input).status == Status::NeedsReview);
+	input = RecoveryInput(device, cloud, false);
+	input.cloud.reset();
+	CHECK(PlanSyncAccountRecovery(input).status == Status::AutoRelink);
+	CHECK(PlanSyncAccountRecovery(input).restoreToken == device.state->bindingToken);
+	input.preferenceToken = QByteArray(32, 'c');
+	CHECK(PlanSyncAccountRecovery(input).status == Status::AutoRelink);
+	input.signedIn = false;
+	input.local = MakeSyncSettingsFile(SyncSettingsFileStatus::Present,
+		QByteArray("version=2\n[last_seen]\nreasons_p=false\n"));
+	CHECK(PlanSyncAccountRecovery(input).status == Status::WaitingForSignIn);
+	CHECK(PlanSyncAccountRecovery(input).restoreToken.isEmpty());
+	input.signedIn = true;
+	CHECK(PlanSyncAccountRecovery(input).status == Status::AutoRelink);
+	CHECK(input.local.text.contains("reasons_p=false"));
+	CHECK(input.stores.front().state == original);
+	CHECK(device.stateBytes() == original);
+	input.otherPreferences = { { { 0, 999 }, device.token() } };
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Ambiguous);
+	input.otherPreferences.clear();
+	input.stores.push_back(input.stores.front());
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Ambiguous);
+	input = RecoveryInput(device, cloud);
+	input.stores.push_back(input.stores.front());
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Ambiguous);
+	input = RecoveryInput(device, cloud);
+	input.stores.front().directoryAccount = input.account;
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Ambiguous);
+	input = RecoveryInput(device, cloud);
+	input.preferenceToken = QByteArray("invalid");
+	CHECK(PlanSyncAccountRecovery(input).status == Status::InvalidInput);
+	input = RecoveryInput(device, cloud);
+	input.stores.front().state = QByteArray("invalid state bytes");
+	CHECK(PlanSyncAccountRecovery(input).status == Status::StartAgain);
+	CHECK(PlanSyncAccountRecovery(input).offerStartAgain);
+	input.stores.clear();
+	input.preferenceToken = device.token();
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Setup);
+	CHECK(PlanSyncSetupBindingToken(input.preferenceToken).status
+		== SyncSetupBindingStatus::ReuseExisting);
+	input.otherPreferences = { { { 1, int64_t(kUserId) }, device.token() } };
+	CHECK(PlanSyncAccountRecovery(input).status == Status::Ambiguous);
+
+	auto other = Device('b');
+	other.setLocal(TB);
+	CHECK(Join(other, cloud.inventory()));
+	auto a = RecoveryInput(device, cloud);
+	auto b = RecoveryInput(other, cloud, false);
+	a.stores.push_back(b.stores.front());
+	b.stores.push_back(a.stores.front());
+	CHECK(PlanSyncAccountRecovery(a).status == Status::RootRelink);
+	CHECK(PlanSyncAccountRecovery(b).status == Status::AutoRelink);
+	CHECK(*PlanSyncAccountRecovery(a).store == 0);
+	CHECK(*PlanSyncAccountRecovery(b).store == 0);
+	CHECK(a.stores[1].state == other.stateBytes());
+	CHECK(b.stores[1].state == original);
+	b.preferenceToken = device.token();
+	CHECK(PlanSyncAccountRecovery(b).status == Status::Ambiguous);
+	b = RecoveryInput(other, cloud, false);
+	b.stores.front().state = original;
+	b.stores.push_back(a.stores.front());
+	CHECK(PlanSyncAccountRecovery(b).status == Status::Ambiguous);
+	CHECK(PublishLocal(device, cloud).status == SyncConfigPublishStatus::Confirmed);
+	device.setLocal(T1);
+	CHECK(Publish(device, cloud, LocalRequest(device, cloud), PostMode::LoseReceipt).status
+		== SyncConfigPublishStatus::OutcomeUnknown);
+	input = RecoveryInput(device, cloud);
+	CHECK(PlanSyncAccountRecovery(input).status == Status::RootRelink);
+	CHECK(PlanSyncAccountRecovery(input).proof->ownStatus
+		== SyncOwnInventoryStatus::PendingFound);
+	CHECK(PlanSyncAccountRecovery(input).proof->review.plan.verdict
+		== ConfigSyncVerdict::Pending);
+	input.local = MakeSyncSettingsFile(SyncSettingsFileStatus::Absent, {}, true);
+	CHECK(PlanSyncAccountRecovery(input).status == Status::NeedsReview);
+	CHECK(PlanSyncAccountRecovery(input).proof->review.plan.verdict
+		== ConfigSyncVerdict::Pending);
+	input.local = device.local;
+	input.stores.front().pendingFiles.clear();
+	CHECK(PlanSyncAccountRecovery(input).status == Status::StartAgain);
+}
+
+void TestStartAgainAndSetupBinding() {
+	Begin("start again archive and token reuse");
+	using Status = SyncStartAgainStatus;
+	using Complete = SyncStartAgainCompletionStatus;
+	using Binding = SyncSetupBindingStatus;
+	const auto token = QByteArray(32, 'a');
+	CHECK(IsSyncBindingToken(token));
+	CHECK(!IsSyncBindingToken(QByteArray(32, 'A')));
+	CHECK(!IsSyncBindingToken(QByteArray(31, 'a')));
+	CHECK(PlanSyncSetupBindingToken(token).status == Binding::ReuseExisting);
+	CHECK(PlanSyncSetupBindingToken(token, QByteArray(16, 'b')).token == QString::fromLatin1(token));
+	CHECK(PlanSyncSetupBindingToken({}).status == Binding::EntropyRequired);
+	CHECK(PlanSyncSetupBindingToken({}, QByteArray(16, 'b')).status == Binding::CreateNew);
+	CHECK(PlanSyncSetupBindingToken({}, QByteArray(16, 'b')).token
+		== *FormatSyncBindingToken(QByteArray(16, 'b')));
+	CHECK(PlanSyncSetupBindingToken(QByteArray("bad"), QByteArray(16, 'b')).status
+		== Binding::InvalidPreferenceToken);
+	auto cloud = Cloud();
+	auto device = Device('a');
+	device.setLocal(T0);
+	CHECK(Join(device, cloud.inventory()));
+	CHECK(PublishLocal(device, cloud).status == SyncConfigPublishStatus::Confirmed);
+	device.setLocal(T1);
+	CHECK(Publish(device, cloud, LocalRequest(device, cloud), PostMode::LoseReceipt).status
+		== SyncConfigPublishStatus::OutcomeUnknown);
+	const auto original = device.stateBytes();
+	const auto staged = device.staged;
+	auto input = SyncStartAgainInput();
+	input.recovery = RecoveryInput(device, cloud);
+	input.recovery.preferenceToken = QByteArray(32, 'b');
+	auto otherCloud = Cloud();
+	auto remote = MakeRemote('z', u"Android"_q);
+	Post(otherCloud, remote, *FormatSyncSpaceId(QByteArray(16, 'z')), TB);
+	input.recovery.cloud->inventory = otherCloud.inventory();
+	CHECK(PlanSyncAccountRecovery(input.recovery).status == SyncAccountRecoveryStatus::StartAgain);
+	input.recovery.stores.front().pendingFiles[u"future-7.json"_q]
+		= QByteArray("opaque pending bytes");
+	input.archiveDate = u"20261023-230000"_q;
+	input.archiveAvailable = true;
+	CHECK(PlanSyncStartAgain(input).status == Status::ConfirmationRequired);
+	input.confirmed = true;
+	input.operationInFlight = true;
+	CHECK(PlanSyncStartAgain(input).status == Status::Busy);
+	input.operationInFlight = false;
+	input.queue = SyncConfigSendQueue::HoldsSyncRecord;
+	CHECK(PlanSyncStartAgain(input).status == Status::Busy);
+	input.queue = SyncConfigSendQueue::Empty;
+	input.archiveAvailable = false;
+	CHECK(PlanSyncStartAgain(input).status == Status::ArchiveUnavailable);
+	input.archiveAvailable = true;
+	input.archiveDate = u"../other-account"_q;
+	CHECK(PlanSyncStartAgain(input).status == Status::InvalidDate);
+	input.archiveDate = u"20260230-120000"_q;
+	CHECK(PlanSyncStartAgain(input).status == Status::InvalidDate);
+	input.archiveDate = u"20261023-230000"_q;
+	input.recovery.stores.front().pendingComplete = false;
+	CHECK(PlanSyncStartAgain(input).status == Status::Incomplete);
+	input.recovery.stores.front().pendingComplete = true;
+	const auto plan = PlanSyncStartAgain(input);
+	CHECK(plan.status == Status::Ready);
+	CHECK(plan.moves.size() == 2);
+	CHECK(plan.moves[0].kind == SyncOrphanMoveKind::PendingDirectory);
+	CHECK(plan.moves[0].source == u"sync/pending"_q);
+	CHECK(plan.moves[1].source == u"sync/state.json"_q);
+	CHECK(plan.archiveDirectory == u"sync/orphaned-20261023-230000"_q);
+	CHECK(plan.history == u"sync/history"_q);
+	CHECK(plan.preservesHistory);
+	CHECK(plan.expected.pendingFiles.size() == 2);
+	CHECK(std::all_of(plan.moves.begin(), plan.moves.end(), [&](const auto &move) {
+		return move.source != plan.history;
+	}));
+	CHECK(plan.expected.state == original);
+	CHECK(plan.expected.pendingFiles.begin()->second == staged);
+	CHECK(device.stateBytes() == original);
+	CHECK(device.staged == staged);
+	auto observed = SyncStartAgainObservation();
+	observed.account = input.recovery.account;
+	observed.preferenceToken = input.recovery.preferenceToken;
+	observed.archivedState = original;
+	observed.archivedPending = plan.expected.pendingFiles;
+	observed.originalStatePresent = false;
+	observed.originalPendingPresent = false;
+	CHECK(CompleteSyncStartAgain(plan, observed).status == Complete::Incomplete);
+	observed.complete = true;
+	const auto done = CompleteSyncStartAgain(plan, observed);
+	CHECK(done.status == Complete::SetupReady);
+	CHECK(done.binding.status == Binding::ReuseExisting);
+	CHECK(done.binding.token == QString::fromLatin1(input.recovery.preferenceToken));
+	CHECK(done.clearAccountUndo);
+	for (auto failure = 0; failure != 7; ++failure) {
+		auto bad = observed;
+		if (failure == 0) {
+			bad.originalStatePresent = true;
+		}
+		if (failure == 1) {
+			bad.originalPendingPresent = true;
+		}
+		if (failure == 2) {
+			bad.archivedState = QByteArray("wrong bytes");
+		}
+		if (failure == 3) {
+			bad.archivedPending->clear();
+		}
+		if (failure == 4) {
+			bad.account.userId += 1;
+		}
+		if (failure == 5) {
+			bad.preferenceToken = QByteArray(32, 'c');
+		}
+		if (failure == 6) {
+			(*bad.archivedPending)[u"extra.json"_q] = QByteArray("extra");
+		}
+		const auto refused = CompleteSyncStartAgain(plan, bad);
+		CHECK(refused.status == Complete::NeedsRecheck);
+		CHECK(!refused.clearAccountUndo);
+	}
+	CHECK(CompleteSyncStartAgain({}, observed).status == Complete::InvalidPlan);
+	input.recovery = RecoveryInput(device, cloud, false);
+	input.recovery.stores.front().state = QByteArray("preserve invalid state");
+	input.recovery.layout = AccountFileLayout::Android;
+	const auto b = PlanSyncStartAgain(input);
+	CHECK(b.status == Status::Ready);
+	CHECK(b.moves[0].source == u"accounts/0-778/sync/pending"_q);
+	CHECK(b.moves[1].source == u"accounts/0-778/sync/state.json"_q);
+	CHECK(b.history == u"accounts/0-778/sync-history"_q);
+	CHECK(b.expected.state == QByteArray("preserve invalid state"));
+	input.recovery.stores.front().pendingPresent = false;
+	input.recovery.stores.front().pendingFiles.clear();
+	CHECK(PlanSyncStartAgain(input).moves.size() == 1);
+	input.recovery.stores.push_back(input.recovery.stores.front());
+	CHECK(PlanSyncStartAgain(input).status == Status::NotOffered);
+}
+
+void TestAccountChoiceImpacts() {
+	Begin("account-aware choice impacts");
+	auto cloud = Cloud();
+	auto device = Device('a');
+	device.setLocal(QByteArray("version=2\n[lists.work]\nmembers=[2]\n"));
+	auto remote = MakeRemote('b', u"Android"_q);
+	Post(cloud, remote, *FormatSyncSpaceId(QByteArray(16, 's')),
+		QByteArray("[lists.work]\nmembers=[1]\n[presets.work]\nlist_order=[]\n"));
+	const auto review = Review(device, cloud);
+	CHECK(review.status == SyncConfigReviewStatus::Ready);
+	CHECK(review.plan.verdict == ConfigSyncVerdict::Choose);
+	const auto legacy = SyncConfigChoices(review, true);
+	CHECK(legacy.size() == 2);
+	CHECK(!legacy.front().impactReady);
+	auto context = ConfigImpactInput();
+	context.role = ConfigImpactFileRole::Layered;
+	context.global = { QByteArray("[lists.work]\nmembers=[99]\n"), true };
+	const auto choices = SyncConfigChoices(review, true, context);
+	CHECK(choices.size() == legacy.size());
+	CHECK(choices[0].key == legacy[0].key);
+	CHECK(choices[0].impactReady);
+	CHECK(!choices[0].dangerous);
+	CHECK(choices[0].impacts.front().impact.proposedText == review.heads.front().text);
+	CHECK(choices[1].impactReady);
+	CHECK(choices[1].publishes);
+	CHECK(choices[1].dangerous);
+	CHECK(choices[1].impacts.size() == 2);
+	CHECK(choices[1].impacts[1].replacedKey == review.heads.front().head.key);
+	CHECK(choices[1].impacts[1].impact.proposedText == device.local.text);
+	context.global.text = QByteArray("bad = [");
+	const auto invalid = SyncConfigChoices(review, true, context);
+	CHECK(!invalid[0].impactReady);
+	CHECK(!invalid[1].impactReady);
+	auto stale = review;
+	stale.status = SyncConfigReviewStatus::UsingLastGood;
+	CHECK(SyncConfigChoices(stale, true, context).empty());
+}
+
 } // namespace
 
 int main() {
@@ -2886,6 +3209,9 @@ int main() {
 	TestFlowDescribe();
 	TestFlowReviewStatuses();
 	TestRootStoreRelinkProof();
+	TestAccountRecovery();
+	TestStartAgainAndSetupBinding();
+	TestAccountChoiceImpacts();
 
 	std::printf("%d checks, %d failures\n", Checks, Failures);
 	return Failures ? 1 : 0;

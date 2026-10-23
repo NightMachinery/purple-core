@@ -596,6 +596,25 @@ std::optional<QString> FormatSyncBindingToken(const QByteArray &entropy) {
 	return QString::fromLatin1(entropy.toHex());
 }
 
+bool IsSyncBindingToken(const QByteArray &token) {
+	return token.size() == 2 * kBindingTokenBytes
+		&& ValidBindingToken(QString::fromLatin1(token));
+}
+
+SyncSetupBindingPlan PlanSyncSetupBindingToken(
+		const QByteArray &preferenceToken,
+		const QByteArray &newTokenEntropy) {
+	if (!preferenceToken.isEmpty()) {
+		return IsSyncBindingToken(preferenceToken)
+			? SyncSetupBindingPlan{ SyncSetupBindingStatus::ReuseExisting,
+				QString::fromLatin1(preferenceToken) }
+			: SyncSetupBindingPlan{ SyncSetupBindingStatus::InvalidPreferenceToken };
+	}
+	const auto token = FormatSyncBindingToken(newTokenEntropy);
+	return token ? SyncSetupBindingPlan{ SyncSetupBindingStatus::CreateNew, *token }
+		: SyncSetupBindingPlan();
+}
+
 SyncAccountBindingVerdict CheckSyncAccountBinding(
 		const SyncLocalState &state,
 		const QByteArray &accountPrefToken) {
@@ -608,8 +627,7 @@ SyncAccountBindingVerdict CheckSyncAccountBinding(
 	if (accountPrefToken.isEmpty()) {
 		return SyncAccountBindingVerdict::MissingAccountToken;
 	}
-	if (!ValidBindingToken(QString::fromLatin1(accountPrefToken))
-		|| accountPrefToken.size() != 2 * kBindingTokenBytes) {
+	if (!IsSyncBindingToken(accountPrefToken)) {
 		return SyncAccountBindingVerdict::InvalidAccountToken;
 	}
 	return (accountPrefToken == state.bindingToken.toLatin1())

@@ -243,6 +243,47 @@ std::vector<SyncConfigChoice> SyncConfigChoices(
 	return result;
 }
 
+std::vector<SyncConfigChoice> SyncConfigChoices(
+		const SyncConfigReview &review,
+		bool localPublishable,
+		const ConfigImpactInput &context) {
+	if (review.status != SyncConfigReviewStatus::Ready) {
+		return {};
+	}
+	auto result = SyncConfigChoices(review, localPublishable);
+	for (auto &choice : result) {
+		const auto selected = choice.key
+			? review.heads[choice.head].text : review.local.text;
+		choice.impactReady = true;
+		const auto add = [&](const std::optional<QString> &key,
+				const ConfigImpactText &before) {
+			auto input = context;
+			input.current = before;
+			input.proposed = { selected, true };
+			auto impact = AnalyzeConfigChange(input);
+			choice.impactReady = choice.impactReady
+				&& impact.status == ConfigImpactStatus::Ready;
+			choice.dangerous = choice.dangerous || impact.dangerous;
+			choice.impacts.push_back({ key, std::move(impact) });
+		};
+		add(std::nullopt, { review.local.text,
+			review.local.status == SyncSettingsFileStatus::Present });
+		if (choice.publishes) {
+			for (const auto &head : review.plan.offered) {
+				if (choice.key && *choice.key == head.key) {
+					continue;
+				}
+				if (const auto record = FindSyncConfigHeadRecord(review, head)) {
+					add(head.key, { record->text, true });
+				} else {
+					choice.impactReady = false;
+				}
+			}
+		}
+	}
+	return result;
+}
+
 SyncConfigApplyFailure DescribeSyncConfigApplyFailure(
 		const SyncConfigApplyOutcome &outcome) {
 	auto result = SyncConfigApplyFailure{

@@ -165,10 +165,13 @@ Mode choice edits are documented in [list member writes](docs/list-member-writes
   [`docs/sync-config-flow.md`](docs/sync-config-flow.md).
   `ReviewSyncConfigRelink` provides pure root-store ownership proof against an
   explicitly identified account inventory, without changing a binding or state.
+  Account recovery verdicts, confirmed state/pending-only archive plans and
+  exact archive completion reuse that proof; see [account sync recovery](docs/account-sync-recovery.md).
 - `purple/purple_sync_config_describe.{h,cpp}` - which message, action and
   devices a review or failed apply deserves, the choices a dialog offers,
   device name parts, whether `settings.toml` can be published, and whether a
-  restore ends Undo. Clients supply the wording.
+  restore ends Undo. Its account-context choice overload adds replacement and
+  superseded-version impact warnings. Clients supply the wording.
 - `purple/purple_config_payload.{h,cpp}` - inspects a validated config envelope
   before its settings file can be used. It checks the key against the exact
   UTF-8 bytes represented by the JSON `text` string, validates direct parents

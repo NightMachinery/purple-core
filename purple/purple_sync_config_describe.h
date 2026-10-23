@@ -7,6 +7,7 @@ option) any later version.
 */
 #pragma once
 
+#include "purple/purple_config_diff.h"
 #include "purple/purple_sync_config_flow.h"
 
 #include <QtCore/QString>
@@ -102,15 +103,28 @@ struct SyncConfigDescription {
 	const SyncConfigReview &review,
 	bool localPublishable);
 
+struct SyncConfigChoiceImpact {
+	std::optional<QString> replacedKey;
+	ConfigChangeImpact impact;
+};
+
 struct SyncConfigChoice {
 	std::optional<QString> key;
 	int head = -1;
 	bool publishes = false;
+	std::vector<SyncConfigChoiceImpact> impacts;
+	bool impactReady = false;
+	bool dangerous = false;
 };
 
 [[nodiscard]] std::vector<SyncConfigChoice> SyncConfigChoices(
 	const SyncConfigReview &review,
 	bool localPublishable);
+
+[[nodiscard]] std::vector<SyncConfigChoice> SyncConfigChoices(
+	const SyncConfigReview &review,
+	bool localPublishable,
+	const ConfigImpactInput &context);
 
 struct SyncConfigApplyOutcome {
 	SyncConfigApplyStatus status = SyncConfigApplyStatus::NeedsReview;
