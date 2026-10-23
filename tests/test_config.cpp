@@ -12722,7 +12722,7 @@ void TestSyncLocalState() {
 	changed.insert(u"install"_q, u"in-"_q + QString(25, u'a') + u'b');
 	invalid(changed, Purple::SyncLocalError::InvalidId);
 	changed = full;
-	changed.insert(u"version"_q, 2);
+	changed.insert(u"version"_q, 3);
 	CHECK(Purple::ParseSyncLocalState(
 		QJsonDocument(changed).toJson(QJsonDocument::Compact)).status
 		== Purple::SyncLocalStatus::NewerVersion);

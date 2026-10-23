@@ -7,9 +7,9 @@
 # proving that takes a few hundred fixture edits - far too slow to iterate on
 # through a full app build.
 #
-# Two programs run: test_config covers the parser, splicer, engine and sync
-# records; test_sync_flow covers the settings sync flow built on them. The
-# core sources compile once and both link against the same objects.
+# Three programs run: test_config covers the parser, splicer, engine and sync
+# records; test_sync_flow covers the settings flow; test_sync_chat covers peer
+# tokens and chat decisions. All link against the same core objects.
 #
 # Qt Core is the one thing this cannot vendor. On macOS it is looked for as a
 # framework under QT_PREFIX, defaulting to the merged prefix the tdesktop fork
@@ -29,6 +29,8 @@ if [ ! -d "$QtPrefix/frameworks/QtCore.framework" ]; then
 fi
 
 Sources=(
+    purple/purple_peer_token.cpp
+    purple/purple_sync_chat.cpp
     purple/purple_account_files.cpp
     purple/purple_local_choice.cpp
     purple/purple_settings.cpp
@@ -72,12 +74,16 @@ for Source in "${Sources[@]}"; do
     clang++ "${Flags[@]}" -c -o "$Object" "$RepoPath/$Source" &
     Pids+=($!)
 done
+CompileStatus=0
 for Pid in "${Pids[@]}"; do
-    wait "$Pid"
+    wait "$Pid" || CompileStatus=1
 done
+if [ "$CompileStatus" != 0 ]; then
+    exit "$CompileStatus"
+fi
 
 Status=0
-for Test in test_config test_sync_flow; do
+for Test in test_config test_sync_flow test_sync_chat; do
     clang++ "${Flags[@]}" -o "$BuildPath/$Test" \
         "$RepoPath/tests/$Test.cpp" \
         "${Objects[@]}" \

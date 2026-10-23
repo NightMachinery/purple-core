@@ -2767,7 +2767,7 @@ void TestRootStoreRelinkProof() {
 	broken.add(QByteArray("{\"not\":\"a record\"}"));
 	CHECK(!prove(device, broken.inventory()).proven);
 	auto badState = device;
-	badState.state->version = 2;
+	badState.state->version = 3;
 	CHECK(!prove(badState, cloud.inventory()).proven);
 	auto usingGood = device;
 	usingGood.local.usingLastGood = true;

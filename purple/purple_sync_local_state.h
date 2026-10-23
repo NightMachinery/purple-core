@@ -7,6 +7,8 @@ option) any later version.
 */
 #pragma once
 
+#include "purple/purple_peer_token.h"
+
 #include <QtCore/QByteArray>
 #include <QtCore/QJsonObject>
 #include <QtCore/QString>
@@ -70,6 +72,7 @@ struct SyncLocalState {
 	SyncLocalConfigState configData;
 	std::vector<SyncOwnMessage> ownMessages;
 	QJsonObject preserved;
+	PeerToken chat;
 };
 
 enum class SyncLocalStatus {
@@ -92,6 +95,7 @@ enum class SyncLocalError {
 	InvalidOwnMessages,
 	InvalidIssuedRecords,
 	InvalidBindingToken,
+	InvalidChatToken,
 };
 
 struct SyncLocalParseResult {

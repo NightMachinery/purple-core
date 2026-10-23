@@ -430,7 +430,7 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 	if (!SafeInteger(version) || version.toDouble() == 0) {
 		return Invalid(SyncLocalError::FieldType);
 	}
-	if (version.toDouble() > 1) {
+	if (version.toDouble() > 2) {
 		return { SyncLocalStatus::NewerVersion, SyncLocalError::None, {} };
 	}
 	for (const auto &field : {
@@ -442,6 +442,17 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 		if (!document.contains(field)) {
 			return Invalid(SyncLocalError::MissingField);
 		}
+	}
+	const auto chatValue = document.value(u"chat"_q);
+	auto chat = std::optional(PeerToken());
+	if (version.toDouble() == 2) {
+		chat = chatValue.isString()
+			? ParsePeerToken(chatValue.toString()) : std::nullopt;
+		if (!chat) {
+			return Invalid(SyncLocalError::InvalidChatToken);
+		}
+	} else if (!chatValue.isUndefined()) {
+		return Invalid(SyncLocalError::InvalidChatToken);
 	}
 	const auto install = document.value(u"install"_q);
 	const auto createdDevice = document.value(u"created_device"_q);
@@ -475,6 +486,8 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 		return Invalid(SyncLocalError::FieldType);
 	}
 	auto state = SyncLocalState();
+	state.version = int(version.toDouble());
+	state.chat = *chat;
 	state.install = install.toString();
 	state.createdDevice = createdDevice.toString();
 	state.space = space.toString();
@@ -495,11 +508,16 @@ SyncLocalParseResult ParseSyncLocalState(const QByteArray &json) {
 }
 
 SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
-	if (state.version > 1) {
+	if (state.version > 2) {
 		return { {}, SyncLocalStatus::NewerVersion };
 	}
-	if (state.version != 1) {
+	if (state.version != 1 && state.version != 2) {
 		return { {}, SyncLocalStatus::Invalid, SyncLocalError::InvalidValue };
+	}
+	const auto chat = PeerTokenText(state.chat);
+	if (!chat || (state.version == 1
+		&& (state.chat != PeerToken() || state.preserved.contains(u"chat"_q)))) {
+		return { {}, SyncLocalStatus::Invalid, SyncLocalError::InvalidChatToken };
 	}
 	if (!state.bindingToken.isEmpty()
 		&& !ValidBindingToken(state.bindingToken)) {
@@ -545,6 +563,9 @@ SyncLocalWriteResult SerializeSyncLocalState(const SyncLocalState &state) {
 	}
 	auto document = state.preserved;
 	document.insert(u"version"_q, state.version);
+	if (state.version == 2) {
+		document.insert(u"chat"_q, *chat);
+	}
 	document.insert(u"install"_q, state.install);
 	document.insert(u"created_device"_q, state.createdDevice);
 	document.insert(u"space"_q, state.space);

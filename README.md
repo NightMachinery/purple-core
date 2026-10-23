@@ -19,6 +19,12 @@ boundaries, defaults, writer behavior and the remaining integration work.
 List-member edits, inherited-comment copying and lossless device-local Work
 Mode choice edits are documented in [list member writes](docs/list-member-writes.md).
 
+## Sync chat contracts
+
+The shared [sync chat core](docs/sync-chat-core.md) provides typed peer tokens,
+mark grammar, conservative eligibility, deterministic resolution from supplied
+facts, and chat-scoped state v2 with a pending-safe move transition. Server discovery/ownership probes and client carry remain separate work.
+
 ## What is here
 
 - `purple/purple_local_choice.{h,cpp}` - validates stable production/test
@@ -388,7 +394,8 @@ notification mute decisions.
 harness and drives them against several hundred fixture documents - far too
 slow to iterate on through a full app build, which is the point.
 `tests/test_sync_flow.cpp` runs the settings sync flow end to end on in-memory
-devices; `run.sh` compiles the core once and runs both.
+devices; `tests/test_sync_chat.cpp` covers peer tokens, marks, eligibility and
+chat resolution. `run.sh` compiles the core once and runs all three.
 
 ```sh
 QT_PREFIX=/path/to/qt tests/run.sh
