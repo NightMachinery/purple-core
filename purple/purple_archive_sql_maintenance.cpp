@@ -108,9 +108,9 @@ std::optional<QByteArray> SealPurge(const ArchiveSqlPurge &purge, const ArchiveS
 
 void Guard(ArchiveSqlProgram &program, const ArchiveState &header, const ArchiveSqlSecurity &security) {
 	program.statements.push_back({ u"BEGIN IMMEDIATE"_q });
-	program.statements.push_back({ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=1 AND account_token=? "
+	program.statements.push_back({ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=? AND schema_fingerprint=? AND account_token=? "
 		"AND store_id=? AND revision=? AND generation=? AND maintenance_id=''"_q,
-		{ ArchiveSqlToken(header.account, ArchiveIndexKind::Account, "account", security), security.storeId,
+		{ int64(kArchiveSqlSchemaVersion), ArchiveSqlExpectedSchemaFingerprint(), ArchiveSqlToken(header.account, ArchiveIndexKind::Account, "account", security), security.storeId,
 			QString::number(header.revision), QString::number(header.accountGeneration) }, ArchiveSqlExpectation::OneRow });
 }
 
@@ -473,9 +473,9 @@ static ArchiveSqlMaintenancePlan ContinueArchiveSqlPurgePage(const ArchiveSqlPur
 		const auto operation = Operation(purge, security);
 		result.program.status = ArchiveSqlStatus::Ready;
 		result.program.statements.push_back({ u"BEGIN IMMEDIATE"_q });
-		result.program.statements.push_back({ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=1 AND account_token=? "
+		result.program.statements.push_back({ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=? AND schema_fingerprint=? AND account_token=? "
 			"AND store_id=? AND revision=? AND generation=? AND maintenance_id=?"_q,
-			{ ArchiveSqlToken(purge.account, ArchiveIndexKind::Account, "account", security), purge.storeId,
+			{ int64(kArchiveSqlSchemaVersion), ArchiveSqlExpectedSchemaFingerprint(), ArchiveSqlToken(purge.account, ArchiveIndexKind::Account, "account", security), purge.storeId,
 				QString::number(purge.revision), QString::number(purge.accountGeneration), operation }, ArchiveSqlExpectation::OneRow });
 		result.program.statements.push_back({ u"SELECT 1 FROM maintenance WHERE singleton=1 AND operation_id=? AND phase=? AND cursor=? AND kind=? AND scope_token=?"_q,
 			{ operation, int64(purge.phase), purge.cursor, int64(purge.kind), ScopeToken(purge, security) }, ArchiveSqlExpectation::OneRow });

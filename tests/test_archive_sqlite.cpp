@@ -9,6 +9,8 @@ option) any later version.
 
 #include <QtCore/QTemporaryDir>
 #include "purple/purple_archive_source.h"
+#include "purple/purple_archive_media_lifecycle.h"
+#include "purple/purple_archive_views.h"
 
 #include <sqlite3.h>
 
@@ -107,9 +109,17 @@ public:
 	}
 
 	std::optional<ArchiveSqlSlice> loadSlice(const AccountKey &account, const ArchiveSqlSecurity &security) {
-		const auto metadata = query({ u"SELECT schema_version,account_token,store_id FROM archive_meta WHERE singleton=1"_q,
+		const auto version = query({ u"SELECT schema_version FROM archive_meta WHERE singleton=1"_q,
 			{}, ArchiveSqlExpectation::OneRow });
-		if (!metadata || std::get<int64>((*metadata)[0][0]) != kArchiveSqlSchemaVersion
+		if (!version || CheckArchiveSqlVersion(std::get<int64>((*version)[0][0])) != ArchiveSqlStatus::Ready) { return {}; }
+		const auto metadata = query({ u"SELECT schema_version,account_token,store_id,schema_fingerprint FROM archive_meta WHERE singleton=1"_q,
+			{}, ArchiveSqlExpectation::OneRow });
+		const auto schema = query(ArchiveSqlReadSchema());
+		auto definitions = std::vector<QString>();
+		if (!schema) { return {}; }
+		for (const auto &row : *schema) { definitions.push_back(std::get<QString>(row[0])); }
+		if (!metadata || CheckArchiveSqlSchema(std::get<int64>((*metadata)[0][0]),
+			std::get<QString>((*metadata)[0][3]), definitions) != ArchiveSqlStatus::Ready
 			|| std::get<QString>((*metadata)[0][1]) != ArchiveSqlToken(account, ArchiveIndexKind::Account, "account", security)
 			|| std::get<QString>((*metadata)[0][2]) != security.storeId) { return {}; }
 		const auto kinds = std::vector<ArchiveRecordKind>{ ArchiveRecordKind::Account, ArchiveRecordKind::Message,
@@ -668,6 +678,8 @@ void LargeBoundedAccount(const QString &path) {
 	CHECK(success);
 	CHECK(sqlite3_finalize(statement) == SQLITE_OK);
 	CHECK(sqlite3_exec(database.raw(), "COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK);
+	const auto scopedCount = database.query(ArchiveSqlScopeCounts({ { header.account } }, security));
+	CHECK(scopedCount && std::get<int64>((*scopedCount)[0][0]) == 100000);
 	const auto request = Purge(header, ArchivePurgeKind::Trashbin);
 	const auto start = BeginArchiveSqlPurge(header, request, {}, u"large-purge"_q, security);
 	CHECK(start.program && start.program.statements.size() < 12);
@@ -1051,11 +1063,315 @@ void PurgeAdmission(const QString &path) {
 	ContinuePurge(database, begin.next, security);
 }
 
+void ApplyViewSql(Database &database, ArchiveState &state, const ArchiveTransaction &plan,
+		const ArchiveSqlSecurity &security) {
+	CHECK(plan);
+	if (!plan) { return; }
+	const auto write = std::find_if(plan.writes.begin(), plan.writes.end(), [](const auto &entry) {
+		return entry.operation == ArchiveStoreOperation::PutMessage;
+	});
+	CHECK(write != plan.writes.end() && write->message);
+	if (write == plan.writes.end() || !write->message) { return; }
+	const auto key = *write->message;
+	auto bounded = plan;
+	for (const auto slice : { &bounded.expected, &bounded.next }) {
+		std::erase_if(slice->messages, [&](const auto &entry) { return !SameArchiveMessage(entry.key, key); });
+		std::erase_if(slice->jobs, [&](const auto &entry) { return !SameArchiveMessage(entry.key, key); });
+		std::erase_if(slice->leases, [&](const auto &entry) { return !SameArchiveMessage(entry.key, key); });
+	}
+	const auto program = TranslateArchiveSql(bounded, security);
+	CHECK(program);
+	if (!program) { return; }
+	const auto committed = database.run(program);
+	CHECK(committed);
+	if (!committed) { return; }
+	state = plan.next;
+	CHECK(database.load(state.account, security) == state);
+}
+
+void DeletedViewsAndLifecycle(const QString &path) {
+	Section = "scoped deleted transcript lifecycle context paging counts and confirmation";
+	auto database = Database(path);
+	auto state = Empty();
+	const auto security = Security();
+	const auto epoch = ArchiveStoreEpoch{ state.account, security.storeId, 0 };
+	CHECK(database.run(InitializeArchiveSql(state, security)));
+	const auto primary = Key().chat;
+	const auto alias = ArchiveChatKey{ ArchiveChatKind::Group, 44 };
+	for (auto i = 0; i != 9; ++i) {
+		auto key = Key(state.account, i == 5 ? 46 : 45, 100 + i);
+		if (i == 2) { key.chat = alias; key.messageId = 100; }
+		if (i == 3) { key.representation = u"translation:fa"_q; }
+		if (i == 4) { key.collection = ArchiveCollection::Scheduled; }
+		if (i != 7) {
+			auto event = Event(state, u"base"_q + QString::number(i), 1, u"original caption"_q, ArchiveOrigin::Baseline, key);
+			event.observation.topicId = i == 1 ? 2 : 1;
+			event.observation.context = { { u"sender"_q, u"fixture-sender"_q }, { u"reply"_q, u"99"_q } };
+			if (i == 1) { event.observation.serverTime = 0; }
+			if (i == 0 || i == 1 || i == 6) { AddMedia(event); }
+			if (i == 1) { event.content->media[0] = { u"photo:999"_q, u"photo"_q }; }
+			ApplyViewSql(database, state, PlanArchiveEvent(state, event), security);
+			if (i == 0) {
+				const auto job = Job(state, u"shared-copy"_q, event.id, key);
+				ApplyViewSql(database, state, PlanArchiveMediaStage(state, job), security);
+				ApplyViewSql(database, state, PlanArchiveScopedMediaCompletion(state, epoch, epoch, job.id, MediaSuccess()), security);
+				event.id = u"edit0"_q;
+				event.order = 2;
+				event.origin = ArchiveOrigin::AuthoritativeEdit;
+				event.content->text = u"edited caption"_q;
+				event.observation.serverTime = 95;
+				ApplyViewSql(database, state, PlanArchiveEvent(state, event), security);
+			}
+		}
+		if (i == 6) { continue; }
+		if (i == 1 || i == 2) {
+			const auto &version = Message(state, key).versions.back();
+			if (i == 2) {
+				ApplyViewSql(database, state, PlanArchiveEvent(state, Event(state, u"delete2"_q, 2, {}, ArchiveOrigin::MediaConsumption, key)), security);
+			} else {
+				auto fact = ArchiveMediaLifecycleFact();
+				fact.source = { epoch, key, version.id, version.revision, ArchiveContentHash(version.content),
+					version.content.media[0].identity, ArchiveGenerationFor(state, key.chat) };
+				fact.lifetime = ArchiveMediaLifetime::ViewOnce;
+				fact.transition = ArchiveMediaTransition::ExpiredReplacement;
+				fact.destroysContent = true;
+				fact.eventId = u"expire1"_q;
+				fact.order = 2;
+				fact.observedAt = 110;
+				const auto eviction = [&] {
+					auto evicted = fact;
+					evicted.transition = ArchiveMediaTransition::CacheEviction;
+					return PlanArchiveMediaLifecycle(state, epoch, evicted);
+				}();
+				CHECK(eviction.transaction.status == ArchivePlanStatus::NoChange && !Message(state, key).deleted);
+				const auto expire = PlanArchiveMediaLifecycle(state, epoch, fact);
+				CHECK(expire.retention == ArchiveMediaRetention::Unavailable && expire.captureBeforeDestruction);
+				ApplyViewSql(database, state, expire.transaction, security);
+			}
+		} else {
+			ApplyViewSql(database, state, PlanArchiveEvent(state, Event(state, u"delete"_q + QString::number(i),
+				i == 0 ? 3 : 2, {}, i == 8 ? ArchiveOrigin::LocalDelete : ArchiveOrigin::AuthoritativeDelete, key)), security);
+		}
+	}
+	auto scope = ArchiveViewScope{ { state.account, primary, { alias } }, {}, ArchiveCollection::Received, u"original"_q };
+	const auto counts = database.query(ArchiveSqlScopeCounts(scope, security));
+	CHECK(counts && counts->size() == 1);
+	if (!counts) { return; }
+	const auto expected = std::vector<int64>{ 6, 5, 6, 1, 4, 3, 1 };
+	for (auto i = size_t(0); i != expected.size(); ++i) { CHECK(std::get<int64>((*counts)[0][i]) == expected[i]); }
+	const auto blobs = database.query(ArchiveSqlScopeBlobs(scope, 1, security));
+	CHECK(blobs && blobs->size() == 1);
+	if (!blobs || blobs->empty()) { return; }
+	CHECK(std::get<QString>((*blobs)[0][1]) == u"7"_q);
+	CHECK(database.query(ArchiveSqlScopeBlobs(scope, 1, security, std::get<QString>((*blobs)[0][0])))->empty());
+	const auto blobRow = OpenRow(state.account, std::get<QString>((*blobs)[0][0]), ArchiveRecordKind::Blob,
+		std::get<QByteArray>((*blobs)[0][2]), security);
+	CHECK(blobRow && std::get<ArchiveBlob>(blobRow->value).size == 7);
+
+	auto order = std::vector<QString>();
+	for (const auto direction : { ArchiveTranscriptOrder::Chronological, ArchiveTranscriptOrder::ReverseChronological }) {
+		auto cursor = std::optional<ArchiveTranscriptCursor>();
+		auto seen = std::vector<QString>();
+		for (auto page = 0; page != 4; ++page) {
+			const auto rows = database.query(ArchiveSqlDeletedView(scope, 2, security, cursor, direction));
+			CHECK(rows && rows->size() <= 2);
+			if (!rows || rows->empty()) { break; }
+			for (const auto &row : *rows) {
+				const auto token = std::get<QString>(row[0]);
+				CHECK(std::find(seen.begin(), seen.end(), token) == seen.end());
+				seen.push_back(token);
+				const auto shell = OpenRow(state.account, token, ArchiveRecordKind::Message, std::get<QByteArray>(row[3]), security);
+				CHECK(shell);
+				if (!shell) { continue; }
+				const auto &message = std::get<ArchiveMessage>(shell->value);
+				CHECK(ArchiveMessageDeletedStatus(message) != ArchiveDeletedStatus::NotDeleted);
+				if (!std::get<QString>(row[4]).isEmpty()) {
+					const auto head = OpenRow(state.account, token + '/' + std::get<QString>(row[4]), ArchiveRecordKind::Version,
+						std::get<QByteArray>(row[5]), security);
+					CHECK(head);
+					if (head) {
+						const auto &snapshot = std::get<ArchiveVersionSnapshot>(head->value);
+						CHECK(ArchiveDeletedViewMatches(scope, message, &snapshot));
+						if (message.key.messageId == 100 && SameArchiveChat(message.key.chat, primary)) { CHECK(std::get<int64>(row[1]) == 90); }
+						if (message.key.messageId == 101) { CHECK(std::get<int64>(row[1]) == 100); }
+						CHECK(snapshot.version.observation.context.value(u"sender"_q) == u"fixture-sender"_q);
+						CHECK(snapshot.version.observation.context.value(u"reply"_q) == u"99"_q);
+					}
+				} else { CHECK(std::holds_alternative<std::nullptr_t>(row[5])); }
+				cursor = ArchiveTranscriptCursor{ std::get<int64>(row[1]), std::get<int64>(row[2]), token };
+			}
+			if (rows->size() < 2) { break; }
+		}
+		CHECK(seen.size() == 5);
+		CHECK(database.query(ArchiveSqlDeletedView(scope, 2, security, cursor, direction))->empty());
+		if (direction == ArchiveTranscriptOrder::Chronological) { order = seen; }
+		else { std::reverse(seen.begin(), seen.end()); CHECK(seen == order); }
+	}
+	scope.topic = ArchiveTopicScope{ primary, 1 };
+	CHECK(database.query(ArchiveSqlDeletedView(scope, 128, security))->size() == 2);
+	const auto topic = database.query(ArchiveSqlScopeCounts(scope, security));
+	CHECK(topic && std::get<int64>((*topic)[0][0]) == 3);
+	scope.topic->chat = alias;
+	CHECK(database.query(ArchiveSqlDeletedView(scope, 128, security))->size() == 1);
+	scope.topic = ArchiveTopicScope{ primary, 1 };
+	const auto aliasKey = Key(state.account, alias.id, 100, alias.kind);
+	const auto aliasToken = ArchiveSqlMessageId(aliasKey, security);
+	CHECK(database.query({ u"UPDATE messages SET topic_token=? WHERE message_key=?"_q,
+		{ ArchiveSqlTopicId(primary, state.account, 1, security), aliasToken }, ArchiveSqlExpectation::OneChange }));
+	const auto misleading = database.query(ArchiveSqlDeletedView(scope, 128, security));
+	CHECK(misleading && misleading->size() == 3);
+	for (const auto &row : *misleading) {
+		if (std::get<QString>(row[0]) != aliasToken) { continue; }
+		const auto shell = OpenRow(state.account, aliasToken, ArchiveRecordKind::Message, std::get<QByteArray>(row[3]), security);
+		const auto head = OpenRow(state.account, aliasToken + '/' + std::get<QString>(row[4]), ArchiveRecordKind::Version,
+			std::get<QByteArray>(row[5]), security);
+		CHECK(shell && head);
+		CHECK(!ArchiveDeletedViewMatches(scope, std::get<ArchiveMessage>(shell->value), &std::get<ArchiveVersionSnapshot>(head->value)));
+	}
+	CHECK(database.query({ u"UPDATE messages SET topic_token=? WHERE message_key=?"_q,
+		{ ArchiveSqlTopicId(alias, state.account, 1, security), aliasToken }, ArchiveSqlExpectation::OneChange }));
+	scope.topic.reset();
+	auto wrong = scope;
+	++wrong.messages.account.environment;
+	CHECK(database.query(ArchiveSqlDeletedView(wrong, 128, security))->empty());
+	CHECK(!database.query(ArchiveSqlScopeCounts(wrong, security)));
+	CHECK(database.query(ArchiveSqlScopeBlobs(wrong, 128, security))->empty());
+	const auto accountCounts = database.query(ArchiveSqlScopeCounts({ { state.account } }, security));
+	CHECK(accountCounts && std::get<int64>((*accountCounts)[0][0]) == 9);
+	{
+		auto otherDatabase = Database(path + u"-other-account"_q);
+		auto otherState = Empty({ 1, state.account.userId });
+		const auto otherKey = Key(otherState.account, primary.id, 100, primary.kind);
+		CHECK(otherDatabase.run(InitializeArchiveSql(otherState, security)));
+		ApplyViewSql(otherDatabase, otherState, PlanArchiveEvent(otherState,
+			Event(otherState, u"same-id"_q, 1, u"other account"_q, ArchiveOrigin::Baseline, otherKey)), security);
+		ApplyViewSql(otherDatabase, otherState, PlanArchiveEvent(otherState,
+			Event(otherState, u"same-id-delete"_q, 2, {}, ArchiveOrigin::AuthoritativeDelete, otherKey)), security);
+		auto otherScope = scope;
+		otherScope.messages.account = otherState.account;
+		const auto ownRows = otherDatabase.query(ArchiveSqlDeletedView(otherScope, 128, security));
+		CHECK(ownRows && ownRows->size() == 1);
+		CHECK(std::get<QString>((*ownRows)[0][0]) != ArchiveSqlMessageId(Key(state.account, primary.id, 100, primary.kind), security));
+		CHECK(otherDatabase.query(ArchiveSqlDeletedView(scope, 128, security))->empty());
+		CHECK(!otherDatabase.query(ArchiveSqlScopeCounts(scope, security)));
+	}
+
+
+	const auto confirmation = MakeArchivePurgeConfirmation(HeaderOnly(state), epoch, ArchivePurgeKind::Trashbin, scope.messages);
+	CHECK(confirmation);
+	if (!confirmation) { return; }
+	const auto before = BeginArchiveSqlPurge(HeaderOnly(state), confirmation->request,
+		{ { primary, 0 }, { alias, 0 } }, u"old-confirmation"_q, security);
+	CHECK(before.program);
+	const auto extra = Key(state.account, 46, 999);
+	ApplyViewSql(database, state, PlanArchiveEvent(state, Event(state, u"racing"_q, 1, u"new"_q, ArchiveOrigin::Baseline, extra)), security);
+	CHECK(!ConfirmArchivePurge(HeaderOnly(state), epoch, ArchivePurgeKind::Trashbin, scope.messages, *confirmation));
+	CHECK(!database.run(before.program));
+	const auto fresh = MakeArchivePurgeConfirmation(HeaderOnly(state), epoch, ArchivePurgeKind::Trashbin, scope.messages);
+	const auto request = ConfirmArchivePurge(HeaderOnly(state), epoch, ArchivePurgeKind::Trashbin, scope.messages, *fresh);
+	CHECK(request);
+	if (!request) { return; }
+	ApplyPurge(database, state, *request, security);
+	const auto after = database.query(ArchiveSqlScopeCounts(scope, security));
+	CHECK(after && std::get<int64>((*after)[0][0]) == 1 && std::get<int64>((*after)[0][1]) == 0);
+	CHECK(database.query(ArchiveSqlDeletedView(scope, 128, security))->empty());
+	CHECK(database.query(ArchiveSqlScopeBlobs(scope, 128, security))->size() == 1);
+	CHECK(CountArchiveBlobReferences(state, BlobId).versions == 1);
+	CHECK(database.query(ArchiveSqlGarbagePage(128))->empty());
+	CHECK(PlanArchiveScopedMediaCompletion(state, epoch, epoch, u"shared-copy"_q, MediaSuccess()).status == ArchivePlanStatus::Stale);
+}
+
+void ReviewOldSqlShape(const QString &path) {
+	Section = "SQLite unreleased format-one refusal";
+	auto database = Database(path);
+	auto oldSchema = ArchiveSqlSchema();
+	for (auto definition : oldSchema) {
+		if (definition.startsWith(u"CREATE INDEX deleted_topic "_q)) { continue; }
+		definition.replace(u",schema_fingerprint TEXT NOT NULL"_q, QString());
+		definition.replace(u",topic_token TEXT NOT NULL DEFAULT '',collection INTEGER NOT NULL DEFAULT 0,representation_token TEXT NOT NULL DEFAULT ''"_q, QString());
+		CHECK(database.query({ definition }));
+	}
+	CHECK(database.query({ u"INSERT INTO archive_meta VALUES(1,1,'old-account','old-store','0','0','',X'00')"_q, {}, ArchiveSqlExpectation::OneChange }));
+	const auto version = database.query({ u"SELECT schema_version FROM archive_meta WHERE singleton=1"_q,
+		{}, ArchiveSqlExpectation::OneRow });
+	CHECK(version);
+	CHECK(CheckArchiveSqlVersion(std::get<int64>((*version)[0][0])) == ArchiveSqlStatus::SchemaMismatch);
+	CHECK(!database.loadSlice(Empty().account, Security()));
+	const auto schema = database.query(ArchiveSqlReadSchema());
+	CHECK(schema);
+	auto definitions = std::vector<QString>();
+	for (const auto &row : *schema) { definitions.push_back(std::get<QString>(row[0])); }
+	CHECK(CheckArchiveSqlSchema(1, {}, definitions) == ArchiveSqlStatus::SchemaMismatch);
+	CHECK(CheckArchiveSqlSchema(2, ArchiveSqlExpectedSchemaFingerprint(), definitions) == ArchiveSqlStatus::SchemaMismatch);
+	CHECK(!database.run(InitializeArchiveSql(Empty(), Security())));
+	CHECK(database.query({ u"SELECT schema_version FROM archive_meta WHERE singleton=1"_q,
+		{}, ArchiveSqlExpectation::OneRow }) == version);
+}
+
+void ReviewSqlFences(const QString &path) {
+	Section = "SQLite review event, historical job and shape fences";
+	auto database = Database(path);
+	auto state = Empty();
+	const auto security = Security();
+	const auto epoch = ArchiveStoreEpoch{ state.account, security.storeId, 1 };
+	CHECK(database.run(InitializeArchiveSql(state, security)));
+	CHECK(database.load(state.account, security) == state);
+	auto first = Event(state, u"v1"_q, 1, u"TTL v1"_q);
+	AddMedia(first);
+	ApplySql(database, state, PlanArchiveEvent(state, first), security);
+	const auto &v = Message(state).versions.back();
+	auto fact = ArchiveMediaLifecycleFact();
+	fact.source = { epoch, Key(), v.id, v.revision, ArchiveContentHash(v.content),
+		v.media[0].identity, ArchiveGenerationFor(state, Key().chat) };
+	fact.lifetime = ArchiveMediaLifetime::Ttl;
+	fact.destroysContent = true;
+	fact.eventId = u"expiry"_q;
+	fact.order = 3;
+	fact.observedAt = 110;
+	const auto prepared = PlanArchiveMediaLifecycle(state, epoch, fact);
+	CHECK(prepared.event);
+	if (!prepared.event) { return; }
+	ApplySql(database, state, PlanArchiveMediaStage(state, Job(state, u"copy-v1"_q, u"v1"_q)), security);
+	auto second = Event(state, u"v2"_q, 2, u"non-expiring v2"_q, ArchiveOrigin::AuthoritativeEdit);
+	AddMedia(second);
+	second.content->media[0].identity = u"document:other"_q;
+	ApplySql(database, state, PlanArchiveEvent(state, second), security);
+	const auto loaded = database.loadSlice(state.account, security);
+	CHECK(loaded);
+	if (!loaded) { return; }
+	const auto stale = PlanArchiveSqlCapture(*loaded, *prepared.event, security, &epoch);
+	CHECK(stale.transaction.status == ArchivePlanStatus::Stale);
+	CHECK(!database.run(stale.program));
+	CHECK(database.load(state.account, security) == state);
+	const auto head = Message(state).versions.back();
+	const auto headFrame = database.query(ArchiveSqlReadVersion(Key(), u"v2"_q, security));
+	CHECK(headFrame && headFrame->size() == 1);
+	ApplySql(database, state, PlanArchiveScopedMediaCompletion(state, epoch, epoch, u"copy-v1"_q, MediaSuccess()), security);
+	CHECK(Message(state).versions.front().media[0].state == ArchiveMediaState::Complete);
+	CHECK(Message(state).versions.back() == head);
+	CHECK(database.query(ArchiveSqlReadVersion(Key(), u"v2"_q, security)) == headFrame);
+	CHECK(database.query({ u"UPDATE archive_meta SET schema_fingerprint='wrong' WHERE singleton=1"_q, {}, ArchiveSqlExpectation::OneChange }));
+	CHECK(!database.loadSlice(state.account, security));
+	CHECK(!database.run(TranslateArchiveSql(PlanArchiveEvent(state, Event(state, u"blocked"_q, 4)), security)));
+	CHECK(database.query({ u"UPDATE archive_meta SET schema_fingerprint=? WHERE singleton=1"_q,
+		{ ArchiveSqlExpectedSchemaFingerprint() }, ArchiveSqlExpectation::OneChange }));
+	CHECK(database.load(state.account, security) == state);
+	CHECK(database.query({ u"CREATE INDEX draft_drift ON messages(deleted)"_q }));
+	CHECK(!database.loadSlice(state.account, security));
+	CHECK(database.query({ u"DROP INDEX draft_drift"_q }));
+	CHECK(database.load(state.account, security) == state);
+	CHECK(database.query({ u"UPDATE archive_meta SET schema_version=1 WHERE singleton=1"_q, {}, ArchiveSqlExpectation::OneChange }));
+	CHECK(!database.loadSlice(state.account, security));
+}
+
 }
 
 int main() {
 	const auto directory = QTemporaryDir();
 	CHECK(directory.isValid());
+	ReviewSqlFences(directory.path() + u"/review-fences.sqlite"_q);
+	ReviewOldSqlShape(directory.path() + u"/review-old-shape.sqlite"_q);
+	DeletedViewsAndLifecycle(directory.path() + u"/deleted-views.sqlite"_q);
 	for (const auto bytes : { 50000, 1024 * 1024, 10 * 1024 * 1024 }) {
 		for (const auto kind : { ArchivePurgeKind::Trashbin, ArchivePurgeKind::EditHistory }) {
 			for (const auto own : { false, true }) {

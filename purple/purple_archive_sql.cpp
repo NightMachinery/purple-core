@@ -10,6 +10,7 @@ option) any later version.
 #include "purple/purple_archive_sql_internal.h"
 
 #include <QtCore/QSet>
+#include <QtCore/QCryptographicHash>
 
 #include <algorithm>
 #include <limits>
@@ -87,14 +88,22 @@ public:
 		auto shell = message;
 		shell.versions.clear();
 		shell.receipts.clear();
-		const auto date = message.versions.empty() ? message.deletedObservedAt : message.versions.front().observation.serverTime;
+		const auto date = message.versions.empty() ? message.deletedObservedAt
+			: message.versions.front().observation.serverTime > 0 ? message.versions.front().observation.serverTime
+			: message.versions.front().firstObservedAt;
 		const auto head = message.versions.empty() ? QString()
 			: ChildToken(ArchiveSqlChildId(message.key, ArchiveIndexKind::Version, message.versions.back().id, security));
-		add({ u"INSERT INTO messages(message_key,chat_kind,chat_token,message_id,deleted,purged,transcript_date,head_version,causal_order,envelope) "
-			"VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(message_key) DO UPDATE SET deleted=excluded.deleted,purged=excluded.purged,"
-			"head_version=excluded.head_version,causal_order=excluded.causal_order,envelope=excluded.envelope"_q,
+		const auto topic = message.versions.empty() ? QString()
+			: ArchiveSqlTopicId(message.key.chat, account, message.versions.back().observation.topicId, security);
+		const auto representation = token(ArchiveIndexKind::Representation, message.key.representation.toUtf8());
+		if ((!message.versions.empty() && topic.isEmpty()) || representation.isEmpty()) { program.status = ArchiveSqlStatus::EncodingFailed; return; }
+		add({ u"INSERT INTO messages(message_key,chat_kind,chat_token,message_id,deleted,purged,transcript_date,head_version,causal_order,envelope,topic_token,collection,representation_token) "
+			"VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(message_key) DO UPDATE SET deleted=excluded.deleted,purged=excluded.purged,"
+			"head_version=excluded.head_version,causal_order=excluded.causal_order,envelope=excluded.envelope,"
+			"topic_token=excluded.topic_token,collection=excluded.collection,representation_token=excluded.representation_token"_q,
 			{ id, int64(message.key.chat.kind), chat, message.key.messageId, int64(message.deleted), int64(message.payloadPurged),
-				date, head, ArchiveSqlOrder(message.order), seal(id, std::move(shell)) }, ArchiveSqlExpectation::OneChange });
+				date, head, ArchiveSqlOrder(message.order), seal(id, std::move(shell)), topic,
+				int64(message.key.collection), representation }, ArchiveSqlExpectation::OneChange });
 		for (const auto &version : message.versions) {
 			const auto old = before ? std::find_if(before->versions.begin(), before->versions.end(),
 				[&](const auto &entry) { return entry.id == version.id; }) : message.versions.end();
@@ -181,7 +190,7 @@ QString ArchiveSqlToken(const AccountKey &account, ArchiveIndexKind kind,
 	const auto accountId = AccountKeyText(account.environment, account.userId);
 	if (!accountId || !security.hmacSha256 || !IsArchiveToken(security.storeId)
 		|| security.storeId.size() > 128 || identity.isEmpty()
-		|| int(kind) < 0 || int(kind) > int(ArchiveIndexKind::Maintenance)) { return {}; }
+		|| int(kind) < 0 || int(kind) > int(ArchiveIndexKind::Representation)) { return {}; }
 	auto input = QByteArray("purple-archive-index-v1");
 	Field(input, accountId->toUtf8());
 	Field(input, security.storeId.toUtf8());
@@ -199,6 +208,14 @@ QString ArchiveSqlMessageId(const ArchiveMessageKey &key, const ArchiveSqlSecuri
 QString ArchiveSqlChatId(const ArchiveChatKey &key, const AccountKey &account, const ArchiveSqlSecurity &security) {
 	return IsArchiveChatKey(key) ? ArchiveSqlToken(account, ArchiveIndexKind::Chat,
 		(QString::number(int(key.kind)) + '/' + QString::number(key.id)).toUtf8(), security) : QString();
+}
+
+QString ArchiveSqlTopicId(const ArchiveChatKey &chat, const AccountKey &account,
+		int64 topicId, const ArchiveSqlSecurity &security) {
+	if (topicId < 0) { return {}; }
+	const auto parent = ArchiveSqlChatId(chat, account, security);
+	return parent.isEmpty() ? QString() : ArchiveSqlToken(account, ArchiveIndexKind::Topic,
+		(parent + '/' + QString::number(topicId)).toUtf8(), security);
 }
 
 QString ArchiveSqlChildId(const ArchiveMessageKey &key, ArchiveIndexKind kind,
@@ -233,11 +250,13 @@ std::vector<QString> ArchiveSqlSchema() {
 	return {
 		u"CREATE TABLE archive_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL,"
 		"account_token TEXT NOT NULL,store_id TEXT NOT NULL,revision TEXT NOT NULL,generation TEXT NOT NULL,"
-		"maintenance_id TEXT NOT NULL,envelope BLOB NOT NULL)"_q,
+		"maintenance_id TEXT NOT NULL,envelope BLOB NOT NULL,schema_fingerprint TEXT NOT NULL)"_q,
 		u"CREATE TABLE messages(position INTEGER PRIMARY KEY,message_key TEXT UNIQUE NOT NULL,chat_kind INTEGER NOT NULL,"
 		"chat_token TEXT NOT NULL,message_id INTEGER NOT NULL,deleted INTEGER NOT NULL,purged INTEGER NOT NULL,"
-		"transcript_date INTEGER NOT NULL,head_version TEXT NOT NULL,causal_order TEXT NOT NULL,envelope BLOB NOT NULL)"_q,
+		"transcript_date INTEGER NOT NULL,head_version TEXT NOT NULL,causal_order TEXT NOT NULL,envelope BLOB NOT NULL,"
+		"topic_token TEXT NOT NULL DEFAULT '',collection INTEGER NOT NULL DEFAULT 0,representation_token TEXT NOT NULL DEFAULT '')"_q,
 		u"CREATE INDEX deleted_transcript ON messages(chat_token,deleted,purged,transcript_date DESC,message_id DESC,message_key DESC)"_q,
+		u"CREATE INDEX deleted_topic ON messages(chat_token,topic_token,deleted,purged,transcript_date,message_id,message_key)"_q,
 		u"CREATE INDEX message_purge ON messages(chat_token,message_key)"_q,
 		u"CREATE TABLE versions(message_key TEXT NOT NULL,version_id TEXT NOT NULL,order_key TEXT NOT NULL,"
 		"chat_token TEXT NOT NULL,envelope BLOB NOT NULL,PRIMARY KEY(message_key,version_id),"
@@ -279,7 +298,46 @@ std::vector<QString> ArchiveSqlSchema() {
 
 ArchiveSqlStatus CheckArchiveSqlVersion(int64 version) {
 	return version == kArchiveSqlSchemaVersion ? ArchiveSqlStatus::Ready
-		: version > kArchiveSqlSchemaVersion ? ArchiveSqlStatus::ReadOnly : ArchiveSqlStatus::Invalid;
+		: version > kArchiveSqlSchemaVersion ? ArchiveSqlStatus::ReadOnly
+		: version > 0 ? ArchiveSqlStatus::SchemaMismatch : ArchiveSqlStatus::Invalid;
+}
+
+QString ArchiveSqlSchemaFingerprint(const std::vector<QString> &definitions) {
+	auto normalized = std::vector<QString>();
+	for (const auto &definition : definitions) { normalized.push_back(definition.trimmed()); }
+	std::sort(normalized.begin(), normalized.end());
+	auto bytes = QByteArray();
+	for (const auto &definition : normalized) { Field(bytes, definition.toUtf8()); }
+	return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+}
+
+QString ArchiveSqlExpectedSchemaFingerprint() {
+	static const auto fingerprint = ArchiveSqlSchemaFingerprint(ArchiveSqlSchema());
+	return fingerprint;
+}
+
+ArchiveSqlStatement ArchiveSqlReadSchema() {
+	const auto limit = int64(ArchiveSqlSchema().size()) + 1;
+	auto result = ArchiveSqlStatement{
+		u"SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY sql LIMIT ?"_q,
+		{ limit }, ArchiveSqlExpectation::Rows };
+	result.rows.maximum = limit;
+	return result;
+}
+
+ArchiveSqlStatus CheckArchiveSqlSchema(int64 version, const QString &recordedFingerprint,
+		const std::vector<QString> &definitions) {
+	const auto status = CheckArchiveSqlVersion(version);
+	if (status != ArchiveSqlStatus::Ready) { return status; }
+	const auto expected = ArchiveSqlExpectedSchemaFingerprint();
+	return recordedFingerprint == expected && definitions.size() == ArchiveSqlSchema().size()
+		&& ArchiveSqlSchemaFingerprint(definitions) == expected
+		? ArchiveSqlStatus::Ready : ArchiveSqlStatus::SchemaMismatch;
+}
+
+QString ArchiveSqlSchemaGuard() {
+	return u"schema_version="_q + QString::number(kArchiveSqlSchemaVersion)
+		+ u" AND schema_fingerprint='"_q + ArchiveSqlExpectedSchemaFingerprint() + u"'"_q;
 }
 
 bool IsBoundedArchiveSqlProgram(const ArchiveSqlProgram &program) {
@@ -305,9 +363,9 @@ ArchiveSqlProgram InitializeArchiveSql(const ArchiveState &empty, const ArchiveS
 		auto builder = Builder(empty.account, security);
 		builder.add({ u"BEGIN IMMEDIATE"_q });
 		for (const auto &sql : ArchiveSqlSchema()) { builder.add({ sql }); }
-		builder.add({ u"INSERT INTO archive_meta VALUES(1,?,?,?,?,?,'',?)"_q,
+		builder.add({ u"INSERT INTO archive_meta VALUES(1,?,?,?,?,?,'',?,?)"_q,
 			{ int64(kArchiveSqlSchemaVersion), builder.token(ArchiveIndexKind::Account, "account"), security.storeId,
-				QString::number(empty.revision), QString::number(empty.accountGeneration), builder.seal(u"account"_q, empty) },
+				QString::number(empty.revision), QString::number(empty.accountGeneration), builder.seal(u"account"_q, empty), ArchiveSqlExpectedSchemaFingerprint() },
 			ArchiveSqlExpectation::OneChange });
 		builder.add({ u"COMMIT"_q });
 		return builder.finish();
@@ -336,9 +394,9 @@ static ArchiveSqlProgram TranslateArchiveSqlMetadata(const ArchiveTransaction &t
 		}
 		auto builder = Builder(next.account, security, metadata);
 		builder.add({ u"BEGIN IMMEDIATE"_q });
-		builder.add({ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=? AND account_token=? "
+		builder.add({ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=? AND schema_fingerprint=? AND account_token=? "
 			"AND store_id=? AND revision=? AND generation=? AND maintenance_id=''"_q,
-			{ int64(kArchiveSqlSchemaVersion), builder.token(ArchiveIndexKind::Account, "account"), security.storeId,
+			{ int64(kArchiveSqlSchemaVersion), ArchiveSqlExpectedSchemaFingerprint(), builder.token(ArchiveIndexKind::Account, "account"), security.storeId,
 				QString::number(before.revision), QString::number(before.accountGeneration) }, ArchiveSqlExpectation::OneRow });
 		for (const auto &message : next.messages) {
 			const auto chat = ArchiveSqlChatId(message.key.chat, next.account, security);

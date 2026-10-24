@@ -149,8 +149,8 @@ ArchiveSqlProgram PlanArchiveCaptureGap(const ArchiveCaptureGap &gap,
 		const auto account = ArchiveSqlToken(gap.account, ArchiveIndexKind::Account, "account", security);
 		return { ArchiveSqlStatus::Ready, {
 			{ u"BEGIN IMMEDIATE"_q },
-			{ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=? AND account_token=? AND store_id=? AND maintenance_id=''"_q,
-				{ int64(kArchiveSqlSchemaVersion), account, gap.storeId }, ArchiveSqlExpectation::OneRow },
+			{ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=? AND schema_fingerprint=? AND account_token=? AND store_id=? AND maintenance_id=''"_q,
+				{ int64(kArchiveSqlSchemaVersion), ArchiveSqlExpectedSchemaFingerprint(), account, gap.storeId }, ArchiveSqlExpectation::OneRow },
 			{ u"INSERT INTO capture_gaps VALUES(?,?,?,?,?) ON CONFLICT(gap_id) DO UPDATE SET gap_id=excluded.gap_id "
 				"WHERE capture_gaps.fingerprint=excluded.fingerprint"_q,
 				{ gapToken, gap.observedAt, gap.reason,

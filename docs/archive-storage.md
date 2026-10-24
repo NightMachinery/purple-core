@@ -99,8 +99,11 @@ bytes before committing complete references.
 
 Schema 1 separates account metadata, message shells, versions, event receipts,
 owned blobs, media refs/jobs, reader leases, purge epochs, maintenance and capture
-gaps. Before opening an existing store, inspect its schema without narrowing
-integers and call `CheckArchiveSqlVersion`; unknown versions never receive DDL.
+gaps. The current unreleased store format is 2. Before admitting an existing
+connection, read its format without narrowing integers and preflight it with
+`CheckArchiveSqlVersion`. Then verify the recorded fingerprint and actual DDL
+with `CheckArchiveSqlSchema`, as specified under Draft store admission below.
+Old shapes and fingerprint drift refuse; there is no automatic migration.
 Only genuinely new stores execute `InitializeArchiveSql`. Enable and read back
 foreign keys, WAL and FULL synchronous mode on the owning connection. An ignored
 PRAGMA is not evidence of configuration. Serialize writers on a checked queue.
@@ -172,7 +175,7 @@ Use the normal pure event/media/lease reducer on that closed slice. SQL then
 checks account/store/revision/generations and the exact old head/order. It
 upserts only changed loaded versions/receipts and their media refs; it never
 erases unloaded history. Duplicate event-id fingerprints must agree. Shared
-media completion fan-out uses additional bounded version work; never gather
+media completion fills only the exact staged version; never gather
 every account reference into one model. A missing head/replay/dependency fact
 is an incomplete read, not permission to treat the account as empty.
 
@@ -262,8 +265,8 @@ work for a single item, not purge plan size or feasibility for another scope.
 The extra plaintext columns are opaque keyed body tokens, body byte/chunk counts
 and chunk ordinal; actual body hashes remain inside authenticated envelopes.
 Physical SQLite usage includes these bytes; logout's database removal includes
-them automatically. The schema is still an unreleased v1 contract, not a
-migration over an already released storage schema.
+them automatically. The store format is an unreleased format 2 contract, with no migration
+over an already released storage schema.
 
 ## Resumable purge, GC and usage
 
@@ -419,3 +422,102 @@ app's native build together with the existing archive codec/model/store/source.
 The codec includes the new lossless row API; no production SQLite linkage is
 introduced by core. Desktop's adapter should own its private SQLite target;
 Android's checked JNI shim should use its existing engine and dedicated queue.
+
+## Scoped deleted transcript and Settings queries
+
+`purple_archive_views.*` adds `ArchiveSqlDeletedView`, `ArchiveSqlScopeCounts`
+and `ArchiveSqlScopeBlobs`. They use the same account/store/security binding and
+maintenance gate. No query materializes the account in application memory.
+The unreleased SQL store format 2 projects keyed parent/topic and representation
+tokens plus the collection enum onto messages. Topic tokens include the actual
+parent chat; no raw topic/peer id or representation text is added to SQL. An
+unknown-topic bodyless tombstone has no topic token. The original deleted-query
+API remains available. Format 1 stores are refused; no automatic migration or ALTER is provided.
+Initialize only a genuinely new store. Draft data must remain untouched on
+refusal; recreation requires a separate explicit data-discard decision.
+
+Deleted-view scope is one parent plus at most 31 explicit migration aliases,
+with optional actual-parent topic, collection and representation filters. Set
+Received/original for the ordinary transcript; absent filters include every
+archived namespace. Pages return message token, stable transcript date, message
+id, encrypted shell, head-version token and optional encrypted head snapshot.
+A bodyless tombstone has no head. A nonempty head token with a missing frame or
+missing body chunks is corruption/a retention gap, never a bodyless fallback.
+The shell carries the observed deletion cause;
+the head retains sender/reply context and full renderable content. Restore body
+chunks before rendering a projected version. Unavailable/partial attachments
+remain labelled; no query downloads or revives newer content into old snapshots.
+
+Both chronological and reverse chronological traversal use the strict tuple
+(date, message id, message token). Preserve all cursor fields and one SQLite
+read snapshot across pages. Date is fixed at first insertion; when no server
+message time was observed, it falls back to first-observed time, or observed
+delete time for a bodyless tombstone. A later edit does not move the row.
+Limits stay 1..128. Authenticate shell/head frames under the returned expected
+ids, verify full decoded keys and run `ArchiveDeletedViewMatches` before display.
+A contradictory positive index result is corruption, not permission to display
+another scope. Index completeness/order and aggregate estimates retain the
+existing malicious-filesystem exclusions; never use a count as purge authority.
+
+ScopeCounts returns one row: tracked non-purged message identities, deleted
+identities (including expired/consumed), retained versions, prior versions,
+attachment references, complete references and distinct referenced blobs.
+The guarded account/store/maintenance metadata row must exist; a failed OneRow
+expectation is not a valid zero count. Counts are scoped index display data.
+A bodyless observed tombstone counts as a deleted identity but has no version.
+
+ScopeBlobs pages unique referenced blob tokens, canonical decimal byte counts
+and encrypted blob frames. Authenticate/decode each blob and verify the indexed
+size and Complete state against it, then sum its verified uint64 size once with overflow checking
+(for example `ContinueArchiveUsage` over ordered tokens). Do not SUM/CAST the
+wide decimal strings in SQL, multiply bytes by reference count, or count a
+shared current/trash blob twice. These are logical retained bytes. Account
+physical usage still uses existing DB/WAL/SHM/blob/staging scans and includes
+leased/GC-pending/unreferenced overhead; it is a display estimate during writes,
+not a promise of bytes released by a purge.
+
+Build the confirmation token from the same account/header snapshot used for
+counts. At confirm time reload the current header and external work epoch,
+revalidate the actual dialog scope through `ConfirmArchivePurge`, and pass its
+request to `BeginArchiveSqlPurge`. The existing SQL revision/generation guard
+closes the race between confirmation and the first durable purge transaction.
+A stale token, changed selected account, new store, changed aliases or logout
+must reopen confirmation, never silently target current UI selection. Purges
+still cover all topics/collections/representations of the named parent chats.
+
+Media lifecycle capture and its existing stage/completion use the normal
+bounded capture/translation path. `PlanArchiveScopedMediaCompletion` is the
+external-epoch gate around the existing media reducer; it introduces no new
+blob cache, ownership table or alternate purge/GC mechanism. The adapter still
+owns actual byte copying, hashing, queue serialization, durability and capture
+before upstream destruction. Add `purple_archive_media_lifecycle.cpp` and
+`purple_archive_views.cpp` to client native source lists.
+
+## Draft store admission and review fences
+
+The SQL store format is 2 (the logical archive snapshot/row format remains 1).
+`archive_meta.schema_fingerprint` records `ArchiveSqlExpectedSchemaFingerprint()`.
+On every connection open, read the format number first and call
+`CheckArchiveSqlVersion`; old positive formats return SchemaMismatch, future
+formats return ReadOnly. Do not run capture, maintenance or content reads first.
+For format 2, read the recorded fingerprint and all SQL strings returned by
+`ArchiveSqlReadSchema` from sqlite_schema in the same read snapshot. Pass them
+to `CheckArchiveSqlSchema`. Ready requires both the recorded fingerprint and
+the normalized, sorted actual DDL fingerprint to match the current core. Missing
+metadata or unreadable schema is refusal. Fingerprint drift is SchemaMismatch,
+not an empty archive. Do not migrate, overwrite, add missing columns or initialize
+an existing draft store. There is no released store to migrate. Version 2 also
+fences the 9a7fa48 writer, whose version-1 mutation guards refuse this store.
+Serialize schema changes and writers, and repeat admission on reopen. Mutation
+and new scoped-view guards also check the recorded fingerprint; this does not
+replace checking actual DDL on open. Existing token domains and encrypted row
+formats are unchanged except that media job rows now require revision/hash.
+
+A lifecycle event handed to `PlanArchiveSqlCapture` retains the captured external
+epoch and exact head/media fence. Supply the fresh external epoch via its final
+argument; a missing or changed epoch, changed head/revision/hash or purge epoch
+returns a Stale transaction with no executable program. The SQL compare guard
+still protects changes between planning and commit. A staged media completion
+may fill a retained historical version after a newer head exists, but only its
+captured version/revision/hash under unchanged purge and external epochs. It
+does not populate another version or cancel its independent staging job.

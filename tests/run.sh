@@ -38,6 +38,8 @@ Sources=(
     purple/purple_archive_sql.cpp
     purple/purple_archive_sql_body.cpp
     purple/purple_archive_sql_maintenance.cpp
+    purple/purple_archive_media_lifecycle.cpp
+    purple/purple_archive_views.cpp
     purple/purple_archive_lifecycle.cpp
     purple/purple_archive_source.cpp
     purple/purple_archive_model.cpp

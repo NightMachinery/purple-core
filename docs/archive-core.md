@@ -244,19 +244,20 @@ a retention gap, not success, and must not indefinitely block server updates.
 
 `ArchiveState` is a complete logical account inventory for these reference
 planners, not a page of cached messages. Preserve deterministic row ordering
-when reconstructing it. Purge and garbage collection especially need all
-scoped records/references/leases. The store can map operations to indexed rows;
-this batch does not implement an indexed/paged engine or benchmark its scale.
+when reconstructing it. Purge and garbage collection reference reducers especially need all scoped
+records/references/leases. Production uses the bounded SQL slices, indexed
+queries and maintenance plans in [the storage contract](archive-storage.md),
+not a whole-account reconstruction.
 
 ## Media, readers and garbage collection
 
 Media references distinguish missing, staged, complete and failed. Stage jobs
 bind account, message, exact version, immutable media identity and capture
-generation, plus optional expected size/hash. At most one job stages a reference.
+generation, captured revision and content hash, plus optional expected size/hash. At most one job stages a reference.
 A failed job has a bounded reason token and can be retried with a new job id.
 A verified owned copy is shared atomically across matching immutable media
-identities/kinds in the account. New versions reuse it, and completion can
-satisfy other pending references and cancel their duplicate jobs. Purge plans
+identities/kinds in the account. New versions and explicit stage operations can reuse it. A completion changes
+only its exact job version; other references and pending jobs are untouched. Purge plans
 attach an already owned copy to a retained latest body before dropping its
 prior owner, so emptying edit history cannot discard a current attachment.
 A ready stage plan can therefore attach an existing copy without starting a
@@ -373,3 +374,104 @@ staging/failure/integrity, scoped purges, stale jobs/readers/commits, shared
 blobs/leases and crash-retried GC.
 Client storage, TL adapters, encryption, actual byte reads and native UI remain
 future batches.
+
+## Expiring-media lifecycle boundary
+
+`purple_archive_media_lifecycle.*` accepts typed lifetime (ordinary, TTL,
+view-once or secret), transition (expiry, consumption, expired replacement or
+cache eviction), and source-byte availability facts. A source repeats the
+account/store work epoch, full message key, current retained version, causal
+revision, canonical content hash, immutable media identity and purge generation.
+It never accepts a pointer, cache path or recycled file name as an identity.
+Secret lifetime facts require the secret-chat namespace. Photo, video, voice
+and round-video descriptors use the same ownership contract.
+
+`PlanArchiveMediaLifecycle` requires that the pre-destruction body has already
+been durably captured. It derives existing MediaExpiry/MediaConsumption events
+only for a destructive transition of expiring media. An ordinary voice/round
+read or non-destructive consumption is NoChange; cache eviction is always
+NoChange and never creates deletion or expiry. A clear-media/service-placeholder
+replacement is an expiry fact, not a new baseline that overwrites the captured
+photo/video. Real authoritative/local deletion still uses its own existing
+origin. Retained views can distinguish Deleted, Expired and Consumed without
+inventing the actor or exact server deletion time.
+
+The lifetime/destruction assertion comes from the client's real protocol hook;
+core cannot infer it from a missing cache file. Capture actual lifetime/kind
+metadata in the normalized descriptor/observed payload while it is available.
+Do not classify ordinary media as expiring merely to discard a live message.
+
+Before upstream TTL destruction, clearMediaAsExpired-style replacement or
+view-once/secret/voice/round consumption: capture and durably acknowledge the
+original body, bind the source, and independently copy bytes already fetched by
+the existing auto-download/stream policy through the existing stage jobs. Then
+commit the lifecycle event before allowing upstream destructive mutation. There
+is no second cache and no extra download request. `captureBeforeDestruction`
+expresses that ordering barrier, not an acknowledgement of storage success.
+The client owns the write-ahead bridge and should report a retention gap if a
+capture/copy cannot complete; server updates must not wait indefinitely.
+
+`retention` is Owned only for an existing complete archive reference. Complete
+source bytes with no owned reference are NeedsCopy; short/streaming bytes are
+Partial, absent bytes are Unavailable. None is a successful empty attachment.
+Only existing verified stage/completion commits can make a reference Complete.
+Source expiry does not erase the retained body or an owned blob. One account's
+same immutable blob can serve current and trashed versions; purging trash must
+leave the current reference intact.
+
+`PlanArchiveScopedMediaCompletion` checks the captured external account/store
+work epoch before delegating to existing job/version/identity/purge-generation
+checks. Persist that captured epoch with asynchronous work and recheck it before
+publication and completion. Logout, re-login into a new store, account changes
+and purges cannot be repaired by supplying a newer epoch to old work. Completion
+may still attach to a retained historical or expired version, even after a newer
+version was captured. This is an explicit Edit History retention rule. Staging
+persists the exact version id, revision and canonical content hash in the job.
+Completion requires that same version, revision, hash and unchanged purge epoch;
+it never fills a different current version. `ArchiveMediaRefusal` distinguishes
+store/purge epoch, missing version, revision, content hash and media mismatches.
+A revision-only update also fences a pending job. Body/revision changes cancel
+its obsolete staged work, leaving the reference available for a freshly bound job. Job row/snapshot codecs now
+persist the revision and hash; unbound draft jobs are not admitted.
+
+A returned lifecycle event carries its external epoch, media identity and the
+version/revision/hash fence. `PlanArchiveEvent` checks the current head before
+applying it. For `PlanArchiveSqlCapture`, pass the freshly loaded external epoch
+as `currentEpoch`; omission or any account/store/work-epoch mismatch returns
+Stale. The fresh slice supplies the purge epochs and current head. Never replace
+the captured event epoch with the fresh epoch.
+
+The unreleased SQLite store format is now 2. Its recorded schema fingerprint
+and actual DDL must match the current core before admitting a connection. Old
+format 1 and draft shape drift refuse with SchemaMismatch; there is no automatic
+migration. See archive-storage.md for the open protocol.
+
+## Deleted views and confirmation scope
+
+`ArchiveViewScope` names one account, optionally one parent chat plus explicit
+migration aliases. Optional collection and representation filters avoid mixing
+scheduled/quick-reply or translated rows with the ordinary received original
+transcript. No filter means all archived identities, not a deduplicated live
+message count. A topic filter includes its actual typed parent chat as well as
+its id; equal numeric topics in migration aliases are never inferred equivalent.
+Unknown-topic bodyless tombstones appear in the parent view, not a guessed topic.
+
+`ArchiveDeletedViewMatches` checks the decoded shell and optional head against
+that scope. Authenticate row frames and verify their expected row identities
+first; a positive lookup hint alone cannot admit a foreign account, chat, topic,
+representation or collection. Check the head's full key and revision-owned
+payload before rendering, and restore chunked bodies through the storage API.
+Keep sender/reply context and completeness from the retained observation.
+The deleted view is read-only: never insert snapshots into live history,
+notifications, unread counts, dialog-top-message, search or forwarding state.
+
+A confirmation uses `MakeArchivePurgeConfirmation` and `ConfirmArchivePurge`.
+It binds account, store/work epoch, revision, account purge generation, purge
+kind and normalized explicit parent/alias scope. Revalidate the current account,
+selected kind/scope, store and header at confirm time and again on the executor
+queue; a token is a deterministic stale-context guard, not an authentication
+credential. Any intervening write invalidates it conservatively. An account-wide
+confirmation must explicitly name that account and all chats. Parent-chat purges
+still cover all topics, collections and representations of every named parent;
+a topic-filtered view never silently narrows or widens the confirmed purge.
+Use the returned existing request with the existing atomic purge planner.

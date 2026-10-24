@@ -6,6 +6,10 @@ Licensed under the GNU General Public License, version 2 or (at your
 option) any later version.
 */
 #include "tests/archive_storage_test_support.h"
+#include "purple/purple_archive_media_lifecycle.h"
+#include "purple/purple_archive_views.h"
+
+#include <algorithm>
 
 using namespace ArchiveTest;
 using namespace ArchiveStorageTest;
@@ -265,8 +269,9 @@ void RowsAndPlans() {
 	CHECK(!InitializeArchiveSql(state, noMac));
 	CHECK(ArchiveSqlReadPage(ArchiveRecordKind::Message, 129).sql.isEmpty());
 	CHECK(CheckArchiveSqlVersion(0) == ArchiveSqlStatus::Invalid);
-	CHECK(CheckArchiveSqlVersion(1) == ArchiveSqlStatus::Ready);
-	CHECK(CheckArchiveSqlVersion(2) == ArchiveSqlStatus::ReadOnly);
+	CHECK(CheckArchiveSqlVersion(1) == ArchiveSqlStatus::SchemaMismatch);
+	CHECK(CheckArchiveSqlVersion(2) == ArchiveSqlStatus::Ready);
+	CHECK(CheckArchiveSqlVersion(3) == ArchiveSqlStatus::ReadOnly);
 	CHECK(CheckArchiveSqlVersion(int64(1) + (int64(1) << 32)) == ArchiveSqlStatus::ReadOnly);
 	auto event = Event(state, u"first"_q, 1);
 	event.content->preserved[u"futureBody"_q] = u"keep"_q;
@@ -547,7 +552,261 @@ void ChunkedBodies() {
 		&& duplicate.program.statements.empty() && duplicate.program.retentionGapReason.isEmpty());
 }
 
+ArchiveMediaLifecycleFact LifecycleFact(const ArchiveState &state,
+		const ArchiveStoreEpoch &epoch, const ArchiveMessageKey &key = Key()) {
+	const auto &version = Message(state, key).versions.back();
+	auto fact = ArchiveMediaLifecycleFact();
+	fact.source = { epoch, key, version.id, version.revision, ArchiveContentHash(version.content),
+		version.content.media[0].identity, ArchiveGenerationFor(state, key.chat) };
+	fact.eventId = u"lifecycle"_q;
+	fact.order = 2;
+	fact.observedAt = 110;
+	fact.destroysContent = true;
+	fact.lifetime = ArchiveMediaLifetime::Ttl;
+	fact.transition = ArchiveMediaTransition::Expiry;
+	return fact;
+}
+
+void MediaLifecycleFacts() {
+	Section = "bound TTL view-once secret voice and round lifecycle facts";
+	for (const auto lifetime : { ArchiveMediaLifetime::Ttl, ArchiveMediaLifetime::ViewOnce, ArchiveMediaLifetime::Secret }) {
+		for (const auto &kind : { u"photo"_q, u"video"_q, u"voice"_q, u"round-video"_q }) {
+			auto state = Empty();
+			auto key = Key();
+			if (lifetime == ArchiveMediaLifetime::Secret) { key.chat.kind = ArchiveChatKind::Secret; key.messageId = -123; }
+			auto event = Event(state, u"original"_q, 1, u"captured caption"_q, ArchiveOrigin::Baseline, key);
+			AddMedia(event);
+			event.content->media[0].kind = kind;
+			CHECK(Apply(state, PlanArchiveEvent(state, event)));
+			const auto epoch = ArchiveStoreEpoch{ state.account, u"media-store"_q, 7 };
+			for (const auto transition : { ArchiveMediaTransition::Expiry, ArchiveMediaTransition::Consumption,
+				ArchiveMediaTransition::ExpiredReplacement }) {
+				auto fact = LifecycleFact(state, epoch, key);
+				fact.lifetime = lifetime;
+				fact.transition = transition;
+				const auto plan = PlanArchiveMediaLifecycle(state, epoch, fact);
+				CHECK(plan.transaction && plan.event && plan.captureBeforeDestruction);
+				CHECK(plan.retention == ArchiveMediaRetention::Unavailable);
+				const auto &deleted = Message(plan.transaction.next, key);
+				CHECK(deleted.deleted && deleted.versions == Message(state, key).versions);
+				CHECK(ArchiveMessageDeletedStatus(deleted) == (transition == ArchiveMediaTransition::Consumption
+					? ArchiveDeletedStatus::Consumed : ArchiveDeletedStatus::Expired));
+				CHECK(PlanArchiveMediaLifecycle(plan.transaction.next, epoch, fact).transaction.status == ArchivePlanStatus::NoChange);
+				RoundTrip(plan.transaction.next);
+			}
+			auto fact = LifecycleFact(state, epoch, key);
+			fact.lifetime = lifetime;
+			fact.transition = ArchiveMediaTransition::CacheEviction;
+			for (const auto bytes : { ArchiveAvailableBytes::Unavailable, ArchiveAvailableBytes::Partial, ArchiveAvailableBytes::Complete }) {
+				fact.bytes = bytes;
+				const auto plan = PlanArchiveMediaLifecycle(state, epoch, fact);
+				CHECK(plan.transaction.status == ArchivePlanStatus::NoChange && !plan.event && !plan.captureBeforeDestruction);
+				CHECK(plan.retention == (bytes == ArchiveAvailableBytes::Partial ? ArchiveMediaRetention::Partial
+					: bytes == ArchiveAvailableBytes::Complete ? ArchiveMediaRetention::NeedsCopy : ArchiveMediaRetention::Unavailable));
+			}
+			fact.transition = ArchiveMediaTransition::Consumption;
+			fact.lifetime = ArchiveMediaLifetime::Ordinary;
+			fact.destroysContent = false;
+			CHECK(PlanArchiveMediaLifecycle(state, epoch, fact).transaction.status == ArchivePlanStatus::NoChange);
+			fact.destroysContent = true;
+			CHECK(PlanArchiveMediaLifecycle(state, epoch, fact).transaction.status == ArchivePlanStatus::Invalid);
+		}
+	}
+}
+
+void MediaEpochsAndSharedTrash() {
+	Section = "media source epoch revision purge and shared current/trash blob";
+	auto state = Empty();
+	auto event = Event(state, u"original"_q, 1);
+	AddMedia(event);
+	CHECK(Apply(state, PlanArchiveEvent(state, event)));
+	const auto epoch = ArchiveStoreEpoch{ state.account, u"media-store"_q, 7 };
+	const auto source = LifecycleFact(state, epoch);
+	for (auto test = 0; test != 7; ++test) {
+		auto fact = source;
+		auto current = epoch;
+		if (test == 0) { fact.source.version = u"other"_q; }
+		if (test == 1) { fact.source.revision = u"other"_q; }
+		if (test == 2) { fact.source.contentHash = QString(64, 'b'); }
+		if (test == 3) { ++current.generation; }
+		if (test == 4) { current.storeId = u"new-store"_q; }
+		if (test == 5) { current.removalPending = true; }
+		if (test == 6) { ++current.account.environment; }
+		CHECK(PlanArchiveMediaLifecycle(state, current, fact).transaction.status == ArchivePlanStatus::Stale);
+	}
+	auto newer = state;
+	CHECK(Apply(newer, PlanArchiveEvent(newer, Event(newer, u"edited"_q, 2, u"new body"_q, ArchiveOrigin::AuthoritativeEdit))));
+	CHECK(PlanArchiveMediaLifecycle(newer, epoch, source).transaction.status == ArchivePlanStatus::Stale);
+	const auto job = Job(state, u"copy"_q, u"original"_q);
+	CHECK(Apply(state, PlanArchiveMediaStage(state, job)));
+	auto changed = epoch;
+	++changed.generation;
+	CHECK(PlanArchiveScopedMediaCompletion(state, epoch, changed, job.id, MediaSuccess()).status == ArchivePlanStatus::Stale);
+	CHECK(Apply(state, PlanArchiveScopedMediaCompletion(state, epoch, epoch, job.id, MediaSuccess())));
+	const auto other = Key(state.account, 45, 68);
+	auto currentEvent = Event(state, u"current"_q, 1, u"current"_q, ArchiveOrigin::Baseline, other);
+	AddMedia(currentEvent);
+	CHECK(Apply(state, PlanArchiveEvent(state, currentEvent)));
+	CHECK(CountArchiveBlobReferences(state, BlobId).versions == 2);
+	const auto expired = PlanArchiveMediaLifecycle(state, epoch, source);
+	CHECK(expired.retention == ArchiveMediaRetention::Owned);
+	CHECK(Apply(state, expired.transaction));
+	CHECK(Message(state).deleted && !Message(state, other).deleted);
+	CHECK(Apply(state, PlanArchivePurge(state, Purge(state, ArchivePurgeKind::Trashbin, Key().chat))));
+	CHECK(Message(state).payloadPurged && Message(state, other).versions[0].media[0].state == ArchiveMediaState::Complete);
+	CHECK(CountArchiveBlobReferences(state, BlobId).versions == 1);
+	CHECK(PlanArchiveScopedMediaCompletion(state, epoch, epoch, job.id, MediaSuccess()).status == ArchivePlanStatus::Stale);
+	CHECK(PlanArchiveMediaLifecycle(state, epoch, source).transaction.status == ArchivePlanStatus::Stale);
+	CHECK(PlanArchiveGarbageCollection(state).status == ArchivePlanStatus::NoChange);
+}
+
+void ViewScopesAndConfirmation() {
+	Section = "explicit account/chat/alias confirmation scope and guarded query facts";
+	const auto state = Empty();
+	const auto epoch = ArchiveStoreEpoch{ state.account, u"view-store"_q, 9 };
+	auto scope = ArchivePurgeScope{ state.account, Key().chat, { { ArchiveChatKind::Group, 44 }, { ArchiveChatKind::Group, 43 } } };
+	const auto confirmation = MakeArchivePurgeConfirmation(state, epoch, ArchivePurgeKind::Trashbin, scope);
+	CHECK(confirmation);
+	if (!confirmation) { return; }
+	CHECK(ConfirmArchivePurge(state, epoch, ArchivePurgeKind::Trashbin, scope, *confirmation));
+	std::reverse(scope.migrationAliases.begin(), scope.migrationAliases.end());
+	CHECK(MakeArchivePurgeConfirmation(state, epoch, ArchivePurgeKind::Trashbin, scope)->token == confirmation->token);
+	for (auto test = 0; test != 11; ++test) {
+		auto header = state;
+		auto current = epoch;
+		auto selected = scope;
+		auto displayed = *confirmation;
+		auto kind = ArchivePurgeKind::Trashbin;
+		if (test == 0) { ++header.revision; }
+		if (test == 1) { ++current.generation; }
+		if (test == 2) { current.storeId = u"other"_q; }
+		if (test == 3) { selected.chat.reset(); selected.migrationAliases.clear(); }
+		if (test == 4) { selected.migrationAliases.pop_back(); }
+		if (test == 5) { ++selected.account.environment; }
+		if (test == 6) { kind = ArchivePurgeKind::EditHistory; }
+		if (test == 7) { ++displayed.request.expectedRevision; }
+		if (test == 8) { current.removalPending = true; }
+		if (test == 9) { ++header.accountGeneration; }
+		if (test == 10) { displayed.request.kind = ArchivePurgeKind::EditHistory; }
+		CHECK(!ConfirmArchivePurge(header, current, kind, selected, displayed));
+	}
+	auto view = ArchiveViewScope{ scope, ArchiveTopicScope{ Key().chat, std::numeric_limits<int64>::max() },
+		ArchiveCollection::Received, u"original"_q };
+	const auto security = Security();
+	CHECK(!ArchiveSqlDeletedView(view, 128, security).sql.isEmpty());
+	CHECK(ArchiveSqlDeletedView(view, 0, security).sql.isEmpty());
+	CHECK(ArchiveSqlScopeBlobs(view, 129, security).sql.isEmpty());
+	view.topic->chat.id++;
+	CHECK(ArchiveSqlScopeCounts(view, security).sql.isEmpty());
+	view.topic->chat = Key().chat;
+	FailEveryDerivation([&](const auto &key) { return ReadAsProgram(ArchiveSqlDeletedView(view, 128, key)); });
+	FailEveryDerivation([&](const auto &key) { return ReadAsProgram(ArchiveSqlScopeCounts(view, key)); });
+	FailEveryDerivation([&](const auto &key) { return ReadAsProgram(ArchiveSqlScopeBlobs(view, 128, key)); });
+}
+
+void ReviewLifecycleFences() {
+	Section = "review lifecycle handoff and historical completion";
+	auto state = Empty();
+	auto first = Event(state, u"v1"_q, 1, u"TTL v1"_q);
+	AddMedia(first);
+	CHECK(Apply(state, PlanArchiveEvent(state, first)));
+	const auto epoch = ArchiveStoreEpoch{ state.account, Security().storeId, 1 };
+	auto fact = LifecycleFact(state, epoch, Key());
+	fact.eventId = u"expiry"_q;
+	fact.order = 3;
+	const auto prepared = PlanArchiveMediaLifecycle(state, epoch, fact);
+	CHECK(prepared.event);
+	if (!prepared.event) { return; }
+	CHECK(prepared.event->lifecycleEpoch == epoch);
+	auto zeroEpoch = epoch;
+	zeroEpoch.generation = 0;
+	auto zeroFact = fact;
+	zeroFact.source.epoch = zeroEpoch;
+	CHECK(PlanArchiveMediaLifecycle(state, zeroEpoch, zeroFact).transaction);
+	auto expiredState = prepared.transaction.next;
+	CHECK(PlanArchiveEvent(expiredState, *prepared.event).status == ArchivePlanStatus::NoChange);
+
+	CHECK(PlanArchiveSqlCapture(state, *prepared.event, Security(), &epoch).transaction);
+	CHECK(PlanArchiveSqlCapture(state, *prepared.event, Security()).transaction.status == ArchivePlanStatus::Stale);
+	auto otherEpoch = epoch;
+	otherEpoch.generation++;
+	CHECK(PlanArchiveSqlCapture(state, *prepared.event, Security(), &otherEpoch).transaction.status == ArchivePlanStatus::Stale);
+	otherEpoch = epoch;
+	otherEpoch.account.userId++;
+	CHECK(PlanArchiveSqlCapture(state, *prepared.event, Security(), &otherEpoch).transaction.status == ArchivePlanStatus::Stale);
+	otherEpoch = epoch;
+	otherEpoch.storeId += u"-other"_q;
+	CHECK(PlanArchiveSqlCapture(state, *prepared.event, Security(), &otherEpoch).transaction.status == ArchivePlanStatus::Stale);
+	CHECK(Apply(state, PlanArchiveMediaStage(state, Job(state, u"copy-v1"_q, u"v1"_q))));
+	const auto staged = state;
+	CHECK(state.jobs[0].revision == u"v1"_q);
+	CHECK(state.jobs[0].contentHash == ArchiveContentHash(*first.content));
+	auto second = Event(state, u"v2"_q, 2, u"non-expiring v2"_q, ArchiveOrigin::AuthoritativeEdit);
+	AddMedia(second);
+	second.content->media[0].identity = u"document:other"_q;
+	CHECK(Apply(state, PlanArchiveEvent(state, second)));
+	CHECK(PlanArchiveEvent(state, *prepared.event).status == ArchivePlanStatus::Stale);
+	auto changedPurge = staged;
+	changedPurge.accountGeneration++;
+	changedPurge.jobs[0].state = ArchiveJobState::Cancelled;
+	changedPurge.messages[0].versions[0].media[0].state = ArchiveMediaState::Missing;
+	CHECK(IsArchiveState(changedPurge));
+	CHECK(PlanArchiveSqlCapture(changedPurge, *prepared.event, Security(), &epoch).transaction.status == ArchivePlanStatus::Stale);
+	const auto refused = PlanArchiveSqlCapture(state, *prepared.event, Security(), &epoch);
+	CHECK(refused.transaction.status == ArchivePlanStatus::Stale);
+	CHECK(refused.program.statements.empty());
+	const auto current = Message(state).versions.back();
+	CHECK(Apply(state, PlanArchiveScopedMediaCompletion(state, epoch, epoch, u"copy-v1"_q, MediaSuccess())));
+	CHECK(Message(state).versions.front().media[0].state == ArchiveMediaState::Complete);
+	CHECK(Message(state).versions.back() == current);
+	auto changed = staged;
+	auto revision = Event(changed, u"revision-v1"_q, 2, u"TTL v1"_q, ArchiveOrigin::AuthoritativeEdit);
+	AddMedia(revision);
+	CHECK(Apply(changed, PlanArchiveEvent(changed, revision)));
+	CHECK(PlanArchiveMediaCompletion(changed, u"copy-v1"_q, MediaSuccess()).mediaRefusal == ArchiveMediaRefusal::RevisionMismatch);
+	CHECK(changed.jobs[0].state == ArchiveJobState::Cancelled);
+	CHECK(Message(changed).versions[0].media[0].state == ArchiveMediaState::Missing);
+	CHECK(Apply(changed, PlanArchiveMediaStage(changed, Job(changed, u"copy-new-revision"_q, u"v1"_q))));
+	CHECK(Apply(changed, PlanArchiveMediaCompletion(changed, u"copy-new-revision"_q, MediaSuccess())));
+	changed = staged;
+	changed.jobs[0].revision = u"different-revision"_q;
+	CHECK(IsArchiveState(changed));
+	CHECK(PlanArchiveMediaCompletion(changed, u"copy-v1"_q, MediaSuccess()).mediaRefusal == ArchiveMediaRefusal::RevisionMismatch);
+	changed = staged;
+	changed.jobs[0].contentHash = QString(64, 'b');
+	CHECK(IsArchiveState(changed));
+	CHECK(PlanArchiveMediaCompletion(changed, u"copy-v1"_q, MediaSuccess()).mediaRefusal == ArchiveMediaRefusal::ContentHashMismatch);
+	changed = staged;
+	changed.messages[0].versions[0].content.text = u"changed"_q;
+	CHECK(IsArchiveState(changed));
+	CHECK(PlanArchiveMediaCompletion(changed, u"copy-v1"_q, MediaSuccess()).mediaRefusal == ArchiveMediaRefusal::ContentHashMismatch);
+	changed = staged;
+	CHECK(Apply(changed, PlanArchiveEvent(changed, second)));
+	CHECK(Apply(changed, PlanArchivePurge(changed, Purge(changed, ArchivePurgeKind::EditHistory))));
+	CHECK(PlanArchiveMediaCompletion(changed, u"copy-v1"_q, MediaSuccess()).mediaRefusal == ArchiveMediaRefusal::PurgeEpochMismatch);
+	changed = staged;
+	changed.messages[0].versions.clear();
+	changed.jobs[0].state = ArchiveJobState::Failed;
+	changed.jobs[0].failure = u"lost-version"_q;
+	CHECK(IsArchiveState(changed));
+	CHECK(PlanArchiveMediaCompletion(changed, u"copy-v1"_q, MediaSuccess()).mediaRefusal == ArchiveMediaRefusal::VersionMissing);
+	const auto fingerprint = ArchiveSqlExpectedSchemaFingerprint();
+	const auto schema = ArchiveSqlSchema();
+	CHECK(CheckArchiveSqlSchema(2, fingerprint, schema) == ArchiveSqlStatus::Ready);
+	CHECK(CheckArchiveSqlSchema(1, fingerprint, schema) == ArchiveSqlStatus::SchemaMismatch);
+	CHECK(CheckArchiveSqlSchema(2, u"wrong"_q, schema) == ArchiveSqlStatus::SchemaMismatch);
+	auto drift = schema;
+	drift[0] += u" "_q;
+	CHECK(CheckArchiveSqlSchema(2, fingerprint, drift) == ArchiveSqlStatus::Ready);
+	drift[0].replace(u"schema_fingerprint TEXT"_q, u"draft_drift TEXT"_q);
+	CHECK(CheckArchiveSqlSchema(2, fingerprint, drift) == ArchiveSqlStatus::SchemaMismatch);
+}
+
 int main() {
+	ReviewLifecycleFences();
+	MediaLifecycleFacts();
+	MediaEpochsAndSharedTrash();
+	ViewScopesAndConfirmation();
 	ChunkedBodies();
 	Envelopes();
 	Keys();

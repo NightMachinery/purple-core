@@ -12,7 +12,7 @@ option) any later version.
 
 namespace Purple {
 
-inline constexpr auto kArchiveSqlSchemaVersion = 1;
+inline constexpr auto kArchiveSqlSchemaVersion = 2;
 inline constexpr auto kArchiveSqlPageLimit = 128;
 inline constexpr auto kArchiveSqlSliceRowLimit = 256;
 inline constexpr auto kArchiveSqlStatementLimit = 2048;
@@ -49,7 +49,7 @@ struct ArchiveSqlStatement {
 	bool reachedDone, int64 rows, int64 directChanges, int64 totalChangesDelta);
 [[nodiscard]] bool AcknowledgeArchiveSqlCommit(bool allResultsChecked, bool commitDurable);
 
-enum class ArchiveSqlStatus { Ready, Invalid, ReadOnly, EncodingFailed, TooLarge, RetentionGap };
+enum class ArchiveSqlStatus { Ready, Invalid, ReadOnly, EncodingFailed, TooLarge, RetentionGap, SchemaMismatch };
 
 struct ArchiveSqlProgram {
 	ArchiveSqlStatus status = ArchiveSqlStatus::Invalid;
@@ -67,7 +67,7 @@ struct ArchiveSqlSecurity {
 	std::function<std::optional<QByteArray>(const QByteArray &)> hmacSha256;
 };
 
-enum class ArchiveIndexKind { Account, Chat, Message, Version, Event, Blob, Job, Lease, Media, Maintenance };
+enum class ArchiveIndexKind { Account, Chat, Message, Version, Event, Blob, Job, Lease, Media, Maintenance, Topic, Representation };
 
 struct ArchiveTranscriptCursor {
 	int64 date = 0;
@@ -98,6 +98,8 @@ struct ArchiveSqlSlice {
 [[nodiscard]] QString ArchiveSqlMessageId(const ArchiveMessageKey &key, const ArchiveSqlSecurity &security);
 [[nodiscard]] QString ArchiveSqlChatId(const ArchiveChatKey &key,
 	const AccountKey &account, const ArchiveSqlSecurity &security);
+[[nodiscard]] QString ArchiveSqlTopicId(const ArchiveChatKey &chat,
+	const AccountKey &account, int64 topicId, const ArchiveSqlSecurity &security);
 [[nodiscard]] QString ArchiveSqlChildId(const ArchiveMessageKey &key,
 	ArchiveIndexKind kind, const QString &id, const ArchiveSqlSecurity &security);
 [[nodiscard]] QString ArchiveSqlOrder(uint64_t order);
@@ -121,13 +123,21 @@ struct ArchiveSqlCapturePlan {
 	ArchiveSqlProgram program;
 };
 [[nodiscard]] ArchiveSqlCapturePlan PlanArchiveSqlCapture(const ArchiveState &slice,
-	const ArchiveEvent &event, const ArchiveSqlSecurity &security);
+	const ArchiveEvent &event, const ArchiveSqlSecurity &security,
+	const ArchiveStoreEpoch *currentEpoch = nullptr);
 [[nodiscard]] ArchiveSqlCapturePlan PlanArchiveSqlCapture(const ArchiveSqlSlice &slice,
-	const ArchiveEvent &event, const ArchiveSqlSecurity &security);
+	const ArchiveEvent &event, const ArchiveSqlSecurity &security,
+	const ArchiveStoreEpoch *currentEpoch = nullptr);
 
 [[nodiscard]] std::vector<QString> ArchiveSqlConnectionSetup();
 [[nodiscard]] std::vector<QString> ArchiveSqlSchema();
 [[nodiscard]] ArchiveSqlStatus CheckArchiveSqlVersion(int64 version);
+[[nodiscard]] QString ArchiveSqlSchemaFingerprint(const std::vector<QString> &definitions);
+[[nodiscard]] QString ArchiveSqlExpectedSchemaFingerprint();
+[[nodiscard]] ArchiveSqlStatement ArchiveSqlReadSchema();
+[[nodiscard]] ArchiveSqlStatus CheckArchiveSqlSchema(int64 version, const QString &recordedFingerprint,
+	const std::vector<QString> &definitions);
+[[nodiscard]] QString ArchiveSqlSchemaGuard();
 [[nodiscard]] ArchiveSqlProgram InitializeArchiveSql(const ArchiveState &empty,
 	const ArchiveSqlSecurity &security);
 [[nodiscard]] ArchiveSqlProgram TranslateArchiveSql(const ArchiveTransaction &boundedSlice,

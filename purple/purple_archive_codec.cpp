@@ -599,6 +599,8 @@ QJsonValue Write(const ArchiveMediaJob &value) {
 	object.insert(u"key"_q, Write(value.key));
 	object.insert(u"version"_q, Write(value.version));
 	object.insert(u"mediaIdentity"_q, Write(value.mediaIdentity));
+	object.insert(u"revision"_q, Write(value.revision));
+	object.insert(u"contentHash"_q, Write(value.contentHash));
 	object.insert(u"generation"_q, Write(value.generation));
 	object.insert(u"expectedSize"_q, Write(value.expectedSize));
 	object.insert(u"expectedHash"_q, Write(value.expectedHash));
@@ -615,6 +617,8 @@ bool Read(const QJsonValue &json, ArchiveMediaJob &value, bool &unsupported) {
 	reader.field(u"key"_q, value.key);
 	reader.field(u"version"_q, value.version);
 	reader.field(u"mediaIdentity"_q, value.mediaIdentity);
+	reader.field(u"revision"_q, value.revision);
+	reader.field(u"contentHash"_q, value.contentHash);
 	reader.field(u"generation"_q, value.generation);
 	reader.field(u"expectedSize"_q, value.expectedSize);
 	reader.field(u"expectedHash"_q, value.expectedHash);

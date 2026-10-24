@@ -11,14 +11,6 @@ option) any later version.
 
 namespace Purple {
 
-struct ArchiveStoreEpoch {
-	AccountKey account;
-	QString storeId;
-	uint64_t generation = 0;
-	bool removalPending = false;
-	friend bool operator==(const ArchiveStoreEpoch &, const ArchiveStoreEpoch &) = default;
-};
-
 enum class ArchiveRemovalAction {
 	WriteTombstone,
 	FenceWork,

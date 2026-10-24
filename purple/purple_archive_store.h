@@ -40,6 +40,9 @@ struct ArchiveStoreWrite {
 	QString id;
 };
 
+enum class ArchiveMediaRefusal { None, StoreEpochMismatch, PurgeEpochMismatch,
+	VersionMissing, RevisionMismatch, ContentHashMismatch, MediaMissing, JobCancelled };
+
 struct ArchiveTransaction {
 	ArchivePlanStatus status = ArchivePlanStatus::Invalid;
 	ArchiveState expected;
@@ -48,6 +51,7 @@ struct ArchiveTransaction {
 	std::vector<QString> releaseStagedJobs;
 	std::vector<QString> revokeReaders;
 	std::vector<QString> deleteOwnedBlobs;
+	ArchiveMediaRefusal mediaRefusal = ArchiveMediaRefusal::None;
 
 	[[nodiscard]] explicit operator bool() const {
 		return status == ArchivePlanStatus::Ready;

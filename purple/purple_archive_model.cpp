@@ -484,6 +484,7 @@ bool IsArchiveState(const ArchiveState &state) {
 		if (!SafeObject(job.preserved) || !IsArchiveToken(job.id) || jobs.contains(job.id)
 			|| !IsArchiveMessageKey(job.key) || job.key.account != state.account
 			|| !IsArchiveToken(job.version) || !IsArchiveToken(job.mediaIdentity)
+			|| !IsArchiveToken(job.revision) || !IsArchiveHash(job.contentHash)
 			|| (!job.expectedHash.isEmpty() && !IsArchiveHash(job.expectedHash))
 			|| !InRange(job.state, ArchiveJobState::Cancelled)
 			|| (!job.blobId.isEmpty() && !IsArchiveHash(job.blobId))

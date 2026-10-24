@@ -95,7 +95,7 @@ QString EventFingerprint(const ArchiveEvent &event) {
 			source = object;
 		}
 	}
-	const auto object = QJsonObject{
+	auto object = QJsonObject{
 		{ u"order"_q, QString::number(event.order) },
 		{ u"origin"_q, int(event.origin) },
 		{ u"content"_q, event.content
@@ -109,6 +109,13 @@ QString EventFingerprint(const ArchiveEvent &event) {
 		{ u"aliases"_q, aliases },
 		{ u"source"_q, source },
 	};
+	if (event.lifecycleEpoch) {
+		object.insert(u"lifecycleMedia"_q, event.lifecycleMediaIdentity);
+		object.insert(u"lifecycleEpoch"_q, QJsonArray{
+			QString::number(event.lifecycleEpoch->account.environment),
+			QString::number(event.lifecycleEpoch->account.userId), event.lifecycleEpoch->storeId,
+			QString::number(event.lifecycleEpoch->generation), event.lifecycleEpoch->removalPending });
+	}
 	const auto canonical = CanonicalizeSyncJson(QJsonDocument(object).toJson(QJsonDocument::Compact));
 	return canonical ? QString::fromLatin1(QCryptographicHash::hash(
 		canonical.canonical, QCryptographicHash::Sha256).toHex()) : QString();
@@ -331,6 +338,7 @@ void Reconcile(ArchiveState &state, std::vector<QString> &cancelled,
 		const auto version = Version(state, job.key, job.version);
 		const auto reference = version ? Reference(*version, job.mediaIdentity) : nullptr;
 		if (!reference || reference->state != ArchiveMediaState::Staged
+			|| version->revision != job.revision || ArchiveContentHash(version->content) != job.contentHash
 			|| !IsGeneration(state, job.key, job.generation)) {
 			job.state = ArchiveJobState::Cancelled;
 			cancelled.push_back(job.id);
@@ -455,6 +463,21 @@ ArchiveTransaction PlanArchiveEvent(const ArchiveState &state, const ArchiveEven
 	}
 	if (!IsGeneration(state, event.key, event.generation)) {
 		return Refuse(ArchivePlanStatus::Stale);
+	}
+	if (IsDeletion(event.origin) && (event.lifecycleEpoch || !event.targetVersion.isEmpty())) {
+		const auto message = FindArchiveMessage(state, event.key);
+		const auto version = message && !message->versions.empty() ? &message->versions.back() : nullptr;
+		if (!version || message->payloadPurged || event.targetVersion != version->id
+			|| event.targetRevision != version->revision
+			|| event.expectedContentHash != ArchiveContentHash(version->content)
+			|| (event.lifecycleEpoch && (event.lifecycleEpoch->account != state.account
+				|| event.lifecycleEpoch->removalPending || !IsArchiveToken(event.lifecycleEpoch->storeId)
+				|| !IsArchiveToken(event.lifecycleMediaIdentity)))
+			|| (!event.lifecycleMediaIdentity.isEmpty()
+				&& std::none_of(version->media.begin(), version->media.end(),
+					[&](const auto &ref) { return ref.identity == event.lifecycleMediaIdentity; }))) {
+			return Refuse(ArchivePlanStatus::Stale);
+		}
 	}
 	if (bodyEvent && !IsMissingSlots(EventMissingSlots(event), *event.content,
 		event.completeness, event.origin == ArchiveOrigin::Hydration ? event.targetRevision : event.id)) {
@@ -666,9 +689,19 @@ ArchiveTransaction PlanArchivePurge(const ArchiveState &state, const ArchivePurg
 	return result;
 }
 
-ArchiveTransaction PlanArchiveMediaStage(const ArchiveState &state, const ArchiveMediaJob &job) {
+ArchiveTransaction PlanArchiveMediaStage(const ArchiveState &state, const ArchiveMediaJob &requested) {
 	if (const auto error = CheckState(state)) {
 		return *error;
+	}
+	auto job = requested;
+	const auto capturedVersion = FindArchiveVersion(state, job.key, job.version);
+	if (capturedVersion) {
+		if ((!job.revision.isEmpty() && job.revision != capturedVersion->revision)
+			|| (!job.contentHash.isEmpty() && job.contentHash != ArchiveContentHash(capturedVersion->content))) {
+			return Refuse(ArchivePlanStatus::Stale);
+		}
+		job.revision = capturedVersion->revision;
+		job.contentHash = ArchiveContentHash(capturedVersion->content);
 	}
 	if (!IsArchiveToken(job.id) || !IsArchiveMessageKey(job.key) || job.key.account != state.account
 		|| !IsArchiveToken(job.version) || !IsArchiveToken(job.mediaIdentity)
@@ -718,14 +751,28 @@ ArchiveTransaction PlanArchiveMediaCompletion(const ArchiveState &state,
 	if (const auto error = CheckState(state)) {
 		return *error;
 	}
+	auto refuseMedia = [](ArchiveMediaRefusal reason) {
+		auto refused = Refuse(ArchivePlanStatus::Stale);
+		refused.mediaRefusal = reason;
+		return refused;
+	};
+	const auto captured = std::find_if(state.jobs.begin(), state.jobs.end(),
+		[&](const auto &job) { return job.id == jobId; });
+	if (captured == state.jobs.end()) { return Refuse(ArchivePlanStatus::NotFound); }
+	if (!IsGeneration(state, captured->key, captured->generation)) {
+		return refuseMedia(ArchiveMediaRefusal::PurgeEpochMismatch);
+	}
+	const auto exact = FindArchiveVersion(state, captured->key, captured->version);
+	if (!exact) { return refuseMedia(ArchiveMediaRefusal::VersionMissing); }
+	if (exact->revision != captured->revision) { return refuseMedia(ArchiveMediaRefusal::RevisionMismatch); }
+	if (ArchiveContentHash(exact->content) != captured->contentHash) {
+		return refuseMedia(ArchiveMediaRefusal::ContentHashMismatch);
+	}
+	if (captured->state == ArchiveJobState::Cancelled) { return refuseMedia(ArchiveMediaRefusal::JobCancelled); }
 	auto next = state;
 	const auto i = std::find_if(next.jobs.begin(), next.jobs.end(),
 		[&](const auto &job) { return job.id == jobId; });
-	if (i == next.jobs.end()) {
-		return Refuse(ArchivePlanStatus::NotFound);
-	} else if (i->state == ArchiveJobState::Cancelled || !IsGeneration(state, i->key, i->generation)) {
-		return Refuse(ArchivePlanStatus::Stale);
-	} else if (i->state != ArchiveJobState::Staged) {
+	if (i->state != ArchiveJobState::Staged) {
 		const auto matches = result.success
 			? (i->state == ArchiveJobState::Complete && i->blobId == result.blobId
 				&& result.verifiedHash == result.blobId
@@ -737,7 +784,7 @@ ArchiveTransaction PlanArchiveMediaCompletion(const ArchiveState &state,
 	const auto version = Version(next, i->key, i->version);
 	const auto reference = version ? Reference(*version, i->mediaIdentity) : nullptr;
 	if (!reference || reference->state != ArchiveMediaState::Staged) {
-		return Refuse(ArchivePlanStatus::Stale);
+		return refuseMedia(ArchiveMediaRefusal::MediaMissing);
 	}
 	if (!result.success) {
 		if (!IsArchiveToken(result.failure) || !result.blobId.isEmpty()
@@ -770,9 +817,6 @@ ArchiveTransaction PlanArchiveMediaCompletion(const ArchiveState &state,
 		reference->state = ArchiveMediaState::Complete;
 		reference->blobId = result.blobId;
 	}
-	ShareKnownMedia(next, next, [&](const auto &, const auto &, const auto &ref) {
-		return ref.identity == i->mediaIdentity;
-	});
 	return Transaction(state, std::move(next));
 }
 

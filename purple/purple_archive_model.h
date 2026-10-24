@@ -20,6 +20,14 @@ namespace Purple {
 
 inline constexpr auto kArchiveSchemaVersion = 1;
 
+struct ArchiveStoreEpoch {
+	AccountKey account;
+	QString storeId;
+	uint64_t generation = 0;
+	bool removalPending = false;
+	friend bool operator==(const ArchiveStoreEpoch &, const ArchiveStoreEpoch &) = default;
+};
+
 enum class ArchiveChatKind { User = 0, Group = 1, Channel = 2, Secret = 3 };
 enum class ArchiveCollection { Received = 0, Scheduled = 1, QuickReply = 2 };
 enum class ArchiveOrigin {
@@ -190,6 +198,8 @@ struct ArchiveEvent {
 	QString targetRevision;
 	QString expectedContentHash;
 	std::vector<ArchiveChatKey> migrationAliases;
+	std::optional<ArchiveStoreEpoch> lifecycleEpoch;
+	QString lifecycleMediaIdentity;
 };
 
 struct ArchiveChatGeneration {
@@ -220,6 +230,8 @@ struct ArchiveMediaJob {
 	uint64_t completedSize = 0;
 	QString failure;
 	QJsonObject preserved;
+	QString revision;
+	QString contentHash;
 	friend bool operator==(const ArchiveMediaJob &, const ArchiveMediaJob &) = default;
 };
 

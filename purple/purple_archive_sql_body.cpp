@@ -159,8 +159,14 @@ std::optional<ArchiveRow> RestoreArchiveSqlVersionBody(const ArchiveRow &row,
 }
 
 static ArchiveSqlCapturePlan PlanArchiveSqlCaptureImpl(const ArchiveState &slice, const ArchiveEvent &event,
-		const ArchiveSqlSecurity &security, const ArchiveSqlSlice *restored) {
+		const ArchiveSqlSecurity &security, const ArchiveSqlSlice *restored, const ArchiveStoreEpoch *currentEpoch) {
 	auto result = ArchiveSqlCapturePlan();
+	if (event.lifecycleEpoch && (!currentEpoch || *event.lifecycleEpoch != *currentEpoch
+		|| currentEpoch->removalPending || currentEpoch->account != slice.account
+		|| currentEpoch->storeId != security.storeId)) {
+		result.transaction.status = ArchivePlanStatus::Stale;
+		return result;
+	}
 	auto rows = size_t(1) + slice.messages.size() + slice.blobs.size() + slice.jobs.size()
 		+ slice.leases.size() + slice.chatGenerations.size();
 	if (slice.messages.size() <= 1) {
@@ -198,13 +204,13 @@ static ArchiveSqlCapturePlan PlanArchiveSqlCaptureImpl(const ArchiveState &slice
 }
 
 ArchiveSqlCapturePlan PlanArchiveSqlCapture(const ArchiveState &slice, const ArchiveEvent &event,
-		const ArchiveSqlSecurity &security) {
-	return PlanArchiveSqlCaptureImpl(slice, event, security, nullptr);
+		const ArchiveSqlSecurity &security, const ArchiveStoreEpoch *currentEpoch) {
+	return PlanArchiveSqlCaptureImpl(slice, event, security, nullptr, currentEpoch);
 }
 
 ArchiveSqlCapturePlan PlanArchiveSqlCapture(const ArchiveSqlSlice &slice, const ArchiveEvent &event,
-		const ArchiveSqlSecurity &security) {
-	return PlanArchiveSqlCaptureImpl(slice.state, event, security, &slice);
+		const ArchiveSqlSecurity &security, const ArchiveStoreEpoch *currentEpoch) {
+	return PlanArchiveSqlCaptureImpl(slice.state, event, security, &slice, currentEpoch);
 }
 
 }

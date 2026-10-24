@@ -1174,8 +1174,8 @@ void TestChangedRefreshRetainsCapturedBodies() {
 	CHECK(state.jobs[0].state == ArchiveJobState::Staged);
 	CHECK(Apply(state, PlanArchiveMediaCompletion(state, job.id, MediaSuccess())));
 	CHECK(Message(state).versions[0].media[0].state == ArchiveMediaState::Complete);
-	CHECK(Message(state).versions[1].media[0].state == ArchiveMediaState::Complete);
-	CHECK(CountArchiveBlobReferences(state, BlobId).versions == 2);
+	CHECK(Message(state).versions[1].media[0].state == ArchiveMediaState::Missing);
+	CHECK(CountArchiveBlobReferences(state, BlobId).versions == 1);
 	CHECK(PlanArchiveGarbageCollection(state).status == ArchivePlanStatus::NoChange);
 	CHECK(Apply(state, PlanArchivePurge(state, Purge(state, ArchivePurgeKind::EditHistory))));
 	CHECK(Message(state).versions.size() == 1);
@@ -1195,10 +1195,11 @@ void TestSharedCaptureAndPurgeReferenceRepair() {
 		CHECK(Apply(state, PlanArchiveMediaStage(state, Job(state, entry.first, entry.first))));
 	}
 	const auto completion = PlanArchiveMediaCompletion(state, u"a"_q, MediaSuccess());
-	CHECK(completion.releaseStagedJobs == std::vector<QString>{ u"b"_q });
+	CHECK(completion.releaseStagedJobs.empty());
 	CHECK(Apply(state, completion));
-	CHECK(state.jobs[1].state == ArchiveJobState::Cancelled);
-	CHECK(PlanArchiveMediaCompletion(state, u"b"_q, MediaSuccess()).status == ArchivePlanStatus::Stale);
+	CHECK(state.jobs[1].state == ArchiveJobState::Staged);
+	CHECK(Message(state).versions[1].media[0].state == ArchiveMediaState::Staged);
+	CHECK(Apply(state, PlanArchiveMediaCompletion(state, u"b"_q, MediaSuccess())));
 	CHECK(CountArchiveBlobReferences(state, BlobId).versions == 2);
 	state.messages[0].versions.back().media[0].state = ArchiveMediaState::Missing;
 	state.messages[0].versions.back().media[0].blobId.clear();

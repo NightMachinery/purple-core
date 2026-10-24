@@ -36,7 +36,9 @@ transaction/purge/media plans are documented in
 separate integrations. The [storage contract](docs/archive-storage.md) adds shared
 SQLite statements, encrypted row/media framing, account-key policy and
 crash-safe logout removal plans. The library performs no SQL, encryption or
-file I/O. Archive schema and lifecycle are independent of settings sync.
+file I/O. Bound media-lifecycle facts distinguish expiry/consumption from cache
+eviction; scoped deleted views, counts and confirmation tokens share the same
+store. Archive schema and lifecycle are independent of settings sync.
 
 ## What is here
 
