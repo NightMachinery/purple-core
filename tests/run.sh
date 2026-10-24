@@ -7,9 +7,9 @@
 # proving that takes a few hundred fixture edits - far too slow to iterate on
 # through a full app build.
 #
-# Seven programs run: config, settings flow, sync-chat decisions, carry recovery,
-# archive transitions, archive codecs and copy-source provenance. All link
-# against the same core objects.
+# Eight programs run: config, settings flow, sync-chat decisions, carry recovery,
+# archive transitions/codecs/source and automatic settings policy.
+# All link against the same core objects.
 #
 # Qt Core is the one thing this cannot vendor. On macOS it is looked for as a
 # framework under QT_PREFIX, defaulting to the merged prefix the tdesktop fork
@@ -29,6 +29,8 @@ if [ ! -d "$QtPrefix/frameworks/QtCore.framework" ]; then
 fi
 
 Sources=(
+    purple/purple_sync_auto.cpp
+    purple/purple_sync_auto_state.cpp
     purple/purple_peer_token.cpp
     purple/purple_sync_chat.cpp
     purple/purple_archive_source.cpp
@@ -90,7 +92,7 @@ if [ "$CompileStatus" != 0 ]; then
 fi
 
 Status=0
-for Test in test_config test_sync_flow test_sync_chat test_sync_chat_carry test_archive test_archive_codec test_archive_source; do
+for Test in test_config test_sync_flow test_sync_chat test_sync_chat_carry test_archive test_archive_codec test_archive_source test_sync_auto; do
     clang++ "${Flags[@]}" -o "$BuildPath/$Test" \
         "$RepoPath/tests/$Test.cpp" \
         "${Objects[@]}" \

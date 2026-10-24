@@ -57,6 +57,11 @@ settings sync.
   machine-owned half of the configuration. Rewritten whenever it changes, which
   is why it is a separate file: it must never touch the mtime of the
   `settings.toml` you are editing by hand.
+- `purple/purple_sync_auto.{h,cpp}` and `purple_sync_auto_state.cpp` share the
+  opt-in automatic settings policy: coalesced checks, safe successor apply,
+  exact saved-byte publish/edit, uncertain-outcome reconciliation and bounded
+  own-record retirement. Clients execute and persist its ticketed plans.
+  See [automatic settings sync](docs/sync-auto.md).
 - `purple/purple_config_sync.{h,cpp}` - constructs content fingerprints with
   generation keys and bounded ancestry for account-backed config versions,
   then classifies remote heads as stale, same, ahead, concurrent, or unrelated.
