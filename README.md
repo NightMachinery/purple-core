@@ -33,8 +33,10 @@ separate work.
 The storage-independent archive model, event reducers, version codec and
 transaction/purge/media plans are documented in
 [the archive core contract](docs/archive-core.md). Client storage and UI remain
-separate integrations. Archive schema and lifecycle are independent of
-settings sync.
+separate integrations. The [storage contract](docs/archive-storage.md) adds shared
+SQLite statements, encrypted row/media framing, account-key policy and
+crash-safe logout removal plans. The library performs no SQL, encryption or
+file I/O. Archive schema and lifecycle are independent of settings sync.
 
 ## What is here
 
@@ -414,7 +416,11 @@ devices; `tests/test_sync_chat.cpp` covers peer tokens, marks, eligibility and
 chat resolution. `tests/test_sync_chat_carry.cpp` covers carry, scoped readback,
 ordered commits and crash recovery. `tests/test_archive.cpp` covers archive
 events, transactions, media and purges; `tests/test_archive_codec.cpp` covers
-identity and codec compatibility. `run.sh` compiles the core once and runs all six.
+identity and codec compatibility; `tests/test_archive_source.cpp` covers copy-source
+provenance. `tests/test_archive_storage.cpp` covers SQL plans, envelopes, key loss
+and logout barriers. `tests/test_sync_auto.cpp` covers automatic settings policy.
+`run.sh` compiles the core once and runs all nine. Set
+`ARCHIVE_SQLITE_TESTS=1` to also execute the SQL against system SQLite.
 
 ```sh
 QT_PREFIX=/path/to/qt tests/run.sh

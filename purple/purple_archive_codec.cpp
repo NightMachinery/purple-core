@@ -6,6 +6,7 @@ Licensed under the GNU General Public License, version 2 or (at your
 option) any later version.
 */
 #include "purple/purple_archive_codec.h"
+#include "purple/purple_archive_rows.h"
 
 #include "purple/purple_sync_json.h"
 #include "purple/purple_archive_internal.h"
@@ -844,6 +845,112 @@ std::optional<QByteArray> EncodeArchiveSnapshot(const ArchiveState &state) {
 		return std::nullopt;
 	}
 	return canonical.canonical;
+}
+
+ArchiveRecordKind ArchiveRowKind(const ArchiveRow &row) {
+	return std::visit([](const auto &value) {
+		using T = std::decay_t<decltype(value)>;
+		if constexpr (std::is_same_v<T, ArchiveState>) { return ArchiveRecordKind::Account; }
+		else if constexpr (std::is_same_v<T, ArchiveMessage>) { return ArchiveRecordKind::Message; }
+		else if constexpr (std::is_same_v<T, ArchiveVersionSnapshot>) { return ArchiveRecordKind::Version; }
+		else if constexpr (std::is_same_v<T, ArchiveEventReceipt>) { return ArchiveRecordKind::Event; }
+		else if constexpr (std::is_same_v<T, ArchiveBlob>) { return ArchiveRecordKind::Blob; }
+		else if constexpr (std::is_same_v<T, ArchiveMediaJob>) { return ArchiveRecordKind::Job; }
+		else if constexpr (std::is_same_v<T, ArchiveReaderLease>) { return ArchiveRecordKind::Lease; }
+		else { return ArchiveRecordKind::Generation; }
+	}, row.value);
+}
+
+std::optional<QByteArray> EncodeArchiveRow(const ArchiveRow &row) {
+	if (!row.preserved.isEmpty()) {
+		return std::nullopt;
+	}
+	auto object = row.preserved;
+	object.insert(u"format"_q, row.body ? u"purple-archive-body-row"_q : u"purple-archive-row"_q);
+	if (row.body) {
+		if (ArchiveRowKind(row) != ArchiveRecordKind::Version || !IsArchiveHash(row.body->hash)
+			|| row.body->bytes < 1 || row.body->bytes > kArchiveCodecByteLimit) { return {}; }
+		object.insert(u"bodyHash"_q, row.body->hash);
+		object.insert(u"bodyBytes"_q, QString::number(row.body->bytes));
+	}
+	object.insert(u"schema"_q, 1);
+	object.insert(u"kind"_q, int(ArchiveRowKind(row)));
+	auto valid = true;
+	object.insert(u"value"_q, std::visit([&](const auto &value) -> QJsonValue {
+		using T = std::decay_t<decltype(value)>;
+		if constexpr (std::is_same_v<T, ArchiveVersionSnapshot>) {
+			const auto bytes = EncodeArchiveVersionSnapshot(value);
+			valid = bytes.has_value();
+			return bytes ? QJsonDocument::fromJson(*bytes).object() : QJsonObject();
+		} else {
+			auto decoded = T();
+			auto unsupported = false;
+			const auto json = Write(value);
+			valid = Read(json, decoded, unsupported) && decoded == value;
+			return json;
+		}
+	}, row.value));
+	if (!valid) { return std::nullopt; }
+	const auto encoded = CanonicalizeSyncJson(QJsonDocument(object).toJson(QJsonDocument::Compact));
+	if (!encoded || encoded.canonical.size() > kArchiveCodecByteLimit) { return std::nullopt; }
+	return encoded.canonical;
+}
+
+ArchiveRowDecodeResult DecodeArchiveRow(const QByteArray &bytes) {
+	if (bytes.size() > kArchiveCodecByteLimit) { return {}; }
+	const auto canonical = CanonicalizeSyncJson(bytes);
+	if (!canonical) {
+		return { (canonical.error == SyncJsonErrorKind::NonInteger
+			|| canonical.error == SyncJsonErrorKind::NumberRange)
+			? ArchiveCodecStatus::Unsupported : ArchiveCodecStatus::Invalid, {} };
+	}
+	auto object = QJsonDocument::fromJson(canonical.canonical).object();
+	const auto schema = object.take(u"schema"_q);
+	const auto format = object.take(u"format"_q);
+	const auto hasBody = format == QJsonValue(u"purple-archive-body-row"_q);
+	if ((!hasBody && format != QJsonValue(u"purple-archive-row"_q))
+		|| !schema.isDouble() || schema.toInteger(-1) < 1) { return {}; }
+	if (schema.toInteger() > 1) { return { ArchiveCodecStatus::NewerSchema, {} }; }
+	const auto kind = object.take(u"kind"_q);
+	if (!kind.isDouble()) { return {}; }
+	const auto payload = object.take(u"value"_q);
+	auto row = ArchiveRow();
+	if (hasBody) {
+		const auto hash = object.take(u"bodyHash"_q);
+		const auto bytes = object.take(u"bodyBytes"_q);
+		auto validBytes = false;
+		const auto size = bytes.toString().toLongLong(&validBytes);
+		if (kind.toInteger(-1) != int(ArchiveRecordKind::Version) || !hash.isString() || !IsArchiveHash(hash.toString())
+			|| !bytes.isString() || !validBytes || QString::number(size) != bytes.toString()
+			|| size < 1 || size > kArchiveCodecByteLimit) { return {}; }
+		row.body = ArchiveVersionBody{ hash.toString(), size };
+	}
+	auto unsupported = false;
+	auto valid = false;
+	const auto read = [&]<typename T>() {
+		auto value = T();
+		valid = Read(payload, value, unsupported);
+		row.value = std::move(value);
+	};
+	switch (kind.toInteger(-1)) {
+	case int(ArchiveRecordKind::Account): read.operator()<ArchiveState>(); break;
+	case int(ArchiveRecordKind::Message): read.operator()<ArchiveMessage>(); break;
+	case int(ArchiveRecordKind::Version): {
+		const auto decoded = DecodeArchiveVersionSnapshot(QJsonDocument(payload.toObject()).toJson(QJsonDocument::Compact));
+		if (!decoded.snapshot) { return { decoded.status, {} }; }
+		row.value = *decoded.snapshot;
+		valid = true;
+	} break;
+	case int(ArchiveRecordKind::Event): read.operator()<ArchiveEventReceipt>(); break;
+	case int(ArchiveRecordKind::Blob): read.operator()<ArchiveBlob>(); break;
+	case int(ArchiveRecordKind::Job): read.operator()<ArchiveMediaJob>(); break;
+	case int(ArchiveRecordKind::Lease): read.operator()<ArchiveReaderLease>(); break;
+	case int(ArchiveRecordKind::Generation): read.operator()<ArchiveChatGeneration>(); break;
+	default: return { ArchiveCodecStatus::Unsupported, {} };
+	}
+	if (!valid) { return { unsupported ? ArchiveCodecStatus::Unsupported : ArchiveCodecStatus::Invalid, {} }; }
+	if (!object.isEmpty()) { return { ArchiveCodecStatus::Unsupported, {} }; }
+	return { ArchiveCodecStatus::Valid, std::move(row) };
 }
 
 }
