@@ -11,6 +11,7 @@ option) any later version.
 #include "purple/purple_archive_source.h"
 #include "purple/purple_archive_media_lifecycle.h"
 #include "purple/purple_archive_views.h"
+#include "purple/purple_archive_staging.h"
 
 #include <sqlite3.h>
 
@@ -1364,11 +1365,101 @@ void ReviewSqlFences(const QString &path) {
 	CHECK(!database.loadSlice(state.account, security));
 }
 
+void StreamingCompletionAndSharing(const QString &path) {
+	Section = "SQLite staging finalizer completion sharing and GC";
+	auto database = Database(path);
+	auto state = Empty();
+	const auto security = Security();
+	const auto epoch = ArchiveStoreEpoch{ state.account, security.storeId, 1 };
+	CHECK(database.run(InitializeArchiveSql(state, security)));
+	auto event = Event(state, u"stream-original"_q, 1);
+	AddMedia(event);
+	ApplySql(database, state, PlanArchiveEvent(state, event), security);
+	auto job = Job(state, u"stream-job"_q, event.id);
+	ApplySql(database, state, PlanArchiveMediaStage(state, job), security, true);
+	const auto &version = Message(state).versions[0];
+	const auto binding = ArchiveStagingBinding{ { epoch, Key(), version.id, version.revision,
+		ArchiveContentHash(version.content), job.mediaIdentity, job.generation }, job.id, 7, {} };
+	const auto header = BeginArchiveStaging(binding, state, epoch);
+	CHECK(header);
+	if (!header) { return; }
+	const auto update = PlanArchiveStagingPiece(*header, {}, ArchiveStagingEmptyProof(), {},
+		{ 0, "stream!" }, security, state, epoch);
+	CHECK(update);
+	if (!update) { return; }
+	const auto ack = ArchiveStagingDurability{ true, true, ArchiveStagingBindingId(binding, security),
+		update.pieceId, ArchiveStagingHeaderHash(*header), ArchiveStagingHeaderHash(update.next.header) };
+	const auto committed = CompleteArchiveStagingPiece(*header, update, ack, security, state, epoch);
+	CHECK(committed.header);
+	if (!committed.header) { return; }
+	const auto frozen = FreezeArchiveStagingCheckpoint(*committed.header, state, epoch);
+	CHECK(frozen);
+	if (!frozen) { return; }
+	auto newer = Event(state, u"stream-newer"_q, 2, u"later"_q, ArchiveOrigin::AuthoritativeEdit);
+	AddMedia(newer);
+	ApplySql(database, state, PlanArchiveEvent(state, newer), security);
+	const auto beforeNewer = Message(state).versions[1];
+	auto started = BeginArchiveStagingFinalize(*committed.header, *frozen, security, state, epoch);
+	CHECK(started.session);
+	if (!started.session) { return; }
+	auto step = started.step;
+	auto published = false;
+	const auto pageFrame = SealArchiveStagingRecord(binding, update.page, security);
+	CHECK(pageFrame);
+	if (!pageFrame) { return; }
+	while (step.status == ArchiveStagingStatus::Ready) {
+		auto input = ArchiveStagingFinalizeInput(ArchiveStagingFinish{});
+		switch (step.request.kind) {
+		case ArchiveStagingRequestKind::Page:
+			input = ArchiveStagingPageInput{ step.request.id, update.page.checkpoint, *pageFrame, update.next.proof };
+			break;
+		case ArchiveStagingRequestKind::Piece:
+			input = ArchiveStagingPieceInput{ step.request.id, update.pieceFrame };
+			break;
+		case ArchiveStagingRequestKind::Publish:
+			CHECK(step.publication && CheckArchiveStagingPublication(*step.publication,
+				*committed.header, security, state, epoch) == ArchiveStagingStatus::Ready);
+			CHECK(state.jobs[0].state == ArchiveJobState::Staged && database.load(state.account, security) == state);
+			published = true;
+			input = ArchiveStagingPublicationAck(*step.publication, true);
+			break;
+		case ArchiveStagingRequestKind::Complete:
+			CHECK(published);
+			input = ArchiveStagingFinish{ step.request.id };
+			break;
+		case ArchiveStagingRequestKind::Finished: CHECK(false); return;
+		}
+		step = AdvanceArchiveStagingFinalize(*started.session, input, *committed.header, security, state, epoch);
+	}
+	CHECK(step.status == ArchiveStagingStatus::Done && step.completion);
+	if (!step.completion) { return; }
+	ApplySql(database, state, *step.completion, security, true);
+	CHECK(Message(state).versions[0].media[0].state == ArchiveMediaState::Complete);
+	CHECK(Message(state).versions[1] == beforeNewer);
+	const auto blob = state.jobs[0].blobId;
+	CHECK(PlanArchiveGarbageCollection(state).status == ArchivePlanStatus::NoChange);
+	const auto copy = Job(state, u"stream-reuse"_q, newer.id);
+	ApplySql(database, state, PlanArchiveMediaStage(state, copy), security, true);
+	CHECK(Message(state).versions[1].media[0].blobId == blob);
+	CHECK(CountArchiveBlobReferences(state, blob).versions == 2);
+	ApplyPurge(database, state, Purge(state, ArchivePurgeKind::EditHistory), security);
+	CHECK(Message(state).versions.size() == 1 && Message(state).versions[0].media[0].blobId == blob);
+	CHECK(PlanArchiveGarbageCollection(state).status == ArchivePlanStatus::NoChange);
+	ApplySql(database, state, PlanArchiveEvent(state,
+		Event(state, u"stream-deleted"_q, 3, {}, ArchiveOrigin::AuthoritativeDelete)), security);
+	ApplyPurge(database, state, Purge(state, ArchivePurgeKind::Trashbin), security);
+	CHECK(PlanArchiveGarbageCollection(state).status == ArchivePlanStatus::Ready);
+	const auto gc = PlanArchiveSqlGarbage(HeaderOnly(state), state.blobs, security);
+	CHECK(gc.deleteOwnedBlobs == std::vector<QString>{ blob });
+	CHECK(database.run(gc.program));
+}
+
 }
 
 int main() {
 	const auto directory = QTemporaryDir();
 	CHECK(directory.isValid());
+	StreamingCompletionAndSharing(directory.path() + u"/streaming.sqlite"_q);
 	ReviewSqlFences(directory.path() + u"/review-fences.sqlite"_q);
 	ReviewOldSqlShape(directory.path() + u"/review-old-shape.sqlite"_q);
 	DeletedViewsAndLifecycle(directory.path() + u"/deleted-views.sqlite"_q);

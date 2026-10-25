@@ -95,6 +95,97 @@ A single opened chunk does not establish a complete file. Never stage plaintext
 media or buffer an entire large attachment. Publish immutable encrypted owned
 bytes before committing complete references.
 
+## Provisional staging storage contract
+
+The optional `purple_archive_staging.*` protocol adds envelope kinds
+**StagingPiece=13** and **StagingProgress=14**. Existing kinds 1 through 12,
+envelope version 1, row codecs, SQL format 2 and the DDL fingerprint are
+unchanged. Register `purple_archive_staging.cpp` in Desktop/Android's shared-core
+source list when adopting streaming retention. Existing complete-file clients
+need no API changes. Old core code refuses these new envelope domains; do not
+feed provisional frames to a final-media reader.
+
+Use `ArchiveStagingPieceContext` for immutable 256 KiB window images and
+`ArchiveStagingRecordContext`/`SealArchiveStagingRecord` for progress. Their row
+ids are account/store-keyed HMAC tokens. Piece ids bind the complete staging
+binding, aligned offset, length and image digest. Progress ids bind the complete
+binding, record kind, position and checkpoint sequence. Header position is 0,
+page position is its window index, checkpoint position is 1 for an update delta
+and 0 for a frozen finalization snapshot. Delta and frozen snapshot at the same
+sequence therefore have distinct identities. Use `ArchiveStagingAddress` rather
+than constructing these positions. Raw message-body/attachment hashes and
+plaintext coverage belong inside encrypted records, never in visible ids.
+
+Native storage supplies durable ownership, not a new SQL schema. Keep a bounded,
+encrypted staging catalogue keyed to the job and binding token; persist only
+core-admitted records. Exactly one binding may be created per job using atomic
+ownership creation. Header and snapshot restoration must use
+`OpenArchiveStagingRecord` with the catalogue's expected address; the decoded
+value is not trusted before authentication. Enforce the codec's 64 KiB record,
+128-range and 46-sibling limits before buffering untrusted native input. A page
+contains one fixed-window image reference and optional coverage bitmap.
+The native page/node index can span the attachment on disk, but enumerate or
+lookup bounded pages instead of loading it wholesale. Membership and absence
+proofs are checked against the authenticated header, so an untrusted index is
+not an alternate authority. Rebuild it from authenticated checkpoint deltas
+without accumulating a whole-file in-memory manifest.
+
+For each Ready piece plan, the required write order is:
+
+1. Record ownership of the new immutable piece before or atomically with file
+   creation, so a crash leaves an enumerable owned orphan. Seal with a fresh
+   nonce, publish, authenticate the actual bytes and make them durable. If the
+   same piece id already exists, validate its context, length and plaintext
+   digest, then reuse it. Identical images may arise from newly observed zero
+   bytes; retries must not replace an existing immutable frame.
+2. Seal the new page, checkpoint delta and header. Atomically compare the
+   expected old-header hash and commit all three, including the new root and
+   piece reference. Durably commit the catalogue/node-cache updates needed for
+   recovery. A node cache is rebuildable and need not be trusted.
+3. Return both durability flags and the exact binding/piece/old/new hashes to
+   `CompleteArchiveStagingPiece`. A planned or buffered write, rename without
+   required durability, missing piece, or failed CAS is not an acknowledgement.
+
+On recovery, an old header means an unpublished piece is an owned orphan;
+a new header requires its exact page and piece to exist and authenticate.
+Report missing/corrupted referenced data as a retention gap, never credit it
+by trusting counters. Keep superseded pieces and history owned until bounded
+cleanup establishes they are unreachable from all live/checkpoint readers.
+Credit no bytes from a failed CAS. Persist the frozen snapshot before starting
+the two-pass finalizer, and retain its exact reachable pages and pieces through
+completion or abort. Do not mutate its root underneath an active session.
+
+Each canonical publication requires a fresh
+`CheckArchiveStagingPublication` immediately before native I/O. Serialize this
+check and publication/ownership update with purge, account removal and job
+changes, or recheck under the same native guard. Register provisional or
+canonical orphans in owned accounting even if a fence changes after writing.
+A pure planner cannot close a native time-of-check/time-of-use race itself.
+Do not commit complete references before every canonical chunk is durable.
+After a restart, rescan from the frozen snapshot. A canonical chunk already
+published with another nonce is reusable only after the finalizer authenticates
+its actual frame via `existingFrame` and its actual `frameHash`. Acknowledging a
+new frame when different bytes are durable is invalid.
+
+The finalizer returns an ordinary `ArchiveTransaction`, translated and committed
+with the existing checked SQL protocol. Crashes between publication and SQL
+commit leave owned, unreferenced chunks; crashes during SQL commit leave either
+the staged job or its complete exact-version reference. A new head does not
+cancel a historical job, and it never receives that job's completion. Purge,
+revision/hash changes, removed versions and external epoch changes refuse at
+every step. Use existing reader/GC pins for canonical shared blobs; staging
+ownership and active-checkpoint readers are native obligations, not fabricated
+SQL media references. Physical usage and logout removal include all provisional
+images, encrypted progress, node caches and canonical orphans. Completion or
+abandonment must not leave an unowned staging directory.
+
+`test_archive_staging` covers sparse uint64 offsets, fragmented/out-of-order
+coverage, codec/domain isolation, overlap refusal, every durability cut,
+page/image corruption, all finalizer restart boundaries, exact historical
+fences, 1 MiB boundaries and a generated 128 MiB stream with bounded buffers.
+`test_archive_sqlite` also translates staging completion, rolls back at each SQL
+cut, reuses the retained owned copy and checks shared-blob purge/GC behavior.
+
 ## SQL schema, privacy and checked execution
 
 Schema 1 separates account metadata, message shells, versions, event receipts,

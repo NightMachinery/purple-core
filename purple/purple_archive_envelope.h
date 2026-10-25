@@ -33,6 +33,8 @@ enum class ArchiveRecordKind {
 	WrappedKey = 10,
 	CaptureGap = 11,
 	Maintenance = 12,
+	StagingPiece = 13,
+	StagingProgress = 14,
 };
 
 struct ArchiveEnvelopeContext {

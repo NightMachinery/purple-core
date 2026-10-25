@@ -300,6 +300,127 @@ removed pending ids. Crash before marking deletes nothing; crash after marking
 can reissue the pending ids; crash after physical deletion can finish metadata
 later. A live version/shared blob or any reader lease prevents collection.
 
+## Provisional streaming-media staging
+
+`purple_archive_staging.*` is an optional pure protocol for retaining observed
+streaming bytes that arrive out of order. Complete-file retention continues to
+use the existing media APIs. Register `purple_archive_staging.cpp` in each
+client's core source list when adopting streaming retention; the shared runner
+registers `test_archive_staging`. No SQLite tables, store-format changes, or
+changes to existing completion APIs are needed.
+
+An `ArchiveStagingBinding` contains the complete `ArchiveMediaSource`, staged
+job id, immutable attachment byte count and optional expected whole-attachment
+SHA-256. The source content hash identifies the **message body**, not attachment
+bytes. The job must exist, still be Staged, and match the exact version,
+revision, body hash, immutable media identity and purge generations. The external
+account/store epoch must match too. The source may identify a retained historical
+version after a newer head arrives. Completion fills only that exact historical
+version. Purged, missing, rewritten or differently hashed versions refuse.
+
+Fix total size before creating the durable staging header. An unknown-size
+stream cannot yet use this protocol; an empty file needs an explicit zero-size
+job. A job owns one durable binding. Never replace it with a different binding
+or reset its progress under the same ownership entry. The keyed binding id
+includes every fence, total size and expected hash. No raw body/attachment digest
+is used as a visible envelope identity.
+
+### Bounded coverage and checkpoint publication
+
+Staging format 1 has Header, CoveragePage and Checkpoint records, encoded by
+`EncodeArchiveStagingRecord` and admitted by `DecodeArchiveStagingRecord`.
+Unknown versions, kinds or fields refuse. Unsigned values use canonical decimal
+strings, retaining the complete uint64 range. Each record is at most 64 KiB;
+range lists are capped at 128 entries. Format 1 uses exactly one image reference
+per materialized page, a stricter bound than that cap.
+
+The file is divided into fixed 256 KiB staging windows. A page references one
+immutable encrypted window image; its range contains offset, exact window length
+and image SHA-256. Partial pages carry an exact byte-coverage bitmap, at most
+32 KiB before base64. Unseen image bytes are zero and do not count as retained
+bytes. Complete pages omit the bitmap. This admits arbitrarily fragmented parts
+without a growing range list. The cost is rewriting a bounded window image for
+each new fragment. Adapters may batch adjacent observations before planning.
+They must not discard observed bytes while waiting to batch.
+
+Call `ArchiveStagingInputSize` to split each observation at window boundaries,
+then `PlanArchiveStagingPiece` with the current authenticated header, old page
+(or authenticated absence), membership proof and prior encrypted image. An input
+larger than 1 MiB or crossing a window refuses; splitting is not a size cap on
+the attachment. Checked uint64 addressing supports sparse offsets through the
+maximum uint64 file length. Identical replay is NoChange; a disagreeing captured
+byte is Conflict. Unknown bytes never overwrite captured bytes.
+
+The header commits to all pages with a sparse Merkle root of fixed depth 46.
+`ArchiveStagingEmptyProof` supplies the empty tree's siblings. Each membership
+or absence proof has exactly 46 sibling hashes. Pages authenticate their keyed
+binding id, index, update sequence, coverage and image reference. The header
+records sequence, covered bytes and page count; a counter alone never proves
+coverage. A native node index may live on disk and be untrusted: the supplied
+proof must reproduce the authenticated root. `ArchiveStagingNodes` returns the
+46 changed ancestors; the page hash is its leaf. Replay encrypted checkpoint
+deltas to rebuild the cache, or scan pages using bounded native storage. Core
+keeps no whole-file page, range or node vector in memory.
+
+A Ready update is a plan, not retained bytes. Publish and authenticate its
+immutable piece first, then atomically CAS the old header hash to the new
+header while committing the new encrypted page and checkpoint. A checkpoint
+delta binds old-header hash, new header, changed page hash and proof. CAS losers
+must reload and replan; do not merge bitmap bytes independently. Only
+`CompleteArchiveStagingPiece` with an exact durability acknowledgement credits
+coverage. Both piece durability and atomic checkpoint durability are required;
+acknowledgements bind binding id, piece id and both header hashes. Repeated
+successful completion is AlreadyApplied. Lost pieces, rollback or an unpublished
+page cannot be credited by reconstructing counts alone.
+
+### Two-pass finalization
+
+`FreezeArchiveStagingCheckpoint` requires every byte and page. Persist and reopen
+that immutable encrypted snapshot before beginning finalization. Pass the
+admitted snapshot and matching current durable header to
+`BeginArchiveStagingFinalize`. The move-only session requests one authenticated
+page/proof or piece at a time through `AdvanceArchiveStagingFinalize`:
+
+1. In Verify, read pages and pieces in ascending offset order, authenticate every
+   image and coverage proof, and compute exact size plus whole SHA-256. Compare
+   the optional expected attachment hash. Holes, missing/forged/reordered pages,
+   corrupted images and mismatches refuse without a canonical publication.
+2. In Reseal, reread/authenticate the same immutable checkpoint. Rehash bytes and
+   pack canonical 1 MiB chunks using the existing keyed-blob-token media context.
+   Every individual plaintext buffer is at most 1 MiB; an image is at most
+   256 KiB and progress is at most 64 KiB. Memory does not grow with file size.
+   The final partial chunk has its exact size; a declared empty attachment has
+   one authenticated empty canonical chunk.
+3. For each Publish request, call `CheckArchiveStagingPublication` immediately
+   before native publication, using fresh state, epoch and current header.
+   Publish immutably and durably, then return the exact
+   `ArchiveStagingPublishAck`. A false durability flag returns NotCommitted and
+   the same pending frame. No subsequent chunk or completion is credited yet.
+4. After all chunks are durable and the second whole-file hash matches, return
+   the matching Finish request. Only then does core return the existing
+   `PlanArchiveScopedMediaCompletion` transaction. Execute its checked SQL and
+   existing durable commit protocol before reporting a retained attachment.
+
+Each advance and publication check revalidates the full job/version/revision/
+body-hash, external and purge fences. Request ids reject future/wrong callbacks
+and coalesce old callbacks without advancing progress. Crypto failures expose
+no publication/completion. The session is transient; restart reopens the frozen
+checkpoint and rescans both passes. No private hash-library state is serialized.
+Already durable canonical chunks can be reused after a crash or shared-blob
+race: supply their actual encrypted frame and digest in `PublishAck.existingFrame`
+and `frameHash`. Core authenticates the canonical context and exact plaintext
+size/hash before accepting the durability claim. Never overwrite an immutable
+chunk with a retry's different random-nonce frame.
+
+Core does no I/O and cannot infer that an acknowledgement is truthful. Native
+adapters own nonces, ownership manifests, fsync/CAS, encrypted node/page storage,
+and bounded enumeration. All provisional pieces, superseded images, checkpoint
+records and orphan canonical chunks remain archive-owned, count in physical
+usage and participate in purge/logout reconciliation. A failed run never turns
+an orphan into a complete reference, and ordinary Telegram cache files are
+never owned or deleted by this protocol. See the
+[storage contract](archive-storage.md#provisional-staging-storage-contract).
+
 ## Purges and generations
 
 A purge names exactly one account and either one typed chat (plus explicit
