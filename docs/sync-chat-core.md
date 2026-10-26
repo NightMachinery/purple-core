@@ -1,7 +1,8 @@
 # Sync chat core contracts
 
-The shared peer codec, mark parser, eligibility check and resolver perform no
-Telegram requests or filesystem I/O. They consume facts supplied by the client.
+The shared peer codec, message ownership predicate, mark parser, eligibility
+check and resolver perform no Telegram requests or filesystem I/O. They consume
+facts supplied by the client.
 These local contracts do not establish search coverage, broadcast ownership or
 server error mappings. The [carry journal](sync-chat-carry.md) defines settings carry and recovery.
 Clients execute its actions before a returned state/cache can be committed.
@@ -24,8 +25,66 @@ case-sensitive string order, including decimal digits, so `user:2` sorts after
 
 ## Marks and ownership
 
+`IsOwnSyncChatMessage(SyncChatMessageFacts)` is the shared ownership predicate
+for marks and sync records. It returns true exactly when
+`GetSyncChatMessageOwnership(facts)` returns `Own`. The latter retains the
+existing `Own` / `Other` / `Unknown` distinction for inventory and carry:
+unknown origin must hold review, rather than being discarded as another
+author's record. Pass that verdict to `ParseSyncChatMark` and to the ownership
+argument of `MakeSyncCarryMessage`. Do not replace Unknown with Other by
+converting the boolean result back into an enum. Record bytes, writer-install
+fields, captions and filenames cannot establish Telegram ownership.
+
+All six common facts are required, including in Saved Messages: `regular` must
+be true, while `forwarded`, `viaBot`, `scheduled`, `hasTtl` and `sentAsOther`
+must be false. Each is an optional boolean. An omitted value means unknown,
+not false. A known service message, forward, via-bot message, scheduled message,
+TTL message or alternate send-as identity returns Other. If there is no known
+exclusion but a required fact is unknown, the verdict is Unknown. Both refuse
+admission. Default-constructed facts authorize nothing.
+
+After those common guards, ownership depends on the chat kind:
+
+- Saved Messages (`Self`) requires no `out` or sender fact. Run 8 observed
+  genuine self marks with `out=false` and absent `from_id`. False or unknown
+  outgoing state and an absent sender therefore remain acceptable here.
+- A private or bot chat requires affirmative `out`. Sender identity does not
+  replace it and is not compared. This accommodates native clients substituting
+  the private recipient for an absent sender.
+- A basic group or supergroup requires affirmative `out` and a self sender.
+  Supply a typed `PeerToken` sender and the account's bare `selfUserId`, or an
+  already established canonical `Self` token. The existing peer codec normalizes
+  `user:<selfUserId>` to self. A user sender with no account id is Unknown;
+  absent/malformed senders or out-of-domain account ids are also Unknown.
+  Another user, a chat sender or a channel sender is Other. Numeric equality
+  across different peer kinds never proves self, so anonymous/send-as channel
+  senders fail even if their bare id equals the account's user id.
+- A broadcast requires affirmative `out`, `creator` and `soleAdmin`, with
+  `broadcastOwnership` explicitly set to `CreatorAndSoleAdmin`. Sender identity
+  is not required: normal channel attribution or absent `from_id` does not
+  establish an alternate send-as identity. With affirmative `out`, unselected,
+  invalid and `OutgoingVerified` modes remain Unknown, including when all rights are true.
+  Broad outgoing ownership is disabled in this predicate.
+
+Unknown/invalid chat kinds return Unknown; secret chats and channel direct
+messages return Other. Fields that a branch does not use may remain unknown:
+self ignores outgoing/sender/rights; private and bot ignore sender/rights;
+groups ignore broadcast rights; broadcasts ignore sender. Every fact required
+by the selected branch must be known and safe before Own can be returned.
+
+Native mappers must bind the chat and current account before constructing these
+facts. `Self` means that account's Saved Messages, not an absent sender or an
+unresolved peer. Optional `sender` defaults to absent, distinct from an explicit
+canonical Self token. Map native constructor/flag absence to false only when
+that absence is understood; unsupported, partial or contradictory observations
+stay unknown. `sentAsOther` describes an alternate posting identity, not every
+broadcast message attributed to its channel. Confirm creator and sole-admin
+state from the origin account's current full info. These pure facts cannot
+validate their native provenance or freshness. Apply the same mapper and
+predicate to discovery hits, exact mark rereads and record inventory/readbacks.
+
 `ParseSyncChatMark(text, hasMedia, ownership)` accepts only an explicit `Own`
-verdict, supplied by a separate ownership check. Unknown and Other refuse. It
+verdict, supplied by the ownership check above. Unknown and Other refuse. It
 does not infer ownership from `out`, sender ids or a chat kind.
 
 The final nonempty line is trimmed and case-folded. It must be exactly
@@ -50,9 +109,10 @@ chat kinds refuse, and file rights must be supplied affirmatively.
 The broadcast branch is a required argument. `Unselected` refuses broadcasts,
 including a channel with a creator and sole admin. `OutgoingVerified` represents
 the broad branch only after server probes validate ownership. The alternative
-`CreatorAndSoleAdmin` requires both supplied facts. Both branches are testable;
-this core change selects neither for a client. It does not compute a message
-ownership predicate or map raw Telegram sender fields.
+`CreatorAndSoleAdmin` requires both supplied facts. Both eligibility branches
+remain testable; eligibility alone never proves message ownership. The message
+predicate above permits only the restricted creator-and-sole-admin broadcast
+branch. Clients must pass both checks and map raw Telegram fields themselves.
 
 Private chats require a warning about the recipient; bot chats require one
 about the bot owner. Groups/channels report other member/admin counts when
@@ -169,14 +229,31 @@ arbitrary-chat fallback remain inactive. Forward/carry probes remain required; t
 does not establish their server behavior. Tests of supplied facts are local contract
 checks, not evidence that these Telegram probes ran.
 
+C0 adds only the pure ownership contract. Run 8 supplies the self exception;
+each client's native normalization still needs N1/N2 qualification. Keep R2
+until that client's self parity check passes. D2 and native origin checks remain
+necessary for any future broad broadcast relaxation. The automatic settings
+policy's Self-only guard remains in force; an Own verdict neither activates
+non-self automation nor authorizes established-stream moves or native writes.
+
 ## Verification
 
-`tests/run.sh` passed with 10,622 config checks, 1,248 sync-flow checks and
-48,192 sync-chat checks, all with zero failures. Cases include refusal matrices,
+`ARCHIVE_SQLITE_TESTS=1 tests/run.sh` passed all eleven programs with 258,996
+checks and zero failures, including 10,622 config checks, 1,248 sync-flow checks,
+50,665 sync-chat checks and 128,372 SQLite checks. Cases include refusal matrices,
 3,000 peer round trips, 1,000 randomized mark sets with repeated permutations,
 and 1,000 state moves. The winner-inventory regressions cover Unknown becoming
 Empty or Present with marked/Q-found sources, including the reviewer's exact
-input, and progress when no Fill source exists. A separate check compiled the
+input, and progress when no Fill source exists. A prior separate check compiled the
 actual prior state-v1
 reader: it accepted real serializer v1 bytes and returned NewerVersion for both
 v2 channel and v2 self bytes. No server probe or client integration is claimed.
+
+The C0 ordinary unit matrix covers every common guard as safe, excluded and
+unknown across all six accepted kinds, unknown plus known exclusions, outgoing
+states, typed sender normalization, malformed ids and cross-kind collisions.
+It includes the Run 8 self case, private-recipient sender substitution, group
+anonymous/channel senders, all broadcast mode/out/creator/sole-admin states,
+and the same verdict consumed by mark parsing and settings/playlist carry
+selection. Unknown records hold review; excluded records are ignored; own
+opaque future records survive selection.

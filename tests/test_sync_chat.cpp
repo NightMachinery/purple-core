@@ -8,6 +8,7 @@ option) any later version.
 #include "purple/purple_config_payload.h"
 #include "purple/purple_peer_token.h"
 #include "purple/purple_sync_chat.h"
+#include "purple/purple_sync_chat_carry.h"
 #include "purple/purple_types.h"
 
 #include <QtCore/QJsonArray>
@@ -162,6 +163,251 @@ void MarkGrammar() {
 		CHECK(result.status == (version == 1
 			? SyncChatMarkStatus::Supported : SyncChatMarkStatus::NewerVersion));
 		CHECK(result.version == QString::number(version));
+	}
+}
+
+SyncChatMessageFacts OwnMessage(SyncChatKind kind) {
+	auto facts = SyncChatMessageFacts();
+	facts.kind = kind;
+	facts.regular = true;
+	facts.forwarded = false;
+	facts.viaBot = false;
+	facts.scheduled = false;
+	facts.hasTtl = false;
+	facts.sentAsOther = false;
+	facts.out = true;
+	facts.sender = Peer(u"user:42"_q);
+	facts.selfUserId = 42;
+	facts.broadcastOwnership = SyncChatBroadcastOwnership::CreatorAndSoleAdmin;
+	facts.creator = true;
+	facts.soleAdmin = true;
+	return facts;
+}
+
+void CheckOwnership(
+		const SyncChatMessageFacts &facts,
+		SyncChatMessageOwnership expected) {
+	const auto ownership = GetSyncChatMessageOwnership(facts);
+	CHECK(ownership == expected);
+	CHECK(IsOwnSyncChatMessage(facts) == (expected == SyncChatMessageOwnership::Own));
+	CHECK(ParseSyncChatMark(u"#purplechatsync v1"_q, false, ownership).status
+		== ((expected == SyncChatMessageOwnership::Own)
+			? SyncChatMarkStatus::Supported : SyncChatMarkStatus::NotMark));
+	CHECK(ParseSyncChatMark(u"#purplechatsync v1"_q, true, ownership).status
+		== SyncChatMarkStatus::NotMark);
+}
+
+void MessageOwnershipGuards() {
+	using Ownership = SyncChatMessageOwnership;
+	CheckOwnership({}, Ownership::Unknown);
+	const auto kinds = std::array{
+		SyncChatKind::Self, SyncChatKind::Private, SyncChatKind::Bot,
+		SyncChatKind::BasicGroup, SyncChatKind::Supergroup, SyncChatKind::Broadcast,
+	};
+	struct Guard {
+		std::optional<bool> SyncChatMessageFacts::*field;
+		bool safe;
+	};
+	const auto guards = std::array{
+		Guard{ &SyncChatMessageFacts::regular, true },
+		Guard{ &SyncChatMessageFacts::forwarded, false },
+		Guard{ &SyncChatMessageFacts::viaBot, false },
+		Guard{ &SyncChatMessageFacts::scheduled, false },
+		Guard{ &SyncChatMessageFacts::hasTtl, false },
+		Guard{ &SyncChatMessageFacts::sentAsOther, false },
+	};
+	for (const auto kind : kinds) {
+		const auto own = OwnMessage(kind);
+		CheckOwnership(own, Ownership::Own);
+		for (const auto &guard : guards) {
+			auto refused = own;
+			refused.*guard.field = !guard.safe;
+			CheckOwnership(refused, Ownership::Other);
+			refused.*guard.field = std::nullopt;
+			CheckOwnership(refused, Ownership::Unknown);
+			for (const auto &other : guards) {
+				if (other.field == guard.field) {
+					continue;
+				}
+				auto excluded = refused;
+				excluded.*other.field = !other.safe;
+				CheckOwnership(excluded, Ownership::Other);
+			}
+		}
+		for (const auto out : std::array<std::optional<bool>, 3>{
+			true, false, std::nullopt,
+		}) {
+			auto facts = own;
+			facts.out = out;
+			const auto expected = kind == SyncChatKind::Self || out == true
+				? Ownership::Own : out == false ? Ownership::Other : Ownership::Unknown;
+			CheckOwnership(facts, expected);
+		}
+	}
+	for (const auto kind : { SyncChatKind::Secret, SyncChatKind::ChannelDirectMessages }) {
+		CheckOwnership(OwnMessage(kind), Ownership::Other);
+	}
+	for (const auto kind : { SyncChatKind::Unknown, SyncChatKind(-1), SyncChatKind(99) }) {
+		CheckOwnership(OwnMessage(kind), Ownership::Unknown);
+	}
+}
+
+void MessageOwnershipNormalization() {
+	using Ownership = SyncChatMessageOwnership;
+	const auto senders = std::vector<std::optional<PeerToken>>{
+		std::nullopt,
+		PeerToken(),
+		Peer(u"user:42"_q),
+		Peer(u"user:43"_q),
+		Peer(u"chat:42"_q),
+		Peer(u"channel:42"_q),
+	};
+	for (const auto kind : { SyncChatKind::Self, SyncChatKind::Private, SyncChatKind::Bot }) {
+		for (const auto &sender : senders) {
+			auto facts = OwnMessage(kind);
+			facts.sender = sender;
+			facts.selfUserId = 0;
+			facts.creator.reset();
+			facts.soleAdmin.reset();
+			facts.broadcastOwnership = SyncChatBroadcastOwnership::Unselected;
+			CheckOwnership(facts, Ownership::Own);
+		}
+	}
+	auto self = OwnMessage(SyncChatKind::Self);
+	self.sender.reset();
+	self.selfUserId = 0;
+	self.out = false;
+	CheckOwnership(self, Ownership::Own);
+	self.out.reset();
+	CheckOwnership(self, Ownership::Own);
+	self.forwarded = true;
+	CheckOwnership(self, Ownership::Other);
+	for (const auto kind : { SyncChatKind::Private, SyncChatKind::Bot }) {
+		auto facts = OwnMessage(kind);
+		facts.out = false;
+		CheckOwnership(facts, Ownership::Other);
+		facts.out.reset();
+		CheckOwnership(facts, Ownership::Unknown);
+	}
+	struct SenderCase {
+		std::optional<PeerToken> sender;
+		uint64_t selfUserId;
+		SyncChatMessageOwnership ownership;
+	};
+	const auto maximumId = uint64_t(std::numeric_limits<int64_t>::max());
+	const auto cases = std::vector<SenderCase>{
+		{ std::nullopt, 42, Ownership::Unknown },
+		{ PeerToken(), 42, Ownership::Own },
+		{ PeerToken(), 0, Ownership::Own },
+		{ Peer(u"user:42"_q), 42, Ownership::Own },
+		{ Peer(u"user:43"_q), 42, Ownership::Other },
+		{ Peer(u"user:42"_q), 0, Ownership::Unknown },
+		{ Peer(u"chat:42"_q), 42, Ownership::Other },
+		{ Peer(u"channel:42"_q), 42, Ownership::Other },
+		{ Peer(u"chat:42"_q), 0, Ownership::Other },
+		{ Peer(u"channel:42"_q), 0, Ownership::Other },
+		{ PeerToken{ PeerTokenKind::User, maximumId }, maximumId, Ownership::Own },
+		{ PeerToken{ PeerTokenKind::User, maximumId }, 42, Ownership::Other },
+		{ PeerToken{ PeerTokenKind::Self, 42 }, 42, Ownership::Unknown },
+		{ PeerToken{ PeerTokenKind::User, 0 }, 42, Ownership::Unknown },
+		{ PeerToken{ PeerTokenKind::Chat, 0 }, 42, Ownership::Unknown },
+		{ PeerToken{ PeerTokenKind::Channel, 0 }, 42, Ownership::Unknown },
+		{ PeerToken{ PeerTokenKind::User, maximumId + 1 }, 42, Ownership::Unknown },
+		{ PeerToken{ PeerTokenKind(-1), 42 }, 42, Ownership::Unknown },
+		{ PeerToken{ PeerTokenKind(99), 42 }, 42, Ownership::Unknown },
+		{ PeerToken(), maximumId + 1, Ownership::Unknown },
+		{ Peer(u"user:42"_q), maximumId + 1, Ownership::Unknown },
+	};
+	for (const auto kind : { SyncChatKind::BasicGroup, SyncChatKind::Supergroup }) {
+		for (const auto &test : cases) {
+			auto facts = OwnMessage(kind);
+			facts.sender = test.sender;
+			facts.selfUserId = test.selfUserId;
+			CheckOwnership(facts, test.ownership);
+			if (test.ownership == Ownership::Own) {
+				facts.out = false;
+				CheckOwnership(facts, Ownership::Other);
+				facts.out.reset();
+				CheckOwnership(facts, Ownership::Unknown);
+			}
+		}
+	}
+}
+
+void MessageOwnershipBroadcast() {
+	using Ownership = SyncChatMessageOwnership;
+	const auto options = std::array<std::optional<bool>, 3>{ true, false, std::nullopt };
+	for (const auto mode : {
+		SyncChatBroadcastOwnership::Unselected,
+		SyncChatBroadcastOwnership::OutgoingVerified,
+		SyncChatBroadcastOwnership::CreatorAndSoleAdmin,
+		SyncChatBroadcastOwnership(-1), SyncChatBroadcastOwnership(99),
+	}) {
+		for (const auto out : options) {
+			for (const auto creator : options) {
+				for (const auto sole : options) {
+					auto facts = OwnMessage(SyncChatKind::Broadcast);
+					facts.broadcastOwnership = mode;
+					facts.out = out;
+					facts.creator = creator;
+					facts.soleAdmin = sole;
+					facts.sender.reset();
+					facts.selfUserId = 0;
+					const auto expected = out == false ? Ownership::Other
+						: !out || mode != SyncChatBroadcastOwnership::CreatorAndSoleAdmin
+						? Ownership::Unknown
+						: creator == false || sole == false ? Ownership::Other
+						: !creator || !sole ? Ownership::Unknown : Ownership::Own;
+					CheckOwnership(facts, expected);
+				}
+			}
+		}
+	}
+	auto facts = OwnMessage(SyncChatKind::Broadcast);
+	facts.sender = Peer(u"channel:42"_q);
+	CheckOwnership(facts, Ownership::Own);
+	facts.sentAsOther = true;
+	CheckOwnership(facts, Ownership::Other);
+	facts = OwnMessage(SyncChatKind::Broadcast);
+	facts.broadcastOwnership = SyncChatBroadcastOwnership::OutgoingVerified;
+	CheckOwnership(facts, Ownership::Unknown);
+	auto eligibility = SyncChatFacts();
+	eligibility.kind = SyncChatKind::Broadcast;
+	eligibility.canSendFiles = true;
+	CHECK(SyncChatEligibility(eligibility, SyncChatBroadcastOwnership::OutgoingVerified));
+	CHECK(!IsOwnSyncChatMessage(facts));
+}
+
+void MessageOwnershipConsumers() {
+	using Ownership = SyncChatMessageOwnership;
+	const auto bytes = QByteArray("{\"purple_sync\":2}");
+	CHECK(ClassifySyncCandidate(1, bytes).status == SyncCandidateStatus::NewerMajor);
+	for (const auto kind : {
+		SyncChatKind::Self, SyncChatKind::Private, SyncChatKind::Bot,
+		SyncChatKind::BasicGroup, SyncChatKind::Supergroup, SyncChatKind::Broadcast,
+	}) {
+		for (const auto ownership : { Ownership::Own, Ownership::Other, Ownership::Unknown }) {
+			auto facts = OwnMessage(kind);
+			if (ownership == Ownership::Other) {
+				facts.forwarded = true;
+			} else if (ownership == Ownership::Unknown) {
+				facts.forwarded.reset();
+			}
+			const auto verdict = GetSyncChatMessageOwnership(facts);
+			CheckOwnership(facts, ownership);
+			for (const auto family : { SyncCarryFamily::Settings, SyncCarryFamily::Playlists }) {
+				const auto message = MakeSyncCarryMessage({ 0, 42 }, PeerToken(),
+					1, 100, bytes, verdict, family);
+				CHECK(message);
+				const auto selected = SelectSyncCarryHeads({ { 0, 42 }, PeerToken(), true, { *message } });
+				CHECK(selected.status == (ownership == Ownership::Unknown
+					? SyncCarryStatus::NeedsReview : SyncCarryStatus::Ready));
+				CHECK(selected.heads.size() == size_t(ownership == Ownership::Own
+					&& family == SyncCarryFamily::Settings));
+				CHECK(selected.playlists == (ownership == Ownership::Own
+					&& family == SyncCarryFamily::Playlists));
+			}
+		}
 	}
 }
 
@@ -791,6 +1037,10 @@ void StateAndMoves() {
 int main() {
 	PeerTokens();
 	MarkGrammar();
+	MessageOwnershipGuards();
+	MessageOwnershipNormalization();
+	MessageOwnershipBroadcast();
+	MessageOwnershipConsumers();
 	Eligibility();
 	Resolution();
 	WinnerInventoryReviewRegression();

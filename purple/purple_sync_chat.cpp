@@ -83,6 +83,65 @@ bool SyncChatMarkOutranks(
 	return first && second && Newer(*first, *second);
 }
 
+SyncChatMessageOwnership GetSyncChatMessageOwnership(
+		const SyncChatMessageFacts &facts) {
+	using Ownership = SyncChatMessageOwnership;
+	switch (facts.kind) {
+	case SyncChatKind::Self:
+	case SyncChatKind::Private:
+	case SyncChatKind::Bot:
+	case SyncChatKind::BasicGroup:
+	case SyncChatKind::Supergroup:
+	case SyncChatKind::Broadcast: break;
+	case SyncChatKind::Secret:
+	case SyncChatKind::ChannelDirectMessages: return Ownership::Other;
+	default: return Ownership::Unknown;
+	}
+	if (facts.regular == false || facts.forwarded == true
+		|| facts.viaBot == true || facts.scheduled == true
+		|| facts.hasTtl == true || facts.sentAsOther == true) {
+		return Ownership::Other;
+	}
+	if (!facts.regular || !facts.forwarded || !facts.viaBot
+		|| !facts.scheduled || !facts.hasTtl || !facts.sentAsOther) {
+		return Ownership::Unknown;
+	}
+	if (facts.kind == SyncChatKind::Self) {
+		return Ownership::Own;
+	}
+	if (!facts.out) {
+		return Ownership::Unknown;
+	} else if (!*facts.out) {
+		return Ownership::Other;
+	}
+	if (facts.kind == SyncChatKind::Private || facts.kind == SyncChatKind::Bot) {
+		return Ownership::Own;
+	} else if (facts.kind == SyncChatKind::Broadcast) {
+		if (facts.broadcastOwnership != SyncChatBroadcastOwnership::CreatorAndSoleAdmin) {
+			return Ownership::Unknown;
+		} else if (facts.creator == false || facts.soleAdmin == false) {
+			return Ownership::Other;
+		} else if (!facts.creator || !facts.soleAdmin) {
+			return Ownership::Unknown;
+		}
+		return Ownership::Own;
+	}
+	if (!facts.sender) {
+		return Ownership::Unknown;
+	}
+	const auto sender = PeerTokenText(*facts.sender, facts.selfUserId);
+	if (!sender) {
+		return Ownership::Unknown;
+	} else if (facts.sender->kind == PeerTokenKind::User && !facts.selfUserId) {
+		return Ownership::Unknown;
+	}
+	return (*sender == u"self"_q) ? Ownership::Own : Ownership::Other;
+}
+
+bool IsOwnSyncChatMessage(const SyncChatMessageFacts &facts) {
+	return GetSyncChatMessageOwnership(facts) == SyncChatMessageOwnership::Own;
+}
+
 SyncChatMarkParseResult ParseSyncChatMark(
 		const QString &text,
 		bool hasMedia,

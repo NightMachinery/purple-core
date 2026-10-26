@@ -56,6 +56,28 @@ enum class SyncChatBroadcastOwnership {
 	CreatorAndSoleAdmin,
 };
 
+struct SyncChatMessageFacts {
+	SyncChatKind kind = SyncChatKind::Unknown;
+	std::optional<bool> regular;
+	std::optional<bool> forwarded;
+	std::optional<bool> viaBot;
+	std::optional<bool> scheduled;
+	std::optional<bool> hasTtl;
+	std::optional<bool> sentAsOther;
+	std::optional<bool> out;
+	std::optional<PeerToken> sender;
+	uint64_t selfUserId = 0;
+	SyncChatBroadcastOwnership broadcastOwnership
+		= SyncChatBroadcastOwnership::Unselected;
+	std::optional<bool> creator;
+	std::optional<bool> soleAdmin;
+};
+
+[[nodiscard]] SyncChatMessageOwnership GetSyncChatMessageOwnership(
+	const SyncChatMessageFacts &facts);
+
+[[nodiscard]] bool IsOwnSyncChatMessage(const SyncChatMessageFacts &facts);
+
 struct SyncChatFacts {
 	SyncChatKind kind = SyncChatKind::Unknown;
 	bool publicUsername = false;
