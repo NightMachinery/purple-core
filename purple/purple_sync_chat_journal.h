@@ -28,6 +28,8 @@ enum class SyncCarryPhase {
 	Cleanup,
 	Done,
 	Aborted,
+	CleanupSkipped,
+	InterruptedAbandoned,
 };
 
 enum class SyncCarryOutcome { Success, Failed, Unknown };
@@ -82,6 +84,17 @@ struct SyncCarryJournal {
 	bool cachePrepared = false;
 	bool stateCommitted = false;
 	bool cacheCompleted = false;
+	QString loginAuthority;
+	std::optional<SyncChatReaderFacts> readerBaseline;
+	bool deliveryAttempted = false;
+	std::vector<SyncCarryReference> deliveryHistory;
+	QByteArray interruptedState;
+	QByteArray interruptedStage;
+	QString abandoningLogin;
+	QByteArray deferredRecord;
+	QByteArray targetPendingRecord;
+	std::vector<SyncCarryReference> abandonedCleanup;
+	bool cleanupChatGone = false;
 	SyncCarryOutcome lastOutcome = SyncCarryOutcome::Success;
 	QJsonObject preserved;
 };
@@ -104,6 +117,9 @@ struct SyncCarryJournalStart {
 	QString markRequestId;
 	QString ownRequestId;
 	bool removeOldMarkAuthorized = false;
+	QString loginAuthority;
+	SyncChatDirectRead oldRead = SyncChatDirectRead::Unknown;
+	SyncCarrySourceAccess sourceAccess = SyncCarrySourceAccess::Unknown;
 };
 
 struct SyncCarryCacheReceipt {
@@ -143,6 +159,8 @@ enum class SyncCarryEventKind {
 	CacheCompleted,
 	CleanupCompleted,
 	Cancel,
+	SkipCleanup,
+	CleanupChatGone,
 };
 
 struct SyncCarryJournalEvent {
@@ -171,6 +189,14 @@ struct SyncCarryJournalEvent {
 	std::vector<SyncCarryReference> deleted;
 	bool noRequestInFlight = false;
 	bool noPendingFiles = false;
+	SyncCarrySourceAccess pendingAccess = SyncCarrySourceAccess::Unknown;
+	SyncCarrySendIntent pendingSendIntent = SyncCarrySendIntent::Unknown;
+	SyncCarryInventory pendingInventory;
+	QByteArray targetPendingRecord;
+	bool targetPendingStageDurable = false;
+	bool skipCleanupConfirmed = false;
+	QString neverLandedRequestId;
+	bool neverLandedConfirmed = false;
 };
 
 enum class SyncCarryJournalStatus {
@@ -202,12 +228,14 @@ struct SyncCarryJournalResult {
 	SyncCarryEventKind kind);
 [[nodiscard]] SyncCarryJournalResult AdvanceSyncCarryJournal(
 	const SyncCarryJournal &journal,
-	const SyncCarryJournalEvent &event);
+	const SyncCarryJournalEvent &event,
+	const QString &currentLogin = {});
 [[nodiscard]] SyncCarryJournalResult ResumeSyncCarryJournal(
 	const SyncCarryJournal &journal,
 	const std::optional<SyncLocalState> &state,
 	bool stateAbsentConfirmed,
-	bool stateDurableConfirmed = false);
+	bool stateDurableConfirmed = false,
+	const QString &currentLogin = {});
 [[nodiscard]] SyncCarryJournalResult ParseSyncCarryJournal(const QByteArray &json);
 [[nodiscard]] SyncCarryJournalResult SerializeSyncCarryJournal(
 	const SyncCarryJournal &journal);
@@ -224,5 +252,38 @@ struct SyncCarryJournalResult {
 	const SyncCarryMarkReadback &oldMark,
 	const SyncCarryInventory &destination,
 	const SyncPlaylistCarryReceipt &playlist = {});
+
+struct SyncCarryJournalCommit {
+	SyncCarryCommit commit;
+	QByteArray targetPendingRecord;
+};
+
+[[nodiscard]] SyncCarryJournalCommit PrepareSyncCarryJournalCommit(
+	const SyncCarryJournal &journal,
+	const std::optional<SyncLocalState> &state,
+	const SyncCarryInventory &destination,
+	const SyncPlaylistCarryReceipt &playlist = {});
+[[nodiscard]] bool SyncCarryJournalHoldsWrites(const SyncCarryJournal &journal);
+
+enum class SyncCarryReaderVerdict { Hold, Proceed, WarnAndProceed };
+
+[[nodiscard]] SyncCarryReaderVerdict CheckSyncCarryReaders(
+	const SyncCarryJournal &journal,
+	const SyncChatEligibilityResult &current);
+[[nodiscard]] bool CheckStaleMarkRemoval(
+	const AccountKey &account,
+	const SyncChatCache &stale,
+	const SyncCarryMarkReadback &exactReadback,
+	const SyncChatResolution &freshResolution,
+	bool fullResolutionComplete);
+[[nodiscard]] SyncCarryJournalResult AbandonInterruptedOperation(
+	const SyncCarryJournal &journal,
+	const AccountKey &account,
+	const QString &currentLogin,
+	bool explicitlyConfirmed,
+	const std::optional<SyncLocalState> &state,
+	bool stateAbsentConfirmed,
+	const QByteArray &pendingStage,
+	bool objectsDurable);
 
 }

@@ -25,8 +25,11 @@ The shared [sync chat core](docs/sync-chat-core.md) provides typed peer tokens,
 mark grammar, conservative eligibility, deterministic resolution from supplied
 facts, and chat-scoped state v2 with a pending-safe move transition. The
 [carry journal](docs/sync-chat-carry.md) plans settings transfer, readback,
-state/cache commit and crash recovery. Client execution and server probes remain
-separate work.
+state/cache commit and crash recovery, including protected pending records,
+same-chat mark repair, explicit cleanup skipping, stale-mark checks and
+interrupted-login abandonment with retained effects. Version-2 journals freeze
+reader consent before the first write. Client execution and server probes
+remain separate work.
 
 ## Received-content archive
 
@@ -422,8 +425,9 @@ ordered commits and crash recovery. `tests/test_archive.cpp` covers archive
 events, transactions, media and purges; `tests/test_archive_codec.cpp` covers
 identity and codec compatibility; `tests/test_archive_source.cpp` covers copy-source
 provenance. `tests/test_archive_storage.cpp` covers SQL plans, envelopes, key loss
-and logout barriers. `tests/test_sync_auto.cpp` covers automatic settings policy.
-`run.sh` compiles the core once and runs all nine. Set
+and logout barriers. `tests/test_archive_staging.cpp` covers streaming-media
+staging. `tests/test_sync_auto.cpp` covers automatic settings policy.
+`run.sh` compiles the core once and runs all ten. Set
 `ARCHIVE_SQLITE_TESTS=1` to also execute the SQL against system SQLite.
 
 ```sh

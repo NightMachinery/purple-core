@@ -299,7 +299,8 @@ std::optional<SyncCarryPlan> ParseSyncCarryPlan(const QJsonObject &document) {
 	plan.ownRecordHash = document.value(u"own_record_hash"_q).toString();
 	plan.cleanupAuthorized = document.value(u"cleanup_authorized"_q).toBool();
 	plan.playlistRequired = document.value(u"playlist_required"_q).toBool();
-	if ((plan.access == SyncCarrySourceAccess::Readable
+	if ((plan.mode == SyncCarryMode::Fill && plan.access != SyncCarrySourceAccess::Readable)
+		|| (plan.access == SyncCarrySourceAccess::Readable
 			? !IsSyncCarryHash(plan.sourceStamp) : !plan.sourceStamp.isEmpty())
 		|| (!plan.stateHash.isEmpty() && !IsSyncCarryHash(plan.stateHash))
 		|| (!plan.reservedStateHash.isEmpty() && !IsSyncCarryHash(plan.reservedStateHash))

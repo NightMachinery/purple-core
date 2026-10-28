@@ -20,7 +20,7 @@ option) any later version.
 
 namespace Purple {
 
-enum class SyncCarryMode { Switch, Follow, Fill };
+enum class SyncCarryMode { Switch, Follow, Fill, RepairMark };
 enum class SyncCarrySourceAccess { Unknown, Readable, Protected, Unreadable, ChatGone };
 enum class SyncCarryFamily { Settings, Playlists };
 enum class SyncCarryCleanup { None, OwnLatePosts, AllSettings };
@@ -231,6 +231,8 @@ enum class SyncCarryPendingStatus {
 	LocalCopyRequired,
 	InvalidStage,
 	LibraryPending,
+	ReconciliationRequired,
+	NotProtected,
 };
 
 struct SyncCarryPendingResult {
@@ -241,6 +243,7 @@ struct SyncCarryPendingResult {
 	QString stageHash;
 	uint64_t stageSeq = 0;
 	SyncLocalState state;
+	bool restageInTarget = false;
 
 	[[nodiscard]] explicit operator bool() const {
 		return status == SyncCarryPendingStatus::Ready
@@ -260,5 +263,17 @@ struct SyncCarryPendingResult {
 	const SyncLocalState &state,
 	const QByteArray &stagedRecord,
 	const SyncCarryMessage &freshReadback);
+
+enum class SyncCarrySendIntent { Unknown, NotIssued, Issued };
+
+[[nodiscard]] SyncCarryPendingResult ReconcileProtectedStageForCarry(
+	const AccountKey &account,
+	const SyncLocalState &state,
+	const PeerToken &source,
+	SyncCarrySourceAccess access,
+	SyncCarrySendIntent sendIntent,
+	const QByteArray &stagedRecord,
+	const QByteArray &retainedLocalText,
+	const SyncCarryInventory &oldInventory = {});
 
 }

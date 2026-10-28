@@ -520,6 +520,7 @@ struct Session {
 	bool ambiguous = true;
 	bool authorizedCleanup = false;
 	bool held = false;
+	QString loginAuthority;
 
 	Session(
 			Device &d,
@@ -528,9 +529,10 @@ struct Session {
 			SyncCarryMode m = SyncCarryMode::Switch,
 			SyncCarrySourceAccess a = SyncCarrySourceAccess::Readable,
 			bool cleanup = false,
-			bool removeMark = false)
+			bool removeMark = false,
+			QString login = {})
 	: device(d), cloud(c), source(d.state.chat), target(n), mode(m), access(a)
-	, initial(Resolution(d, c)), authorizedCleanup(cleanup) {
+	, initial(Resolution(d, c)), authorizedCleanup(cleanup), loginAuthority(std::move(login)) {
 		if (mode == SyncCarryMode::Switch) {
 			initial.action = SyncChatAction::Use;
 			initial.cache = device.cache;
@@ -538,6 +540,7 @@ struct Session {
 			initial.source.reset();
 		}
 		auto start = SyncCarryJournalStart();
+		start.loginAuthority = loginAuthority;
 		start.operationId = *FormatSyncBindingToken(QByteArray::number(cloud.clock).leftJustified(16, 'x'));
 		start.account = Account;
 		start.source = source;
@@ -576,7 +579,7 @@ struct Session {
 		crashed = true;
 		const auto parsed = ParseSyncCarryJournal(SerializeSyncCarryJournal(journal).canonical);
 		REQUIRE(parsed);
-		store(ResumeSyncCarryJournal(parsed.journal, device.state, false, true));
+		store(ResumeSyncCarryJournal(parsed.journal, device.state, false, true, loginAuthority));
 		return true;
 	}
 
@@ -658,7 +661,7 @@ struct Session {
 			const auto ownBytes = journal.plan->ownRecord;
 			event.kind = SyncCarryEventKind::DeliveryPrepared;
 			event.outcome = SyncCarryOutcome::Unknown;
-			store(AdvanceSyncCarryJournal(journal, event));
+			store(AdvanceSyncCarryJournal(journal, event, loginAuthority));
 			CHECK(journal.phase == SyncCarryPhase::VerifyDestination);
 			for (const auto &reference : forwards) {
 				REQUIRE(cloud.forward(reference, target));
@@ -667,7 +670,7 @@ struct Session {
 			if (restart(phase, true)) return;
 			auto result = SyncCarryEvent(journal, SyncCarryEventKind::DeliveryResult);
 			result.outcome = ambiguous ? SyncCarryOutcome::Unknown : SyncCarryOutcome::Success;
-			store(AdvanceSyncCarryJournal(journal, result));
+			store(AdvanceSyncCarryJournal(journal, result, loginAuthority));
 			return;
 		}
 		case SyncCarryPhase::VerifyDestination: {
@@ -686,13 +689,13 @@ struct Session {
 				const auto text = journal.markText;
 				event.kind = SyncCarryEventKind::MarkPostPrepared;
 				event.outcome = SyncCarryOutcome::Unknown;
-				store(AdvanceSyncCarryJournal(journal, event));
+				store(AdvanceSyncCarryJournal(journal, event, loginAuthority));
 				CHECK(NextSyncCarryJournalAction(journal) == SyncCarryJournalAction::ReadMark);
 				cloud.mark(target, text, request);
 				if (restart(phase, true)) return;
 				auto result = SyncCarryEvent(journal, SyncCarryEventKind::MarkPostResult);
 				result.outcome = ambiguous ? SyncCarryOutcome::Unknown : SyncCarryOutcome::Success;
-				store(AdvanceSyncCarryJournal(journal, result));
+				store(AdvanceSyncCarryJournal(journal, result, loginAuthority));
 				return;
 			}
 			event.kind = SyncCarryEventKind::MarkRead;
@@ -749,10 +752,12 @@ struct Session {
 			if (restart(phase, true)) return;
 			break;
 		case SyncCarryPhase::Done:
+		case SyncCarryPhase::CleanupSkipped:
+		case SyncCarryPhase::InterruptedAbandoned:
 		case SyncCarryPhase::Aborted:
 			return;
 		}
-		store(AdvanceSyncCarryJournal(journal, event));
+		store(AdvanceSyncCarryJournal(journal, event, loginAuthority));
 	}
 
 	void run(std::optional<SyncCarryPhase> stop = std::nullopt) {
@@ -1609,9 +1614,967 @@ void SeededDevices() {
 	}
 }
 
+SyncCarryJournalResult DeltaAdvance(
+		const SyncCarryJournal &journal,
+		const SyncCarryJournalEvent &event) {
+	return AdvanceSyncCarryJournal(journal, event, journal.loginAuthority);
+}
+
+SyncCarryJournalResult DeltaResume(
+		const SyncCarryJournal &journal,
+		const std::optional<SyncLocalState> &state,
+		bool absent,
+		bool durable = false) {
+	return ResumeSyncCarryJournal(journal, state, absent, durable, journal.loginAuthority);
+}
+
+SyncCarryJournalResult DeltaStore(const SyncCarryJournalResult &result) {
+	REQUIRE(!result.canonical.isEmpty());
+	const auto parsed = ParseSyncCarryJournal(result.canonical);
+	REQUIRE(parsed);
+	CHECK(SerializeSyncCarryJournal(parsed.journal).canonical == result.canonical);
+	return parsed;
+}
+
+void ProtectedStep(Session &s, SyncCarrySendIntent intent) {
+	const auto phase = s.journal.phase;
+	if (s.restart(phase, false)) return;
+	auto event = SyncCarryEvent(s.journal, SyncCarryEventKind::Resolution);
+	event.outcome = SyncCarryOutcome::Success;
+	event.objectsDurable = true;
+	event.state = s.device.state;
+	if (phase == SyncCarryPhase::ResolvePending) {
+		event.kind = SyncCarryEventKind::PendingPrepared;
+		event.stagedRecord = s.device.stage;
+		event.retainedLocalText = s.device.localText;
+		event.pendingAccess = SyncCarrySourceAccess::Protected;
+		event.pendingSendIntent = intent;
+		event.pendingInventory = s.cloud.inventory(s.source);
+		const auto prepared = ReconcileProtectedStageForCarry(Account, s.device.state, s.source,
+			event.pendingAccess, intent, s.device.stage, s.device.localText, event.pendingInventory);
+		REQUIRE(prepared);
+		event.preparedImageHash = SyncCarryRecordHash(StateBytes(prepared.state));
+		s.device.images[event.preparedImageHash] = StateBytes(prepared.state);
+		if (!prepared.restageInTarget) {
+			s.device.baseText = s.device.localText;
+			s.device.baseVersion = InspectConfigPayload(ParseSyncEnvelope(s.device.stage)).version;
+		}
+	} else if (phase == SyncCarryPhase::VerifyDestination) {
+		event.kind = SyncCarryEventKind::DestinationRead;
+		event.destination = s.cloud.inventory(s.target);
+		if (VerifySyncCarryReadback(*s.journal.plan, *event.destination)) {
+			const auto prepared = PrepareSyncCarryJournalCommit(s.journal, s.device.state, *event.destination);
+			REQUIRE(prepared.commit);
+			event.preparedImageHash = prepared.commit.stateHash;
+			event.targetPendingRecord = prepared.targetPendingRecord;
+			s.device.images[event.preparedImageHash] = prepared.commit.canonical;
+		}
+		if (s.restart(phase, true)) return;
+	} else if (phase == SyncCarryPhase::RetireOwnStage && !s.journal.targetPendingRecord.isEmpty()) {
+		event.kind = SyncCarryEventKind::StageRetired;
+		event.retiredStageHash = s.journal.plan->ownRecordHash;
+		s.device.stage = s.journal.targetPendingRecord;
+		event.targetPendingStageDurable = true;
+		event.stagedRecord = s.device.stage;
+		if (s.restart(phase, true)) return;
+	} else if (phase == SyncCarryPhase::CompleteCache && !s.journal.targetPendingRecord.isEmpty()) {
+		event.kind = SyncCarryEventKind::CacheCompleted;
+		event.cache = { s.journal.operationId, Account, *s.journal.targetMark, true };
+		s.device.stage = s.journal.targetPendingRecord;
+		event.targetPendingStageDurable = true;
+		event.stagedRecord = s.device.stage;
+		s.device.cache = *s.journal.targetMark;
+		if (s.restart(phase, true)) return;
+	} else {
+		s.step();
+		return;
+	}
+	if ((phase == SyncCarryPhase::RetireOwnStage || phase == SyncCarryPhase::CompleteCache)
+		&& !s.journal.targetPendingRecord.isEmpty()) {
+		for (auto invalid = 0; invalid != 3; ++invalid) {
+			auto bad = event;
+			if (invalid == 0) bad.targetPendingStageDurable = false;
+			if (invalid == 1) bad.stagedRecord = "wrong stage";
+			if (invalid == 2) bad.objectsDurable = false;
+			CHECK(DeltaAdvance(s.journal, bad).canonical.isEmpty());
+		}
+	}
+	s.store(DeltaAdvance(s.journal, event));
+}
+
+void ProtectedPendingDelta() {
+	Section = "protected pending delta";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	for (const auto intent : { SyncCarrySendIntent::NotIssued, SyncCarrySendIntent::Issued }) {
+		for (auto found = 0; found != 2; ++found) {
+			if (found && intent == SyncCarrySendIntent::NotIssued) continue;
+			for (auto crash = -1; crash <= int(SyncCarryPhase::Cleanup); ++crash) {
+				for (auto after = 0; after != 2; ++after) {
+					auto cloud = Cloud();
+					cloud.mark(old);
+					auto d = Device('a', old, cloud.cache(old));
+					d.publish(cloud, Text('a'));
+					d.prepare(Text('a', 2));
+					const auto pending = d.stage;
+					const auto payload = InspectConfigPayload(ParseSyncEnvelope(pending));
+					if (found) cloud.post(old, pending);
+					const auto sourceCount = cloud.inventory(old).messages.size();
+					auto session = Session(d, cloud, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Protected, false, false, QString(32, u'a'));
+					if (crash >= 0) {
+						if (after) session.crashBeforeAck = SyncCarryPhase(crash);
+						else session.crashBefore = SyncCarryPhase(crash);
+					}
+					for (auto n = 0; n != 100 && session.journal.phase != SyncCarryPhase::Done; ++n) {
+						CHECK(SyncCarryJournalHoldsWrites(session.journal));
+						CHECK(!cloud.has(next, SyncCarryRecordHash(pending)));
+						ProtectedStep(session, intent);
+					}
+					REQUIRE(session.journal.phase == SyncCarryPhase::Done);
+					CHECK(!SyncCarryJournalHoldsWrites(session.journal));
+					CHECK(d.state.chat == next);
+					CHECK(cloud.inventory(old).messages.size() == sourceCount);
+					if (found) {
+						CHECK(d.stage.isEmpty());
+						CHECK(d.state.configData.base == payload.version.key);
+						CHECK(d.state.config.pendingSeq == 0);
+					} else {
+						REQUIRE(!d.stage.isEmpty());
+						const auto restaged = InspectConfigPayload(ParseSyncEnvelope(d.stage));
+						CHECK(restaged.text == payload.text);
+						CHECK(restaged.version.key == payload.version.key);
+						CHECK(restaged.version.parents == payload.version.parents);
+						CHECK(restaged.version.lineage == payload.version.lineage);
+						CHECK(d.state.configData.pending == payload.version.key);
+						CHECK(d.state.config.pendingSeq == d.state.config.seq);
+						CHECK(d.state.config.seq > 2);
+						CHECK(!cloud.has(next, SyncCarryRecordHash(d.stage)));
+						const auto posted = cloud.post(next, d.stage);
+						CHECK(FinishPendingStageForCarry(Account, d.state, d.stage, posted));
+					}
+				}
+			}
+		}
+	}
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto d = Device('a', old, cloud.cache(old));
+	d.publish(cloud, Text('a'));
+	d.prepare(Text('a', 2));
+	for (auto variant = 0; variant != 12; ++variant) {
+		auto account = Account;
+		auto state = d.state;
+		auto access = SyncCarrySourceAccess::Protected;
+		auto source = old;
+		auto intent = SyncCarrySendIntent::Issued;
+		auto inventory = cloud.inventory(old);
+		auto stage = d.stage;
+		auto text = d.localText;
+		if (variant == 0) intent = SyncCarrySendIntent::Unknown;
+		if (variant == 1) inventory.complete = false;
+		if (variant == 2) inventory.chat = next;
+		if (variant == 3) inventory.account.environment = 1;
+		if (variant == 4) inventory.messages.front().ownership = SyncChatMessageOwnership::Unknown;
+		if (variant == 5) stage = "bad";
+		if (variant == 6) text = Text('z');
+		if (variant == 7) source = next;
+		if (variant == 8) access = SyncCarrySourceAccess::ChatGone;
+		if (variant == 9) access = SyncCarrySourceAccess::Readable;
+		if (variant == 10) state = ReserveSyncSeq(state, SyncLocalStream::Library, QString(64, u'f')).state;
+		if (variant == 11) account.environment = 1;
+		CHECK(!ReconcileProtectedStageForCarry(account, state, source, access, intent, stage, text, inventory));
+	}
+}
+
+SyncCarryJournalStart RepairStart(const Device &d) {
+	auto start = SyncCarryJournalStart();
+	start.operationId = QString(32, u'a');
+	start.account = Account;
+	start.source = start.target = d.state.chat;
+	start.mode = SyncCarryMode::RepairMark;
+	start.loginAuthority = QString(32, u'a');
+	start.state = d.state;
+	start.preferenceToken = d.state.bindingToken.toLatin1();
+	start.resolution.action = SyncChatAction::Searching;
+	start.resolution.cache = d.cache;
+	start.targetEligibility = Eligible(d.state.chat);
+	start.operationConfirmed = true;
+	start.markText = u"#purplechatsync v1"_q;
+	start.markRequestId = u"1234"_q;
+	start.ownRequestId = u"1235"_q;
+	start.oldRead = SyncChatDirectRead::MarkGone;
+	start.sourceAccess = SyncCarrySourceAccess::Readable;
+	return start;
+}
+
+void RepairMarkDelta() {
+	Section = "repair mark delta";
+	const auto chat = Peer(u"chat:10"_q);
+	for (auto crash = -1; crash != 6; ++crash) {
+		auto cloud = Cloud();
+		cloud.mark(chat);
+		auto d = Device('a', chat, cloud.cache(chat));
+		d.publish(cloud, Text('a'));
+		const auto state = StateBytes(d.state);
+		const auto start = RepairStart(d);
+		auto result = DeltaStore(BeginSyncCarryJournal(start));
+		for (auto step = 0; step != 20 && result.journal.phase != SyncCarryPhase::Done; ++step) {
+			auto j = result.journal;
+			auto event = SyncCarryEvent(j, SyncCarryEventKind::Resolution);
+			event.outcome = SyncCarryOutcome::Success;
+			event.objectsDurable = true;
+			event.state = d.state;
+			CHECK(SyncCarryJournalForwards(j).empty());
+			CHECK(!SyncCarryJournalPostsOwnRecord(j));
+			if (j.phase == SyncCarryPhase::Mark) {
+				if (NextSyncCarryJournalAction(j) == SyncCarryJournalAction::PostMark) {
+					event.kind = SyncCarryEventKind::MarkPostPrepared;
+					result = DeltaStore(DeltaAdvance(j, event));
+					cloud.mark(chat, j.markText, j.markRequestId);
+					if (crash == 0) result = DeltaStore(DeltaResume(result.journal, d.state, false, true));
+					continue;
+				}
+				event.kind = SyncCarryEventKind::MarkRead;
+				event.mark = cloud.marks.at(cloud.key(chat));
+			} else if (j.phase == SyncCarryPhase::PrepareCache) {
+				event.kind = SyncCarryEventKind::CachePrepared;
+				event.cache = { j.operationId, Account, *j.targetMark, false };
+			} else if (j.phase == SyncCarryPhase::CommitState) {
+				event.kind = SyncCarryEventKind::StateObserved;
+			} else if (j.phase == SyncCarryPhase::CompleteCache) {
+				event.kind = SyncCarryEventKind::CacheCompleted;
+				event.cache = { j.operationId, Account, *j.targetMark, true };
+			} else REQUIRE(false);
+			if (crash == step + 1) result = DeltaStore(DeltaResume(j, d.state, false, true));
+			else result = DeltaStore(DeltaAdvance(j, event));
+			CHECK(StateBytes(d.state) == state);
+		}
+		CHECK(result.journal.phase == SyncCarryPhase::Done);
+		CHECK(cloud.requests.size() == 1);
+		CHECK(StateBytes(d.state) == state);
+	}
+	auto cloud = Cloud();
+	cloud.mark(chat);
+	auto d = Device('a', chat, cloud.cache(chat));
+	for (auto variant = 0; variant != 12; ++variant) {
+		auto start = RepairStart(d);
+		if (variant == 0) start.oldRead = SyncChatDirectRead::Unknown;
+		if (variant == 1) start.oldRead = SyncChatDirectRead::ChatGone;
+		if (variant == 2) start.sourceAccess = SyncCarrySourceAccess::Protected;
+		if (variant == 3) start.targetEligibility.refusal = SyncChatRefusal::CannotSendFiles;
+		if (variant == 4) start.targetEligibility.readers.populationUnknown = true;
+		if (variant == 5) start.targetEligibility.readers.warningRequired = true;
+		if (variant == 6) start.target = Peer(u"chat:20"_q);
+		if (variant == 7) start.state.reset();
+		if (variant == 8) start.otherStagesPresent = true;
+		if (variant == 9) start.operationConfirmed = false;
+		if (variant == 10) start.preferenceToken = "wrong";
+		if (variant == 11) start.resolution.winner = d.cache;
+		CHECK(!BeginSyncCarryJournal(start));
+	}
+	auto start = RepairStart(d);
+	start.targetEligibility.readers.warningRequired = true;
+	start.targetEligibility.readers.otherMembers = 1;
+	start.readerConsentAccepted = true;
+	CHECK(BeginSyncCarryJournal(start));
+}
+
+void CleanupAndInterruptedDelta() {
+	Section = "cleanup and interrupted delta";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto d = Device('a', old, cloud.cache(old));
+	d.publish(cloud, Text('a'));
+	auto session = Session(d, cloud, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, true, true, QString(32, u'a'));
+	session.run(SyncCarryPhase::Cleanup);
+	const auto j = session.journal;
+	const auto state = StateBytes(d.state);
+	for (auto variant = 0; variant != 9; ++variant) {
+		auto event = SyncCarryEvent(j, SyncCarryEventKind::SkipCleanup);
+		event.outcome = SyncCarryOutcome::Success;
+		event.state = d.state;
+		event.noRequestInFlight = true;
+		event.skipCleanupConfirmed = true;
+		if (variant == 0) event.skipCleanupConfirmed = false;
+		if (variant == 1) event.noRequestInFlight = false;
+		if (variant == 2) ++event.revision;
+		if (variant == 3) event.account.environment = 1;
+		if (variant == 4) event.state->createdDevice = u"changed"_q;
+		if (variant == 5) event.deleted.push_back({ Account, next, 123, QString(64, u'a') });
+		if (variant == 6) event.outcome = SyncCarryOutcome::Unknown;
+		if (variant == 7) event.source = next;
+		if (variant == 8) event.operationId = QString(32, u'z');
+		CHECK(!DeltaAdvance(j, event));
+	}
+	auto event = SyncCarryEvent(j, SyncCarryEventKind::SkipCleanup);
+	event.outcome = SyncCarryOutcome::Success;
+	event.state = d.state;
+	event.noRequestInFlight = event.skipCleanupConfirmed = true;
+	const auto skipped = DeltaStore(DeltaAdvance(j, event));
+	CHECK(skipped.journal.phase == SyncCarryPhase::CleanupSkipped);
+	CHECK(skipped.journal.abandonedCleanup.size() == 2);
+	CHECK(!skipped.journal.cleanupChatGone);
+	CHECK(!SyncCarryJournalHoldsWrites(skipped.journal));
+	CHECK(NextSyncCarryJournalAction(skipped.journal) == SyncCarryJournalAction::None);
+	CHECK(!CheckSyncCarryDeletion(skipped.journal, cloud.inventory(old).messages.front(), cloud.inventory(next)));
+	CHECK(DeltaResume(skipped.journal, d.state, false).journal.phase == SyncCarryPhase::CleanupSkipped);
+	for (auto variant = 0; variant != 5; ++variant) {
+		event = SyncCarryEvent(j, SyncCarryEventKind::CleanupChatGone);
+		event.outcome = SyncCarryOutcome::Success;
+		event.state = d.state;
+		event.noRequestInFlight = true;
+		event.mark = { SyncCarryMarkOutcome::ChatGone, Account, old };
+		if (variant == 0) event.mark.outcome = SyncCarryMarkOutcome::Unknown;
+		if (variant == 1) event.mark.outcome = SyncCarryMarkOutcome::Absent;
+		if (variant == 2) event.mark.chat = next;
+		if (variant == 3) event.mark.account.environment = 1;
+		const auto gone = DeltaAdvance(j, event);
+		if (variant != 4) CHECK(!gone);
+		else {
+			REQUIRE(gone);
+			CHECK(gone.journal.phase == SyncCarryPhase::Done);
+			CHECK(gone.journal.cleanupChatGone);
+			CHECK(gone.journal.abandonedCleanup.empty());
+		}
+	}
+	CHECK(StateBytes(d.state) == state);
+	for (auto at = 0; at != 5; ++at) {
+		auto c = Cloud();
+		c.mark(old);
+		auto device = Device('a', old, c.cache(old));
+		device.publish(c, Text('a'));
+		const auto access = at == 1 ? SyncCarrySourceAccess::Protected : SyncCarrySourceAccess::Readable;
+		auto s = Session(device, c, next, SyncCarryMode::Switch, access, true, false, QString(32, u'a'));
+		const auto stop = at == 0 ? SyncCarryPhase::ResolveAgain : at == 1 ? SyncCarryPhase::StageOwn
+			: at == 2 ? SyncCarryPhase::Mark : at == 3 ? SyncCarryPhase::CommitState : SyncCarryPhase::Cleanup;
+		s.run(stop);
+		if (at == 1) s.step();
+		if (at == 2) s.step();
+		auto snapshot = s.journal;
+		snapshot.loginAuthority = QString(32, u'a');
+		const auto before = SerializeSyncCarryJournal(snapshot).canonical;
+		const auto current = StateBytes(device.state);
+		CHECK(!ResumeSyncCarryJournal(snapshot, device.state, false, true, QString(32, u'b')));
+		for (auto invalid = 0; invalid != 5; ++invalid) {
+			CHECK(!AbandonInterruptedOperation(snapshot,
+				invalid == 0 ? AccountKey{ 1, 777 } : Account,
+				invalid == 1 ? QString(32, u'a') : QString(32, u'b'), invalid != 2,
+				device.state, false, invalid == 3 ? QByteArray("bad") : device.stage, invalid != 4));
+		}
+		const auto abandoned = DeltaStore(AbandonInterruptedOperation(snapshot, Account,
+			QString(32, u'b'), true, device.state, false, device.stage, true));
+		CHECK(abandoned.journal.phase == SyncCarryPhase::InterruptedAbandoned);
+		CHECK(abandoned.journal.interruptedState == current);
+		CHECK(abandoned.journal.interruptedStage == device.stage);
+		CHECK(abandoned.journal.markAttempted == snapshot.markAttempted);
+		CHECK(abandoned.journal.deliveryHistory == snapshot.deliveryHistory);
+		CHECK(abandoned.journal.ownRequestId == snapshot.ownRequestId);
+		CHECK(abandoned.journal.markRequestId == snapshot.markRequestId);
+		CHECK(abandoned.journal.plan.has_value() == snapshot.plan.has_value());
+		CHECK(!SyncCarryJournalHoldsWrites(abandoned.journal));
+		const auto terminal = ResumeSyncCarryJournal(abandoned.journal, device.state,
+			false, true, QString(32, u'b'));
+		REQUIRE(terminal);
+		CHECK(terminal.canonical == abandoned.canonical);
+		CHECK(!AbandonInterruptedOperation(snapshot, Account, QString(32, u'b'),
+			true, std::nullopt, true, {}, true));
+		CHECK(SyncCarryJournalForwards(abandoned.journal).empty());
+		CHECK(!SyncCarryJournalPostsOwnRecord(abandoned.journal));
+		CHECK(StateBytes(device.state) == current);
+		CHECK(SerializeSyncCarryJournal(snapshot).canonical == before);
+	}
+}
+
+void JournalDeltaGuards() {
+	Section = "versioned journal guards";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto device = Device('a', old, cloud.cache(old));
+	device.publish(cloud, Text('a'));
+	auto repair = DeltaStore(BeginSyncCarryJournal(RepairStart(device))).journal;
+	auto event = SyncCarryEvent(repair, SyncCarryEventKind::MarkPostPrepared);
+	event.outcome = SyncCarryOutcome::Unknown;
+	repair = DeltaStore(DeltaAdvance(repair, event)).journal;
+	REQUIRE(repair.markAttempted);
+	event = SyncCarryEvent(repair, SyncCarryEventKind::MarkRead);
+	event.outcome = SyncCarryOutcome::Success;
+	event.mark = { SyncCarryMarkOutcome::Absent, Account, old };
+	event.noRequestInFlight = event.neverLandedConfirmed = true;
+	event.neverLandedRequestId = repair.markRequestId;
+	for (auto invalid = 0; invalid != 3; ++invalid) {
+		auto bad = event;
+		if (invalid == 0) bad.noRequestInFlight = false;
+		if (invalid == 1) bad.neverLandedConfirmed = false;
+		if (invalid == 2) bad.neverLandedRequestId = u"99999"_q;
+		const auto held = DeltaAdvance(repair, bad);
+		CHECK(held.status == SyncCarryJournalStatus::Wait);
+		CHECK(held.journal.markAttempted);
+		CHECK(NextSyncCarryJournalAction(DeltaStore(held).journal) == SyncCarryJournalAction::ReadMark);
+	}
+	const auto retry = DeltaAdvance(repair, event);
+	CHECK(retry.status == SyncCarryJournalStatus::Retry);
+	CHECK(!retry.journal.markAttempted);
+	CHECK(NextSyncCarryJournalAction(DeltaStore(retry).journal) == SyncCarryJournalAction::PostMark);
+	CHECK(!AdvanceSyncCarryJournal(repair, event));
+	CHECK(!AdvanceSyncCarryJournal(repair, event, QString(32, u'b')));
+	CHECK(!ResumeSyncCarryJournal(repair, device.state, false, true));
+	CHECK(!ResumeSyncCarryJournal(repair, device.state, false, true, QString(32, u'b')));
+	for (auto invalid = 0; invalid != 7; ++invalid) {
+		auto json = QJsonDocument::fromJson(SerializeSyncCarryJournal(repair).canonical).object();
+		if (invalid == 0) json.remove(u"reader_baseline"_q);
+		if (invalid == 1) json.insert(u"login_authority"_q, QString());
+		if (invalid == 2) json.insert(u"login_authority"_q, u"bad"_q);
+		auto readers = json.value(u"reader_baseline"_q).toObject();
+		if (invalid == 3) readers.insert(u"unknown"_q, true);
+		if (invalid == 4) readers.insert(u"members"_q, -1);
+		if (invalid == 5) readers.insert(u"admins"_q, u"unknown"_q);
+		if (invalid == 6) readers.insert(u"members"_q, double(9007199254740992ULL));
+		if (invalid >= 3) json.insert(u"reader_baseline"_q, readers);
+		CHECK(!ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+	}
+	auto oversize = repair;
+	oversize.preserved.insert(u"future"_q, QString(4 * 1024 * 1024, u'x'));
+	CHECK(!SerializeSyncCarryJournal(oversize));
+	CHECK(!DeltaAdvance(oversize, event));
+	auto session = Session(device, cloud, next, SyncCarryMode::Switch,
+		SyncCarrySourceAccess::Readable, false, false, QString(32, u'a'));
+	session.run(SyncCarryPhase::Deliver);
+	event = SyncCarryEvent(session.journal, SyncCarryEventKind::DeliveryPrepared);
+	event.outcome = SyncCarryOutcome::Unknown;
+	const auto attempted = DeltaStore(DeltaAdvance(session.journal, event));
+	REQUIRE(!attempted.journal.deliveryHistory.empty());
+	auto json = QJsonDocument::fromJson(attempted.canonical).object();
+	auto refs = json.value(u"delivery_history"_q).toArray();
+	refs.push_back(refs.first());
+	json.insert(u"delivery_history"_q, refs);
+	CHECK(!ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+	refs.removeLast();
+	auto reference = refs.first().toObject();
+	reference.insert(u"future_reference"_q, 42);
+	refs[0] = reference;
+	json.insert(u"delivery_history"_q, refs);
+	const auto future = DeltaStore(ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+	const auto roundtrip = QJsonDocument::fromJson(future.canonical).object();
+	CHECK(roundtrip.value(u"delivery_history"_q).toArray().first().toObject()
+		.value(u"future_reference"_q).toInt() == 42);
+	const auto discarded = DeltaStore(AbandonInterruptedOperation(future.journal, Account,
+		QString(32, u'b'), true, device.state, false, device.stage, true));
+	CHECK(discarded.journal.deliveryAttempted);
+	CHECK(discarded.journal.deliveryHistory == attempted.journal.deliveryHistory);
+	CHECK(discarded.journal.plan->forwards == attempted.journal.plan->forwards);
+	CHECK(!SyncCarryJournalHoldsWrites(discarded.journal));
+	for (auto invalid = 0; invalid != 3; ++invalid) {
+		auto broken = QJsonDocument::fromJson(discarded.canonical).object();
+		if (invalid == 0) broken.insert(u"interrupted_state"_q, QString());
+		if (invalid == 1) broken.insert(u"interrupted_stage"_q, u"unrelated stage"_q);
+		if (invalid == 2) broken.insert(u"abandoning_login"_q, discarded.journal.loginAuthority);
+		CHECK(!ParseSyncCarryJournal(QJsonDocument(broken).toJson()));
+	}
+}
+
+void ReaderStaleAndFillDelta() {
+	Section = "readers stale marks and fill delta";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	auto cloud = Cloud();
+	const auto mark = cloud.mark(old);
+	auto d = Device('a', old, cloud.cache(old));
+	d.publish(cloud, Text('a'));
+	auto session = Session(d, cloud, next, SyncCarryMode::Switch,
+		SyncCarrySourceAccess::Readable, false, false, QString(32, u'a'));
+	const auto j = DeltaStore(SerializeSyncCarryJournal(session.journal)).journal;
+	REQUIRE(j.readerBaseline);
+	CHECK(*j.readerBaseline == Eligible(next).readers);
+	CHECK(CheckSyncCarryReaders(j, Eligible(next)) == SyncCarryReaderVerdict::Proceed);
+	auto added = Eligible(next);
+	added.readers.otherMembers = 1;
+	CHECK(CheckSyncCarryReaders(j, added) == SyncCarryReaderVerdict::WarnAndProceed);
+	added.readers.populationUnknown = true;
+	CHECK(CheckSyncCarryReaders(j, added) == SyncCarryReaderVerdict::Hold);
+	added = Eligible(next);
+	added.refusal = SyncChatRefusal::CannotSendFiles;
+	CHECK(CheckSyncCarryReaders(j, added) == SyncCarryReaderVerdict::Hold);
+	session.run(SyncCarryPhase::Deliver);
+	auto intent = SyncCarryEvent(session.journal, SyncCarryEventKind::DeliveryPrepared);
+	intent.outcome = SyncCarryOutcome::Unknown;
+	const auto prepared = DeltaStore(DeltaAdvance(session.journal, intent));
+	CHECK(prepared.journal.deliveryAttempted);
+	CHECK(prepared.journal.readerBaseline == j.readerBaseline);
+	CHECK(prepared.journal.deliveryHistory == session.journal.plan->forwards);
+	cloud.mark(next);
+	auto resolution = SyncChatResolution();
+	resolution.action = SyncChatAction::Use;
+	resolution.cache = resolution.winner = cloud.cache(next);
+	resolution.postingHeld = false;
+	CHECK(CheckStaleMarkRemoval(Account, d.cache, mark, resolution, true));
+	for (auto variant = 0; variant != 10; ++variant) {
+		auto r = resolution;
+		auto exact = mark;
+		auto account = Account;
+		if (variant == 0) exact.ownership = SyncChatMessageOwnership::Other;
+		if (variant == 1) exact.ownership = SyncChatMessageOwnership::Unknown;
+		if (variant == 2) ++exact.messageId;
+		if (variant == 3) exact.chat = next;
+		if (variant == 4) exact.text = u"ordinary text"_q;
+		if (variant == 5) r.winner = r.cache = d.cache;
+		if (variant == 6) r.action = SyncChatAction::Searching;
+		if (variant == 7) account.environment = 1;
+		if (variant == 8) r.postingHeld = true;
+		CHECK(!CheckStaleMarkRemoval(account, d.cache, exact, r, variant != 9));
+	}
+	for (const auto access : { SyncCarrySourceAccess::Unknown, SyncCarrySourceAccess::Protected,
+		SyncCarrySourceAccess::Unreadable, SyncCarrySourceAccess::ChatGone }) {
+		auto input = Input(d, cloud, next, access, SyncCarryMode::Fill);
+		input.state.reset();
+		CHECK(!PlanCarry(input));
+	}
+	auto fill = Input(d, cloud, next, SyncCarrySourceAccess::Readable, SyncCarryMode::Fill);
+	fill.state.reset();
+	fill.oldInventory.messages.clear();
+	const auto empty = PlanCarry(fill);
+	REQUIRE(empty);
+	CHECK(empty.plan.requiredHashes.empty());
+	fill.oldInventory.complete = false;
+	CHECK(!PlanCarry(fill));
+	auto forged = empty.plan;
+	forged.access = SyncCarrySourceAccess::ChatGone;
+	forged.sourceStamp.clear();
+	CHECK(!ParseSyncCarryPlan(SyncCarryPlanJson(forged)));
+	CHECK(!PrepareSyncCarryCommit(forged, std::nullopt, cloud.inventory(next)));
+	auto document = QJsonDocument::fromJson(SerializeSyncCarryJournal(j).canonical).object();
+	document.insert(u"future"_q, 42);
+	auto baseline = document.value(u"reader_baseline"_q).toObject();
+	baseline.insert(u"future_reader"_q, u"preserved"_q);
+	document.insert(u"reader_baseline"_q, baseline);
+	const auto future = DeltaStore(ParseSyncCarryJournal(QJsonDocument(document).toJson()));
+	const auto saved = QJsonDocument::fromJson(future.canonical).object();
+	CHECK(saved.value(u"future"_q).toInt() == 42);
+	CHECK(saved.value(u"reader_baseline"_q).toObject().value(u"future_reader"_q).toString() == u"preserved"_q);
+	CHECK(ParseSyncCarryJournal("{\"version\":3}").status == SyncCarryJournalStatus::NewerVersion);
+}
+
+void DeltaPreconditionAudit() {
+	Section = "delta precondition audit";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto device = Device('a', old, cloud.cache(old));
+	device.publish(cloud, Text('a'));
+	const auto beforeMove = device.state;
+	device.prepare(Text('a', 2));
+	const auto pending = device.state;
+	const auto stage = device.stage;
+	for (auto invalid = 0; invalid != 7; ++invalid) {
+		auto state = pending;
+		auto inventory = cloud.inventory(old);
+		auto bytes = stage;
+		if (invalid == 0) state.install.clear();
+		if (invalid == 1) state.config.issuedRecords.clear();
+		if (invalid == 2) state.configData.pending = QString(64, u'f');
+		if (invalid == 3) bytes = cloud.inventory(old).messages.front().bytes;
+		if (invalid == 4) inventory.messages.front().reference.recordHash = QString(64, u'f');
+		if (invalid == 5) inventory.messages.front().reference.messageId = 0;
+		if (invalid == 6) inventory.messages.front().bytes = "bad";
+		CHECK(!ReconcileProtectedStageForCarry(Account, state, old,
+			SyncCarrySourceAccess::Protected, SyncCarrySendIntent::Issued,
+			bytes, device.localText, inventory));
+	}
+	const auto absent = ReconcileProtectedStageForCarry(Account, pending, old,
+		SyncCarrySourceAccess::Protected, SyncCarrySendIntent::NotIssued,
+		stage, device.localText);
+	REQUIRE(absent);
+	CHECK(absent.restageInTarget);
+	CHECK(ReconcileProtectedStageForCarry(Account, beforeMove, old,
+		SyncCarrySourceAccess::Protected, SyncCarrySendIntent::Unknown,
+		{}, {}).status == SyncCarryPendingStatus::NoPending);
+	const auto record = cloud.post(old, stage);
+	const auto found = ReconcileProtectedStageForCarry(Account, pending, old,
+		SyncCarrySourceAccess::Protected, SyncCarrySendIntent::Issued,
+		stage, device.localText, cloud.inventory(old));
+	const auto normal = FinishPendingStageForCarry(Account, pending, stage, record);
+	REQUIRE(found && normal);
+	CHECK(StateBytes(found.state) == StateBytes(normal.state));
+	CHECK(!found.restageInTarget);
+	device.state = normal.state;
+	device.stage.clear();
+	for (auto invalid = 0; invalid != 9; ++invalid) {
+		auto start = RepairStart(device);
+		if (invalid == 0) start.loginAuthority.clear();
+		if (invalid == 1) start.loginAuthority = u"bad"_q;
+		if (invalid == 2) start.state = pending;
+		if (invalid == 3) start.resolution.cache.reset();
+		if (invalid == 4) start.resolution.cache->markId = 0;
+		if (invalid == 5) start.resolution.action = SyncChatAction::Use;
+		if (invalid == 6) start.sourceAccess = SyncCarrySourceAccess::Unreadable;
+		if (invalid == 7) start.markText = u"not a mark"_q;
+		if (invalid == 8) start.markRequestId = u"0"_q;
+		CHECK(!BeginSyncCarryJournal(start));
+	}
+	auto session = Session(device, cloud, next, SyncCarryMode::Switch,
+		SyncCarrySourceAccess::Readable, true, true, QString(32, u'a'));
+	for (const auto phase : { SyncCarryPhase::ResolveAgain, SyncCarryPhase::Deliver,
+		SyncCarryPhase::Mark, SyncCarryPhase::CommitState }) {
+		session.run(phase);
+		for (const auto kind : { SyncCarryEventKind::SkipCleanup, SyncCarryEventKind::CleanupChatGone }) {
+			auto event = SyncCarryEvent(session.journal, kind);
+			event.outcome = SyncCarryOutcome::Success;
+			event.state = device.state;
+			event.noRequestInFlight = event.skipCleanupConfirmed = true;
+			event.mark = { SyncCarryMarkOutcome::ChatGone, Account, old };
+			CHECK(!DeltaAdvance(session.journal, event));
+		}
+	}
+	const auto precommitState = device.state;
+	session.run(SyncCarryPhase::Cleanup);
+	const auto journal = session.journal;
+	CHECK(!AbandonInterruptedOperation(journal, Account, QString(32, u'b'),
+		true, precommitState, false, {}, true));
+	for (const auto &login : { QString(), u"bad"_q, journal.loginAuthority }) {
+		CHECK(!AbandonInterruptedOperation(journal, Account, login,
+			true, device.state, false, {}, true));
+	}
+	const auto remaining = SyncCarryCleanupCandidates(*journal.plan, cloud.inventory(next));
+	REQUIRE(!remaining.empty());
+	auto event = SyncCarryEvent(journal, SyncCarryEventKind::SkipCleanup);
+	event.outcome = SyncCarryOutcome::Success;
+	event.state = device.state;
+	event.noRequestInFlight = event.skipCleanupConfirmed = true;
+	event.deleted.push_back(remaining.front());
+	const auto partial = DeltaStore(DeltaAdvance(journal, event));
+	CHECK(std::find(partial.journal.abandonedCleanup.begin(),
+		partial.journal.abandonedCleanup.end(), remaining.front())
+		== partial.journal.abandonedCleanup.end());
+	CHECK(!partial.journal.abandonedCleanup.empty());
+	CHECK(DeltaResume(partial.journal, device.state, false).canonical == partial.canonical);
+	event.deleted.push_back(remaining.front());
+	CHECK(!DeltaAdvance(journal, event));
+	event = SyncCarryEvent(journal, SyncCarryEventKind::CleanupChatGone);
+	event.outcome = SyncCarryOutcome::Success;
+	event.state = device.state;
+	event.noRequestInFlight = true;
+	event.mark = { SyncCarryMarkOutcome::ChatGone, Account, old };
+	const auto gone = DeltaStore(DeltaAdvance(journal, event));
+	CHECK(!SyncCarryJournalHoldsWrites(gone.journal));
+	CHECK(DeltaResume(gone.journal, device.state, false).canonical == gone.canonical);
+	const auto abandoned = DeltaStore(AbandonInterruptedOperation(journal, Account,
+		QString(32, u'b'), true, device.state, false, {}, true));
+	auto forged = abandoned.journal;
+	forged.interruptedState = StateBytes(precommitState);
+	CHECK(!SerializeSyncCarryJournal(forged));
+	CHECK(!AbandonInterruptedOperation(abandoned.journal, Account,
+		QString(32, u'c'), true, device.state, false, {}, true));
+	auto stale = device.cache;
+	const auto exact = cloud.marks.at(cloud.key(stale.chat));
+	cloud.mark(old);
+	auto resolution = SyncChatResolution();
+	resolution.action = SyncChatAction::Use;
+	resolution.cache = resolution.winner = cloud.cache(old);
+	resolution.postingHeld = false;
+	CHECK(CheckStaleMarkRemoval(Account, stale, exact, resolution, true));
+	for (auto invalid = 0; invalid != 7; ++invalid) {
+		auto readback = exact;
+		auto fresh = resolution;
+		if (invalid == 0) readback.hasMedia = true;
+		if (invalid == 1) ++readback.date;
+		if (invalid == 2) readback.outcome = SyncCarryMarkOutcome::Unknown;
+		if (invalid == 3) fresh.winner.reset();
+		if (invalid == 4) fresh.cache = stale;
+		if (invalid == 5) fresh.winner->markDate = 0;
+		if (invalid == 6) readback.account.userId = 778;
+		CHECK(!CheckStaleMarkRemoval(Account, stale, readback, fresh, true));
+	}
+	auto baseline = journal;
+	baseline.phase = SyncCarryPhase::Cleanup;
+	for (auto invalid = 0; invalid != 3; ++invalid) {
+		auto eligibility = Eligible(next);
+		if (invalid == 0) eligibility.readers.otherMembers.reset();
+		if (invalid == 1) eligibility.readers.otherAdmins.reset();
+		if (invalid == 2) baseline.readerBaseline.reset();
+		CHECK(CheckSyncCarryReaders(baseline, eligibility) == SyncCarryReaderVerdict::Hold);
+	}
+	CHECK(CheckSyncCarryReaders(gone.journal, Eligible(next)) == SyncCarryReaderVerdict::Hold);
+}
+
+void DeferredVersionAudit() {
+	Section = "deferred exact version audit";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto device = Device('a', old, cloud.cache(old));
+	device.publish(cloud, Text('a'));
+	device.publish(cloud, Text('a', 2));
+	device.prepare(Text('a', 3));
+	const auto original = ParseSyncEnvelope(device.stage);
+	const auto payload = InspectConfigPayload(original);
+	auto session = Session(device, cloud, next, SyncCarryMode::Switch,
+		SyncCarrySourceAccess::Protected, false, false, QString(32, u'a'));
+	for (auto step = 0; step != 100 && session.journal.phase != SyncCarryPhase::Mark; ++step) {
+		ProtectedStep(session, SyncCarrySendIntent::NotIssued);
+	}
+	REQUIRE(session.journal.phase == SyncCarryPhase::Mark);
+	const auto target = ParseSyncEnvelope(session.journal.targetPendingRecord);
+	const auto restaged = InspectConfigPayload(target);
+	REQUIRE(target.header && original.header);
+	CHECK(restaged.version.parents == payload.version.parents);
+	CHECK(restaged.version.lineage == payload.version.lineage);
+	CHECK(restaged.version.key == payload.version.key);
+	CHECK(restaged.text == payload.text);
+	CHECK(target.header->at == original.header->at);
+	CHECK(target.header->writerPlatform == original.header->writerPlatform);
+	CHECK(target.header->writerApp == original.header->writerApp);
+	auto forgedVersion = restaged.version;
+	REQUIRE(forgedVersion.lineage.size() > 1);
+	forgedVersion.parents.push_back(forgedVersion.lineage.back());
+	const auto forged = BuildConfigRecord({
+		.text = restaged.text,
+		.version = forgedVersion,
+		.space = target.header->space,
+		.install = target.header->writerInstall,
+		.device = target.header->writerDevice,
+		.platform = target.header->writerPlatform,
+		.app = target.header->writerApp,
+		.seq = target.header->seq,
+		.at = target.header->at,
+	});
+	REQUIRE(forged);
+	auto broken = session.journal;
+	broken.targetPendingRecord = forged.canonical;
+	CHECK(!SerializeSyncCarryJournal(broken));
+	auto json = QJsonDocument::fromJson(SerializeSyncCarryJournal(session.journal).canonical).object();
+	json.insert(u"target_pending_record"_q, QString::fromUtf8(forged.canonical));
+	CHECK(!ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+}
+
+QByteArray ChangedCarryHeader(const QByteArray &bytes, int variant) {
+	const auto parsed = ParseSyncEnvelope(bytes);
+	const auto payload = InspectConfigPayload(parsed);
+	REQUIRE(parsed.header && payload);
+	const auto changed = BuildConfigRecord({
+		.text = payload.text,
+		.version = payload.version,
+		.space = parsed.header->space,
+		.install = parsed.header->writerInstall,
+		.device = parsed.header->writerDevice,
+		.platform = variant == 1 ? u"changed platform"_q : parsed.header->writerPlatform,
+		.app = variant == 2 ? u"changed app"_q : parsed.header->writerApp,
+		.seq = parsed.header->seq,
+		.at = parsed.header->at + (variant == 0 ? 1 : 0),
+	});
+	REQUIRE(changed);
+	return changed.canonical;
+}
+
+SyncCarryJournalEvent PendingBarrierEvent(
+		const SyncCarryJournal &journal,
+		const SyncLocalState &state,
+		const QByteArray &stage) {
+	const auto kind = journal.phase == SyncCarryPhase::CommitState
+		? SyncCarryEventKind::StateObserved : journal.phase == SyncCarryPhase::RetireOwnStage
+		? SyncCarryEventKind::StageRetired : SyncCarryEventKind::CacheCompleted;
+	auto event = SyncCarryEvent(journal, kind);
+	event.outcome = SyncCarryOutcome::Success;
+	event.objectsDurable = true;
+	event.state = state;
+	event.stagedRecord = stage;
+	event.targetPendingStageDurable = !stage.isEmpty();
+	event.noPendingFiles = stage.isEmpty();
+	event.retiredStageHash = journal.plan->ownRecordHash;
+	event.cache = { journal.operationId, Account, *journal.targetMark, true };
+	return event;
+}
+
+void RecoveredPendingRecordBindings() {
+	Section = "recovered pending record bindings";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto device = Device('a', old, cloud.cache(old));
+	device.publish(cloud, Text('a'));
+	device.prepare(Text('a', 2));
+	auto session = Session(device, cloud, next, SyncCarryMode::Switch,
+		SyncCarrySourceAccess::Protected, false, false, QString(32, u'a'));
+	auto snapshots = std::map<SyncCarryPhase, SyncCarryJournal>();
+	for (auto step = 0; step != 100; ++step) {
+		const auto phase = session.journal.phase;
+		if (session.journal.commitPrepared) snapshots[phase] = session.journal;
+		if (phase == SyncCarryPhase::CompleteCache) break;
+		ProtectedStep(session, SyncCarrySendIntent::NotIssued);
+	}
+	REQUIRE(session.journal.phase == SyncCarryPhase::CompleteCache);
+	const auto committed = device.state;
+	const auto record = session.journal.targetPendingRecord;
+	REQUIRE(!record.isEmpty() && committed.config.pendingSeq);
+	for (const auto &[phase, journal] : snapshots) {
+		const auto canonical = SerializeSyncCarryJournal(journal).canonical;
+		REQUIRE(!canonical.isEmpty());
+		for (auto variant = -1; variant != 3; ++variant) {
+			const auto bytes = variant < 0 ? QByteArray() : ChangedCarryHeader(record, variant);
+			auto broken = journal;
+			broken.targetPendingRecord = bytes;
+			CHECK(!SerializeSyncCarryJournal(broken));
+			auto json = QJsonDocument::fromJson(canonical).object();
+			json.insert(u"target_pending_record"_q, QString::fromUtf8(bytes));
+			CHECK(!ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+			if (phase == SyncCarryPhase::RetireOwnStage || phase == SyncCarryPhase::CompleteCache) {
+				const auto event = PendingBarrierEvent(broken, committed, bytes);
+				CHECK(!DeltaAdvance(broken, event));
+			}
+		}
+	}
+	for (const auto phase : { SyncCarryPhase::CommitState,
+		SyncCarryPhase::RetireOwnStage, SyncCarryPhase::CompleteCache }) {
+		const auto journal = snapshots.at(phase);
+		for (auto variant = 0; variant != 2; ++variant) {
+			auto wrongState = committed;
+			if (variant == 0) wrongState.config.issuedRecords.back().recordHash = QString(64, u'f');
+			if (variant == 1) wrongState.configData.pending = wrongState.configData.base;
+			auto broken = journal;
+			broken.nextStateHash = SyncCarryRecordHash(StateBytes(wrongState));
+			const auto event = PendingBarrierEvent(broken, wrongState, record);
+			CHECK(!DeltaAdvance(broken, event));
+			CHECK(!DeltaResume(broken, wrongState, false, true));
+		}
+		auto missing = journal;
+		missing.deferredRecord.clear();
+		missing.targetPendingRecord.clear();
+		const auto event = PendingBarrierEvent(missing, committed, {});
+		CHECK(!DeltaAdvance(missing, event));
+		CHECK(!DeltaResume(missing, committed, false, true));
+	}
+	CHECK(DeltaAdvance(session.journal,
+		PendingBarrierEvent(session.journal, committed, record)));
+	for (auto variant = -1; variant != 3; ++variant) {
+		auto broken = session.journal;
+		const auto bytes = variant < 0 ? QByteArray() : ChangedCarryHeader(record, variant);
+		broken.targetPendingRecord = bytes;
+		CHECK(!AbandonInterruptedOperation(broken, Account, QString(32, u'b'),
+			true, committed, false, record, true));
+	}
+	const auto abandoned = AbandonInterruptedOperation(session.journal, Account,
+		QString(32, u'b'), true, committed, false, record, true);
+	REQUIRE(abandoned);
+	for (auto variant = -1; variant != 3; ++variant) {
+		const auto bytes = variant < 0 ? QByteArray() : ChangedCarryHeader(record, variant);
+		auto broken = abandoned.journal;
+		broken.interruptedStage = bytes;
+		CHECK(!SerializeSyncCarryJournal(broken));
+		auto json = QJsonDocument::fromJson(abandoned.canonical).object();
+		json.insert(u"interrupted_stage"_q, QString::fromUtf8(bytes));
+		CHECK(!ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+	}
+	auto broken = session.journal;
+	broken.deferredRecord = ChangedCarryHeader(broken.deferredRecord, 0);
+	CHECK(!SerializeSyncCarryJournal(broken));
+	broken = session.journal;
+	broken.plan->ownRecord = ChangedCarryHeader(broken.plan->ownRecord, 0);
+	CHECK(!SerializeSyncCarryJournal(broken));
+}
+
+void OtherRecoveredRecordBindings() {
+	Section = "other recovered record bindings";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto device = Device('a', old, cloud.cache(old));
+	device.publish(cloud, Text('a'));
+	device.prepare(Text('a', 2));
+	const auto pending = device.state;
+	const auto pendingBytes = device.stage;
+	auto session = Session(device, cloud, next, SyncCarryMode::Switch,
+		SyncCarrySourceAccess::Protected, false, false, QString(32, u'a'));
+	ProtectedStep(session, SyncCarrySendIntent::NotIssued);
+	REQUIRE(session.journal.phase == SyncCarryPhase::WritePendingState);
+	const auto prepared = ParseSyncLocalState(device.images.at(session.journal.pendingStateHash));
+	REQUIRE(prepared);
+	for (auto variant = 0; variant != 3; ++variant) {
+		auto broken = session.journal;
+		broken.deferredRecord = ChangedCarryHeader(broken.deferredRecord, variant);
+		broken.pendingStageHash = SyncCarryRecordHash(broken.deferredRecord);
+		REQUIRE(SerializeSyncCarryJournal(broken));
+		auto event = SyncCarryEvent(broken, SyncCarryEventKind::StateObserved);
+		event.outcome = SyncCarryOutcome::Success;
+		event.objectsDurable = true;
+		event.state = prepared.state;
+		CHECK(!DeltaAdvance(broken, event));
+		CHECK(!DeltaResume(broken, prepared.state, false, true));
+		CHECK(!AbandonInterruptedOperation(broken, Account, QString(32, u'b'),
+			true, pending, false, pendingBytes, true));
+	}
+	auto broken = session.journal;
+	broken.deferredRecord = QJsonDocument::fromJson(broken.deferredRecord).toJson();
+	broken.pendingStageHash = SyncCarryRecordHash(broken.deferredRecord);
+	CHECK(!SerializeSyncCarryJournal(broken));
+	auto json = QJsonDocument::fromJson(SerializeSyncCarryJournal(session.journal).canonical).object();
+	json.insert(u"deferred_record"_q, QString::fromUtf8(broken.deferredRecord));
+	json.insert(u"pending_stage_hash"_q, broken.pendingStageHash);
+	CHECK(!ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+	CHECK(!ReconcileProtectedStageForCarry(Account, pending, old,
+		SyncCarrySourceAccess::Protected, SyncCarrySendIntent::NotIssued,
+		broken.deferredRecord, device.localText));
+	auto ownCloud = Cloud();
+	ownCloud.mark(old);
+	auto ownDevice = Device('b', old, ownCloud.cache(old));
+	ownDevice.publish(ownCloud, Text('b'));
+	auto own = Session(ownDevice, ownCloud, next, SyncCarryMode::Switch,
+		SyncCarrySourceAccess::Protected, false, false, QString(32, u'a'));
+	own.run(SyncCarryPhase::Deliver);
+	auto changed = own.journal;
+	const auto oldHash = changed.plan->ownRecordHash;
+	changed.plan->ownRecord = ChangedCarryHeader(changed.plan->ownRecord, 0);
+	const auto newHash = SyncCarryRecordHash(changed.plan->ownRecord);
+	changed.plan->ownRecordHash = newHash;
+	changed.plan->issued.back().recordHash = newHash;
+	std::replace(changed.plan->requiredHashes.begin(), changed.plan->requiredHashes.end(), oldHash, newHash);
+	std::sort(changed.plan->requiredHashes.begin(), changed.plan->requiredHashes.end());
+	std::replace(changed.missingHashes.begin(), changed.missingHashes.end(), oldHash, newHash);
+	std::sort(changed.missingHashes.begin(), changed.missingHashes.end());
+	REQUIRE(SerializeSyncCarryJournal(changed));
+	CHECK(!SyncCarryPlanUsesState(*changed.plan, ownDevice.state));
+	CHECK(!DeltaResume(changed, ownDevice.state, false, true));
+	own.run(SyncCarryPhase::RetireOwnStage);
+	auto retired = SyncCarryEvent(own.journal, SyncCarryEventKind::StageRetired);
+	retired.outcome = SyncCarryOutcome::Success;
+	retired.retiredStageHash = own.journal.plan->ownRecordHash;
+	retired.noPendingFiles = true;
+	CHECK(DeltaAdvance(own.journal, retired));
+	auto uncertain = SyncCarryEvent(own.journal, SyncCarryEventKind::StageRetired);
+	uncertain.outcome = SyncCarryOutcome::Unknown;
+	const auto held = DeltaAdvance(own.journal, uncertain);
+	CHECK(held.status == SyncCarryJournalStatus::Wait && !held.canonical.isEmpty());
+	auto readCloud = Cloud();
+	readCloud.mark(old);
+	auto readDevice = Device('c', old, readCloud.cache(old));
+	readDevice.publish(readCloud, Text('c'));
+	auto read = Session(readDevice, readCloud, next, SyncCarryMode::Switch,
+		SyncCarrySourceAccess::Readable, true, false, QString(32, u'a'));
+	read.run(SyncCarryPhase::Cleanup);
+	auto metadata = read.journal;
+	REQUIRE(!metadata.plan->cleanupCandidates.empty());
+	metadata.plan->cleanupCandidates.front().header->writerApp = u"changed metadata"_q;
+	REQUIRE(SerializeSyncCarryJournal(metadata));
+	CHECK(!CheckSyncCarryDeletion(metadata, readCloud.inventory(old).messages.front(), readCloud.inventory(next)));
+}
+
 }
 
 int main() {
+	ProtectedPendingDelta();
+	RepairMarkDelta();
+	CleanupAndInterruptedDelta();
+	ReaderStaleAndFillDelta();
+	JournalDeltaGuards();
+	DeltaPreconditionAudit();
+	DeferredVersionAudit();
+	RecoveredPendingRecordBindings();
+	OtherRecoveredRecordBindings();
 	PendingContracts();
 	CarryContracts();
 	JournalContracts();

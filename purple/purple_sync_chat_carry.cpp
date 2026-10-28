@@ -361,7 +361,8 @@ SyncCarryPlanResult PlanCarry(const SyncCarryInput &input) {
 		result.status = SyncCarryStatus::NeedsReview;
 		return result;
 	}
-	if (input.access == SyncCarrySourceAccess::Unknown) {
+	if (input.access == SyncCarrySourceAccess::Unknown
+		|| (input.mode == SyncCarryMode::Fill && input.access != SyncCarrySourceAccess::Readable)) {
 		result.status = SyncCarryStatus::UnknownSource;
 		return result;
 	}
@@ -825,6 +826,79 @@ SyncCarryPendingResult FinishPendingStageForCarry(
 	}
 	result.stageHash = freshReadback.reference.recordHash;
 	result.state = recorded.state;
+	return result;
+}
+
+SyncCarryPendingResult ReconcileProtectedStageForCarry(
+		const AccountKey &account,
+		const SyncLocalState &state,
+		const PeerToken &source,
+		SyncCarrySourceAccess access,
+		SyncCarrySendIntent sendIntent,
+		const QByteArray &stagedRecord,
+		const QByteArray &retainedLocalText,
+		const SyncCarryInventory &oldInventory) {
+	auto result = PendingBase(account, state, source);
+	if (result.status != SyncCarryPendingStatus::Ready) {
+		return result;
+	}
+	if (access != SyncCarrySourceAccess::Protected) {
+		result.status = SyncCarryPendingStatus::NotProtected;
+		return result;
+	}
+	const auto stage = OwnStage(state, stagedRecord);
+	if (!stage || state.version != 2) {
+		result.status = SyncCarryPendingStatus::InvalidStage;
+		return result;
+	}
+	if (stage->text != retainedLocalText) {
+		result.status = SyncCarryPendingStatus::LocalCopyRequired;
+		return result;
+	}
+	result.stageHash = SyncCarryRecordHash(stagedRecord);
+	if (sendIntent == SyncCarrySendIntent::Issued) {
+		if (oldInventory.account != account || oldInventory.chat != result.chat
+			|| SelectSyncCarryHeads(oldInventory).status != SyncCarryStatus::Ready) {
+			result.status = SyncCarryPendingStatus::ReconciliationRequired;
+			return result;
+		}
+		auto found = static_cast<const SyncCarryMessage*>(nullptr);
+		for (const auto &message : oldInventory.messages) {
+			if (message.ownership != SyncChatMessageOwnership::Own) {
+				continue;
+			}
+			const auto parsed = ParseSyncEnvelope(message.bytes);
+			if (parsed.header && parsed.header->space == state.space
+				&& parsed.header->stream == u"config"_q
+				&& parsed.header->writerInstall == state.install
+				&& (parsed.header->writerDevice != state.createdDevice
+					|| parsed.header->seq > state.config.pendingSeq
+					|| (parsed.header->seq == state.config.pendingSeq
+						&& message.reference.recordHash != result.stageHash))) {
+				result.status = SyncCarryPendingStatus::ReconciliationRequired;
+				return result;
+			}
+			if (message.bytes == stagedRecord
+				&& (!found || message.reference.messageId < found->reference.messageId)) {
+				found = &message;
+			}
+		}
+		if (found) {
+			return FinishPendingStageForCarry(account, state, stagedRecord, *found);
+		}
+	} else if (sendIntent != SyncCarrySendIntent::NotIssued) {
+		result.status = SyncCarryPendingStatus::ReconciliationRequired;
+		return result;
+	}
+	result.state.config.abandonedSeq = state.config.pendingSeq;
+	result.state.config.pendingSeq = 0;
+	result.state.configData.pending.clear();
+	result.restageInTarget = true;
+	if (!SerializeSyncLocalState(result.state)) {
+		result.state = state;
+		result.status = SyncCarryPendingStatus::Invalid;
+		result.restageInTarget = false;
+	}
 	return result;
 }
 
