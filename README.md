@@ -456,6 +456,12 @@ version 3 desktop fork gets its right to link this in.
 device)` supplies desktop 0 / mobile 10, while an explicit shared value including 0
 wins. `PeekExitHiddenChats(settings)` reads the global exit option.
 `SetPeekStartDelay` edits that scalar without serializing the rest of the TOML.
+`ready_timeout_seconds` is how long the clients' ready step after a start delay
+waits for a confirmation: `PeekReadyTimeoutSeconds(settings)` gives 600 when it
+is absent, raises 0 to 9 to the minimum of 10 with a warning, and keeps the
+default for anything that is not a non-negative integer. `SetPeekReadyTimeout`
+edits it the same way and refuses values below 10, because a timeout too short
+to press anything could never be raised again from the app.
 The clients own ephemeral countdown/abort UI, delayed setting changes and chat
 navigation. No pending activation or binary serialization fields are added.
 Focused regression cases live in TestPeekControls; run the existing core suite

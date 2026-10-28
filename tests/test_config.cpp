@@ -4577,6 +4577,73 @@ void TestPeekControls() {
 	CHECK(flag.text.contains(u"unknown_key = [1, 2]"_q));
 }
 
+void TestPeekReadyTimeout() {
+	Begin("peek ready step timeout");
+	const auto absent = Parse(QString());
+	CHECK(!absent.settings.peek.readyTimeoutSeconds.has_value());
+	CHECK_EQ(Purple::PeekReadyTimeoutSeconds(absent.settings), 600);
+	const auto shared = Parse(u"[peek]\nready_timeout_seconds = 45\n"_q);
+	CHECK(shared.ok());
+	CHECK(shared.warnings.empty());
+	CHECK_EQ(Purple::PeekReadyTimeoutSeconds(shared.settings), 45);
+	const auto minimum = Parse(u"[peek]\nready_timeout_seconds = 10\n"_q);
+	CHECK(minimum.warnings.empty());
+	CHECK_EQ(Purple::PeekReadyTimeoutSeconds(minimum.settings), 10);
+	// Too short to press anything is raised to the minimum, out loud.
+	for (const auto value : { u"0"_q, u"9"_q }) {
+		const auto low = Parse(u"[peek]\nready_timeout_seconds = %1\n"_q.arg(value));
+		CHECK(low.ok());
+		CHECK(!low.warnings.empty());
+		CHECK_EQ(Purple::PeekReadyTimeoutSeconds(low.settings), 10);
+	}
+	for (const auto value : { u"-1"_q, u"1.5"_q, u"true"_q, u"\"600\""_q,
+		u"2147483648"_q, u"[600]"_q }) {
+		const auto invalid = Parse(u"[peek]\nready_timeout_seconds = %1\n"_q.arg(value));
+		CHECK(invalid.ok());
+		CHECK(!invalid.warnings.empty());
+		CHECK(!invalid.settings.peek.readyTimeoutSeconds.has_value());
+		CHECK_EQ(Purple::PeekReadyTimeoutSeconds(invalid.settings), 600);
+	}
+	// Per-preset keys are not read: the timeout is global, like the delay.
+	const auto perPreset = Parse(u"[presets.work]\nlist_order = []\nready_timeout_seconds = 30\n"_q);
+	CHECK_EQ(Purple::PeekReadyTimeoutSeconds(perPreset.settings), 600);
+
+	const auto text = u"# keep header\n[peek]\nstart_delay_seconds = 12\nready_timeout_seconds   =   300   # keep note\nunknown_key = [1, 2]\n[future]\nvalue = 'preserve'\n"_q;
+	const auto changed = Purple::SetPeekReadyTimeout(text, u"test.toml"_q, 60);
+	CHECK(changed.ok());
+	CHECK(changed.changed);
+	CHECK_EQ(changed.text, QString(text).replace(u"=   300"_q, u"=   60"_q));
+	CHECK_EQ(Purple::PeekReadyTimeoutSeconds(Parse(changed.text).settings), 60);
+	CHECK_EQ(*Parse(changed.text).settings.peek.startDelaySeconds, 12);
+	const auto same = Purple::SetPeekReadyTimeout(changed.text, u"test.toml"_q, 60);
+	CHECK(same.ok());
+	CHECK(!same.changed);
+	CHECK_EQ(same.text, changed.text);
+	for (const auto value : { 9, 0, -1 }) {
+		const auto low = Purple::SetPeekReadyTimeout(text, u"test.toml"_q, value);
+		CHECK(!low.ok());
+		CHECK_EQ(low.text, text);
+	}
+	const auto added = Purple::SetPeekReadyTimeout(u"[peek]\nexit_hidden_chats_p = true\n"_q, u"test.toml"_q, 900);
+	CHECK(added.ok());
+	CHECK(added.text.contains(u"exit_hidden_chats_p = true"_q));
+	CHECK_EQ(Purple::PeekReadyTimeoutSeconds(Parse(added.text).settings), 900);
+	const auto appended = Purple::SetPeekReadyTimeout(u"[future]\nx = 1\n"_q, u"test.toml"_q, 120);
+	CHECK(appended.ok());
+	CHECK(appended.text.startsWith(u"[future]\nx = 1\n"_q));
+	CHECK_EQ(Purple::PeekReadyTimeoutSeconds(Parse(appended.text).settings), 120);
+	const auto inlineText = u"peek = { other = true }\n"_q;
+	const auto inlineEdit = Purple::SetPeekReadyTimeout(inlineText, u"test.toml"_q, 120);
+	CHECK(!inlineEdit.ok());
+	CHECK_EQ(inlineEdit.text, inlineText);
+	const auto broken = Purple::SetPeekReadyTimeout(u"[peek\n"_q, u"test.toml"_q, 120);
+	CHECK(!broken.ok());
+	// The delay splice still writes only its own key.
+	const auto delay = Purple::SetPeekStartDelay(text, u"test.toml"_q, 3);
+	CHECK(delay.ok());
+	CHECK(delay.text.contains(u"ready_timeout_seconds   =   300"_q));
+}
+
 void TestPeekLocks() {
 	Begin("peek locks");
 
@@ -16230,6 +16297,7 @@ int main() {
 	TestPeek();
 	TestPeekLengths();
 	TestPeekControls();
+	TestPeekReadyTimeout();
 	TestPeekLocks();
 	TestPeekState();
 	TestNamedExplicitly();

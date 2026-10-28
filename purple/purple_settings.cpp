@@ -1376,6 +1376,25 @@ void WarnUnknownLists(
 				"device default."_q.arg(At(*delay)));
 		}
 	}
+	if (const auto timeout = table.get("ready_timeout_seconds")) {
+		const auto integer = timeout->as_integer();
+		const auto value = integer ? timeout->value<int>() : std::optional<int>();
+		if (value && *value >= kPeekReadyTimeoutMinimumSeconds) {
+			result.readyTimeoutSeconds = *value;
+		} else if (value && *value >= 0) {
+			result.readyTimeoutSeconds = kPeekReadyTimeoutMinimumSeconds;
+			warnings.push_back(u"peek: 'ready_timeout_seconds' is below the "
+				"minimum of %1 seconds (%2), using %1."_q
+				.arg(kPeekReadyTimeoutMinimumSeconds)
+				.arg(At(*timeout)));
+		} else {
+			warnings.push_back(u"peek: 'ready_timeout_seconds' should be a "
+				"whole number of seconds, at least %1 (%2), keeping the "
+				"default of ten minutes."_q
+				.arg(kPeekReadyTimeoutMinimumSeconds)
+				.arg(At(*timeout)));
+		}
+	}
 	return result;
 }
 
@@ -2149,6 +2168,13 @@ int PeekTapSeconds(const Settings &settings) {
 
 bool PeekExitHiddenChats(const Settings &settings) {
 	return settings.peek.exitHiddenChats;
+}
+
+int PeekReadyTimeoutSeconds(const Settings &settings) {
+	return std::max(
+		settings.peek.readyTimeoutSeconds.value_or(
+			kPeekReadyTimeoutDefaultSeconds),
+		kPeekReadyTimeoutMinimumSeconds);
 }
 
 int PeekHotkeySeconds(const Settings &settings) {

@@ -570,6 +570,7 @@ struct Peek {
 	bool endOnAppLockMobile = false;
 	bool exitHiddenChats = true;
 	std::optional<int> startDelaySeconds;
+	std::optional<int> readyTimeoutSeconds;
 };
 
 // Declared here so the two readers below can sit with the keys they read,
@@ -587,6 +588,15 @@ struct Settings;
 [[nodiscard]] int PeekTapSeconds(const Settings &settings);
 [[nodiscard]] int PeekHotkeySeconds(const Settings &settings);
 [[nodiscard]] bool PeekExitHiddenChats(const Settings &settings);
+
+// How long the ready step after a start delay waits for a confirmation before
+// it aborts by itself: `[peek] ready_timeout_seconds', shared by every device,
+// ten minutes when absent. Never below the minimum, because a timeout too short
+// to press anything would also stop the timeout itself from being raised again:
+// raising it waits, and that wait ends in the same ready step.
+inline constexpr auto kPeekReadyTimeoutDefaultSeconds = 10 * 60;
+inline constexpr auto kPeekReadyTimeoutMinimumSeconds = 10;
+[[nodiscard]] int PeekReadyTimeoutSeconds(const Settings &settings);
 
 // The lengths a peek control offers: the chips a sheet shows and the positions
 // a dial snaps to, shortest first. One minute to one hour.

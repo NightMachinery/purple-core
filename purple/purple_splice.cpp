@@ -3052,15 +3052,16 @@ SpliceResult SetTableBool(
 	return splice;
 }
 
-SpliceResult SetPeekStartDelay(
+namespace {
+
+// One whole-seconds scalar in [peek], written in place when the key exists and
+// added under the table otherwise. The callers check the value's range.
+SpliceResult SetPeekSeconds(
 		const QString &text,
 		const QString &path,
+		const QString &key,
 		int value) {
-	if (value < 0) {
-		return Refuse(text, u"Peek delay must be a non-negative number of seconds."_q);
-	}
 	const auto table = u"peek"_q;
-	const auto key = u"start_delay_seconds"_q;
 	const auto utf8 = text.toUtf8();
 	auto parsed = toml::parse(
 		std::string_view(utf8.constData(), utf8.size()),
@@ -3169,6 +3170,29 @@ SpliceResult SetPeekStartDelay(
 	splice.text = result;
 	splice.changed = true;
 	return splice;
+}
+
+} // namespace
+
+SpliceResult SetPeekStartDelay(
+		const QString &text,
+		const QString &path,
+		int value) {
+	if (value < 0) {
+		return Refuse(text, u"Peek delay must be a non-negative number of seconds."_q);
+	}
+	return SetPeekSeconds(text, path, u"start_delay_seconds"_q, value);
+}
+
+SpliceResult SetPeekReadyTimeout(
+		const QString &text,
+		const QString &path,
+		int value) {
+	if (value < kPeekReadyTimeoutMinimumSeconds) {
+		return Refuse(text, u"The ready step timeout must be at least %1 seconds."_q
+			.arg(kPeekReadyTimeoutMinimumSeconds));
+	}
+	return SetPeekSeconds(text, path, u"ready_timeout_seconds"_q, value);
 }
 
 SpliceResult SetScheduleRule(
