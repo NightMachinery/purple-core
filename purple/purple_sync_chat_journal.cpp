@@ -105,7 +105,8 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 [[nodiscard]] bool Terminal(const SyncCarryJournal &j) {
 	return j.phase == SyncCarryPhase::Done || j.phase == SyncCarryPhase::Aborted
 		|| j.phase == SyncCarryPhase::CleanupSkipped
-		|| j.phase == SyncCarryPhase::InterruptedAbandoned;
+		|| j.phase == SyncCarryPhase::InterruptedAbandoned
+		|| j.phase == SyncCarryPhase::FinishedForFollow;
 }
 
 [[nodiscard]] bool PublishesMark(const SyncCarryJournal &j) {
@@ -214,7 +215,7 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 		|| Normalize(j.target, j.account) != j.target
 		|| ((j.source == j.target) != (j.mode == SyncCarryMode::RepairMark))
 		|| j.mode < SyncCarryMode::Switch || j.mode > SyncCarryMode::RepairMark
-		|| j.phase < SyncCarryPhase::ResolvePending || j.phase > SyncCarryPhase::InterruptedAbandoned
+		|| j.phase < SyncCarryPhase::ResolvePending || j.phase > SyncCarryPhase::FinishedForFollow
 		|| j.revision > kSafeInteger || j.pendingSeq > kSafeInteger
 		|| j.lastOutcome < SyncCarryOutcome::Success || j.lastOutcome > SyncCarryOutcome::Unknown
 		|| !RequestId(j.ownRequestId)
@@ -229,7 +230,8 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 			|| !j.deferredRecord.isEmpty() || !j.targetPendingRecord.isEmpty()
 			|| !j.abandonedCleanup.empty() || j.cleanupChatGone
 			|| j.phase > SyncCarryPhase::Aborted || !j.interruptedState.isEmpty()
-			|| !j.interruptedStage.isEmpty() || !j.abandoningLogin.isEmpty()))
+			|| !j.interruptedStage.isEmpty() || !j.abandoningLogin.isEmpty()
+			|| j.finishThenFollow || j.supersededBy || j.attemptedMark))
 		|| (j.version == 2 && (!j.readerBaseline || j.readerBaseline->populationUnknown
 			|| !IsSyncBindingToken(j.loginAuthority.toLatin1())
 			|| (j.readerBaseline->otherMembers && *j.readerBaseline->otherMembers > kSafeInteger)
@@ -240,7 +242,17 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 			|| j.removeOldMarkAuthorized || !j.deferredRecord.isEmpty()))
 		|| (j.phase == SyncCarryPhase::CleanupSkipped && !j.cacheCompleted)
 		|| (j.cleanupChatGone && (j.phase != SyncCarryPhase::Done || !j.cacheCompleted))
-		|| (j.phase != SyncCarryPhase::CleanupSkipped && !j.abandonedCleanup.empty())
+		|| (j.phase != SyncCarryPhase::CleanupSkipped && j.phase != SyncCarryPhase::FinishedForFollow
+			&& !j.abandonedCleanup.empty())
+		|| (j.finishThenFollow && (!PublishesMark(j) || !j.destinationVerified || !j.commitPrepared
+			|| j.markVerified || j.phase < SyncCarryPhase::PrepareCache
+			|| (j.phase > SyncCarryPhase::CompleteCache && j.phase != SyncCarryPhase::InterruptedAbandoned
+				&& j.phase != SyncCarryPhase::FinishedForFollow)
+			|| (j.cacheCompleted && j.phase != SyncCarryPhase::FinishedForFollow)))
+		|| (j.supersededBy && !j.finishThenFollow)
+		|| (j.attemptedMark && (!PublishesMark(j) || !j.markAttempted))
+		|| (j.phase == SyncCarryPhase::FinishedForFollow
+			&& (!j.finishThenFollow || !j.stateCommitted || !j.cacheCompleted))
 		|| (j.phase == SyncCarryPhase::InterruptedAbandoned
 			&& (j.loginAuthority.isEmpty() || j.abandoningLogin == j.loginAuthority
 				|| !IsSyncBindingToken(j.abandoningLogin.toLatin1())))
@@ -250,6 +262,9 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 		return false;
 	}
 	const auto cleanup = CleanupReferences(j);
+	if (j.phase == SyncCarryPhase::FinishedForFollow && j.abandonedCleanup.size() != cleanup.size()) {
+		return false;
+	}
 	auto ids = std::set<int32_t>();
 	for (const auto &reference : j.abandonedCleanup) {
 		if (!ids.insert(reference.messageId).second
@@ -334,7 +349,7 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 			return false;
 		}
 	}
-	for (const auto &cache : { j.oldMark, j.expectedWinner, j.targetMark }) {
+	for (const auto &cache : { j.oldMark, j.expectedWinner, j.targetMark, j.supersededBy, j.attemptedMark }) {
 		if (cache && (!CacheValid(*cache, true)
 			|| Normalize(cache->chat, j.account) != cache->chat)) {
 			return false;
@@ -343,8 +358,11 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 	if ((j.oldMark && j.oldMark->chat != j.source)
 		|| (j.targetMark && (!CacheValid(*j.targetMark, false) || j.targetMark->chat != j.target))
 		|| (!PublishesMark(j) && !j.targetMark)
-		|| (PublishesMark(j) && j.targetMark
+		|| (PublishesMark(j) && j.targetMark && !j.finishThenFollow
 			&& !SwitchMarkOutranksKnown(j, *j.targetMark))
+		|| (j.attemptedMark && (!CacheValid(*j.attemptedMark, false) || j.attemptedMark->chat != j.target))
+		|| (j.supersededBy && (j.supersededBy->chat == j.target
+			|| (j.targetMark && !SyncChatMarkOutranks(*j.supersededBy, *j.targetMark))))
 		|| (j.mode == SyncCarryMode::Follow && j.expectedAction != SyncChatAction::Follow)
 		|| (j.mode == SyncCarryMode::Fill && j.expectedAction != SyncChatAction::Fill)
 		|| (PublishesMark(j) && j.expectedAction != SyncChatAction::Use
@@ -360,7 +378,7 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 		}
 	} else if (j.mode != SyncCarryMode::RepairMark
 		&& ((j.phase >= SyncCarryPhase::StageOwn && j.phase <= SyncCarryPhase::Done)
-			|| j.phase == SyncCarryPhase::CleanupSkipped)) {
+			|| j.phase == SyncCarryPhase::CleanupSkipped || j.phase == SyncCarryPhase::FinishedForFollow)) {
 		return false;
 	}
 	if ((j.phase == SyncCarryPhase::ResolvePending && (!j.pendingSeq || j.stateHash.isEmpty()))
@@ -370,13 +388,13 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 		|| ((j.phase == SyncCarryPhase::StageOwn || j.phase == SyncCarryPhase::RetireOwnStage)
 			&& (!j.plan || j.plan->ownRecord.isEmpty()))
 		|| (j.markVerified && (!j.targetMark || !j.destinationVerified))
-		|| (j.cachePrepared && (!j.markVerified || !j.commitPrepared))
+		|| (j.cachePrepared && ((!j.markVerified && !j.finishThenFollow) || !j.commitPrepared))
 		|| (j.stateCommitted && !j.cachePrepared)
 		|| (j.cacheCompleted && !j.stateCommitted)
 		|| (j.destinationVerified && !j.commitPrepared)
 		|| (j.commitPrepared && (j.stateHash.isEmpty() != j.nextStateHash.isEmpty()))
 		|| (j.phase == SyncCarryPhase::Mark && (!j.destinationVerified || !j.commitPrepared))
-		|| (j.phase == SyncCarryPhase::PrepareCache && !j.markVerified)
+		|| (j.phase == SyncCarryPhase::PrepareCache && !j.markVerified && !j.finishThenFollow)
 		|| (j.phase == SyncCarryPhase::CommitState && !j.cachePrepared)
 		|| ((j.phase == SyncCarryPhase::RetireOwnStage || j.phase == SyncCarryPhase::CompleteCache)
 			&& !j.stateCommitted)
@@ -492,6 +510,16 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 		o.insert(u"interrupted_state"_q, QString::fromUtf8(j.interruptedState));
 		o.insert(u"interrupted_stage"_q, QString::fromUtf8(j.interruptedStage));
 		o.insert(u"abandoning_login"_q, j.abandoningLogin);
+		if (j.finishThenFollow) {
+			o.insert(u"superseded_by"_q, CacheJson(j.supersededBy, o.value(u"superseded_by"_q).toObject()));
+		} else {
+			o.remove(u"superseded_by"_q);
+		}
+		if (j.attemptedMark) {
+			o.insert(u"attempted_mark"_q, CacheJson(j.attemptedMark, o.value(u"attempted_mark"_q).toObject()));
+		} else {
+			o.remove(u"attempted_mark"_q);
+		}
 		auto readers = o.value(u"reader_baseline"_q).toObject();
 		readers.insert(u"warning"_q, j.readerBaseline->warningRequired);
 		readers.insert(u"private"_q, j.readerBaseline->privateRecipient);
@@ -525,7 +553,7 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 	const auto action = Integer(o.value(u"expected_action"_q));
 	const auto outcome = Integer(o.value(u"last_outcome"_q));
 	if (!mode || *mode > uint64_t(SyncCarryMode::RepairMark)
-		|| !phase || *phase > uint64_t(SyncCarryPhase::InterruptedAbandoned) || !revision || !seq
+		|| !phase || *phase > uint64_t(SyncCarryPhase::FinishedForFollow) || !revision || !seq
 		|| !action || *action > uint64_t(SyncChatAction::ReadWinnerInventory)
 		|| !outcome || *outcome > uint64_t(SyncCarryOutcome::Unknown)) {
 		return std::nullopt;
@@ -616,6 +644,18 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 			if (!o.value(name).isBool()) return std::nullopt;
 			*field = o.value(name).toBool();
 		}
+		if (o.contains(u"superseded_by"_q)) {
+			j.finishThenFollow = true;
+			const auto superseded = o.value(u"superseded_by"_q);
+			if (!superseded.isNull()) {
+				j.supersededBy = ReadCache(superseded);
+				if (!j.supersededBy) return std::nullopt;
+			}
+		}
+		if (o.contains(u"attempted_mark"_q)) {
+			j.attemptedMark = ReadCache(o.value(u"attempted_mark"_q));
+			if (!j.attemptedMark) return std::nullopt;
+		}
 		const auto r = o.value(u"reader_baseline"_q).toObject();
 		auto readers = SyncChatReaderFacts();
 		for (const auto &[name, field] : std::vector<std::pair<QString, bool*>>{
@@ -656,12 +696,19 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 		}));
 }
 
+[[nodiscard]] std::optional<SyncChatCache> CacheMark(const SyncCarryJournal &j) {
+	return j.targetMark ? j.targetMark
+		: j.finishThenFollow ? std::optional(SyncChatCache{ j.target, 0, 0 })
+		: std::nullopt;
+}
+
 [[nodiscard]] bool CacheReceipt(
 		const SyncCarryJournal &j,
 		const SyncCarryCacheReceipt &receipt,
 		bool complete) {
-	return j.targetMark && receipt.operationId == j.operationId && receipt.account == j.account
-		&& receipt.mark == *j.targetMark && receipt.complete == complete;
+	const auto mark = CacheMark(j);
+	return mark && receipt.operationId == j.operationId && receipt.account == j.account
+		&& receipt.mark == *mark && receipt.complete == complete;
 }
 
 [[nodiscard]] std::optional<SyncChatCache> MarkCache(
@@ -676,6 +723,89 @@ constexpr auto kSafeInteger = uint64_t(9007199254740991ULL);
 	}
 	const auto cache = SyncChatCache{ chat, mark.messageId, mark.date };
 	return CacheValid(cache, false) ? std::optional(cache) : std::nullopt;
+}
+
+[[nodiscard]] SyncCarryFinishRefusal FinishThenFollow(
+		SyncCarryJournal &j,
+		const SyncCarryJournalEvent &event) {
+	using Refusal = SyncCarryFinishRefusal;
+	const auto &r = event.resolution;
+	const auto named = r.action == SyncChatAction::Use || r.action == SyncChatAction::Follow;
+	if (j.version != 2) {
+		return Refusal::Version;
+	} else if (!PublishesMark(j)) {
+		return Refusal::Mode;
+	} else if (j.phase != SyncCarryPhase::Mark || !j.destinationVerified || !j.commitPrepared
+		|| j.markVerified || j.cachePrepared || j.stateCommitted || j.finishThenFollow) {
+		return Refusal::Phase;
+	} else if (event.outcome != SyncCarryOutcome::Success) {
+		return Refusal::Outcome;
+	} else if (!event.noRequestInFlight) {
+		return Refusal::RequestInFlight;
+	} else if (!event.fullResolutionComplete) {
+		return Refusal::IncompleteResolution;
+	} else if ((!named && r.action != SyncChatAction::Searching && r.action != SyncChatAction::Lost)
+		|| (named && !r.winner)) {
+		return Refusal::Action;
+	} else if (!r.cache || Normalize(r.cache->chat, j.account) != j.source) {
+		return Refusal::ResolutionScope;
+	}
+	auto winner = r.winner;
+	if (winner) {
+		const auto chat = Normalize(winner->chat, j.account);
+		if (!chat || !CacheValid(*winner, true)) {
+			return Refusal::InvalidWinner;
+		} else if (*chat == j.target) {
+			return Refusal::WinnerInTarget;
+		}
+		winner->chat = *chat;
+	}
+	auto mark = j.targetMark;
+	switch (event.mark.outcome) {
+	case SyncCarryMarkOutcome::Unknown: break;
+	case SyncCarryMarkOutcome::Valid:
+		mark = MarkCache(event.mark, j.account, j.target);
+		if (!mark || !j.markAttempted || event.mark.text != j.markText
+			|| event.mark.ownership != SyncChatMessageOwnership::Own
+			|| (j.targetMark && mark != j.targetMark)
+			|| (j.attemptedMark && mark != j.attemptedMark)) {
+			return Refusal::MarkMismatch;
+		}
+		j.attemptedMark = mark;
+		break;
+	case SyncCarryMarkOutcome::Absent:
+		if (j.targetMark || j.attemptedMark || event.mark.account != j.account
+			|| Normalize(event.mark.chat, j.account) != j.target
+			|| !event.neverLandedConfirmed || event.neverLandedRequestId != j.markRequestId) {
+			return Refusal::AbsentUnproven;
+		}
+		break;
+	case SyncCarryMarkOutcome::ChatGone: return Refusal::TargetGone;
+	}
+	if (!named) {
+		winner.reset();
+	}
+	if (winner && mark && !SyncChatMarkOutranks(*winner, *mark)) {
+		return Refusal::WinnerNotNewer;
+	}
+	j.targetMark = mark;
+	j.supersededBy = winner;
+	j.finishThenFollow = true;
+	j.phase = SyncCarryPhase::PrepareCache;
+	return Refusal::None;
+}
+
+[[nodiscard]] bool EventInScope(
+		const SyncCarryJournal &journal,
+		const SyncCarryJournalEvent &event,
+		const QString &currentLogin) {
+	return Valid(journal) && (journal.loginAuthority.isEmpty() || currentLogin == journal.loginAuthority)
+		&& journal.revision != kSafeInteger
+		&& event.operationId == journal.operationId && event.revision == journal.revision
+		&& event.account == journal.account && event.source == journal.source
+		&& event.target == journal.target && event.outcome >= SyncCarryOutcome::Success
+		&& event.outcome <= SyncCarryOutcome::Unknown
+		&& !Terminal(journal);
 }
 
 }
@@ -823,6 +953,7 @@ SyncCarryJournalAction NextSyncCarryJournalAction(const SyncCarryJournal &j) {
 	case SyncCarryPhase::Done:
 	case SyncCarryPhase::CleanupSkipped:
 	case SyncCarryPhase::InterruptedAbandoned:
+	case SyncCarryPhase::FinishedForFollow:
 	case SyncCarryPhase::Aborted: return SyncCarryJournalAction::None;
 	}
 	return SyncCarryJournalAction::None;
@@ -862,13 +993,7 @@ SyncCarryJournalResult AdvanceSyncCarryJournal(
 		const SyncCarryJournal &journal,
 		const SyncCarryJournalEvent &event,
 		const QString &currentLogin) {
-	if (!Valid(journal) || (!journal.loginAuthority.isEmpty() && currentLogin != journal.loginAuthority)
-		|| journal.revision == kSafeInteger
-		|| event.operationId != journal.operationId || event.revision != journal.revision
-		|| event.account != journal.account || event.source != journal.source
-		|| event.target != journal.target || event.outcome < SyncCarryOutcome::Success
-		|| event.outcome > SyncCarryOutcome::Unknown
-		|| Terminal(journal)) {
+	if (!EventInScope(journal, event, currentLogin)) {
 		return { SyncCarryJournalStatus::Invalid, journal, {} };
 	}
 	auto j = journal;
@@ -921,6 +1046,11 @@ SyncCarryJournalResult AdvanceSyncCarryJournal(
 		if (j.version == 1) return { SyncCarryJournalStatus::NeedsReview, journal, {} };
 		return Finish(j);
 	}
+	if (event.kind == SyncCarryEventKind::FinishThenFollow) {
+		auto result = FinishThenFollow(j, event) == SyncCarryFinishRefusal::None
+			? Finish(j) : SyncCarryJournalResult();
+		return result ? result : SyncCarryJournalResult{ SyncCarryJournalStatus::Invalid, journal, {} };
+	}
 	const auto expected = [&] {
 		switch (j.phase) {
 		case SyncCarryPhase::ResolvePending: return event.kind == SyncCarryEventKind::PendingPrepared;
@@ -946,6 +1076,7 @@ SyncCarryJournalResult AdvanceSyncCarryJournal(
 		case SyncCarryPhase::Done:
 		case SyncCarryPhase::CleanupSkipped:
 		case SyncCarryPhase::InterruptedAbandoned:
+		case SyncCarryPhase::FinishedForFollow:
 		case SyncCarryPhase::Aborted: return false;
 		}
 		return false;
@@ -1123,7 +1254,7 @@ SyncCarryJournalResult AdvanceSyncCarryJournal(
 			return Finish(j, SyncCarryJournalStatus::Wait);
 		}
 		if (event.mark.outcome == SyncCarryMarkOutcome::Absent && PublishesMark(j)
-			&& j.markAttempted && !j.targetMark && event.mark.account == j.account
+			&& j.markAttempted && !j.targetMark && !j.attemptedMark && event.mark.account == j.account
 			&& Normalize(event.mark.chat, j.account) == j.target) {
 			if (j.version == 2 && (!event.noRequestInFlight || !event.neverLandedConfirmed
 				|| event.neverLandedRequestId != j.markRequestId)) {
@@ -1182,7 +1313,12 @@ SyncCarryJournalResult AdvanceSyncCarryJournal(
 			return invalid();
 		}
 		j.cacheCompleted = true;
-		j.phase = j.mode == SyncCarryMode::RepairMark ? SyncCarryPhase::Done : SyncCarryPhase::Cleanup;
+		if (j.finishThenFollow) {
+			j.abandonedCleanup = CleanupReferences(j);
+			j.phase = SyncCarryPhase::FinishedForFollow;
+		} else {
+			j.phase = j.mode == SyncCarryMode::RepairMark ? SyncCarryPhase::Done : SyncCarryPhase::Cleanup;
+		}
 		break;
 	case SyncCarryPhase::Cleanup: {
 		if (event.kind != SyncCarryEventKind::CleanupCompleted || !event.destination
@@ -1214,10 +1350,27 @@ SyncCarryJournalResult AdvanceSyncCarryJournal(
 	case SyncCarryPhase::Done:
 	case SyncCarryPhase::CleanupSkipped:
 	case SyncCarryPhase::InterruptedAbandoned:
+	case SyncCarryPhase::FinishedForFollow:
 	case SyncCarryPhase::Aborted:
 		return invalid();
 	}
 	return Finish(j);
+}
+
+SyncCarryFinishRefusal CheckSyncCarryFinishThenFollow(
+		const SyncCarryJournal &journal,
+		const SyncCarryJournalEvent &event,
+		const QString &currentLogin) {
+	if (!EventInScope(journal, event, currentLogin)) {
+		return SyncCarryFinishRefusal::Scope;
+	}
+	auto j = journal;
+	++j.revision;
+	j.lastOutcome = event.outcome;
+	const auto refusal = FinishThenFollow(j, event);
+	return refusal != SyncCarryFinishRefusal::None ? refusal
+		: SerializeSyncCarryJournal(j) ? SyncCarryFinishRefusal::None
+		: SyncCarryFinishRefusal::Serialization;
 }
 
 SyncCarryJournalResult ResumeSyncCarryJournal(
@@ -1272,6 +1425,13 @@ SyncCarryJournalResult ResumeSyncCarryJournal(
 	}
 	if (j.plan && !SyncCarryPlanUsesState(*j.plan, state)) {
 		return { SyncCarryJournalStatus::NeedsReview, journal, {} };
+	}
+	if (j.finishThenFollow) {
+		j.finishThenFollow = false;
+		j.supersededBy.reset();
+		if (j.targetMark && !SwitchMarkOutranksKnown(j, *j.targetMark)) {
+			j.targetMark.reset();
+		}
 	}
 	if (j.mode == SyncCarryMode::RepairMark) {
 		j.phase = SyncCarryPhase::Mark;
@@ -1355,6 +1515,10 @@ SyncCarryJournalCommit PrepareSyncCarryJournalCommit(
 
 bool SyncCarryJournalHoldsWrites(const SyncCarryJournal &journal) {
 	return !Valid(journal) || !Terminal(journal);
+}
+
+std::optional<SyncChatCache> SyncCarryJournalCacheMark(const SyncCarryJournal &journal) {
+	return Valid(journal) ? CacheMark(journal) : std::nullopt;
 }
 
 SyncCarryReaderVerdict CheckSyncCarryReaders(

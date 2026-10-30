@@ -30,6 +30,7 @@ enum class SyncCarryPhase {
 	Aborted,
 	CleanupSkipped,
 	InterruptedAbandoned,
+	FinishedForFollow,
 };
 
 enum class SyncCarryOutcome { Success, Failed, Unknown };
@@ -95,6 +96,9 @@ struct SyncCarryJournal {
 	QByteArray targetPendingRecord;
 	std::vector<SyncCarryReference> abandonedCleanup;
 	bool cleanupChatGone = false;
+	bool finishThenFollow = false;
+	std::optional<SyncChatCache> supersededBy;
+	std::optional<SyncChatCache> attemptedMark;
 	SyncCarryOutcome lastOutcome = SyncCarryOutcome::Success;
 	QJsonObject preserved;
 };
@@ -161,6 +165,7 @@ enum class SyncCarryEventKind {
 	Cancel,
 	SkipCleanup,
 	CleanupChatGone,
+	FinishThenFollow,
 };
 
 struct SyncCarryJournalEvent {
@@ -197,6 +202,7 @@ struct SyncCarryJournalEvent {
 	bool skipCleanupConfirmed = false;
 	QString neverLandedRequestId;
 	bool neverLandedConfirmed = false;
+	bool fullResolutionComplete = false;
 };
 
 enum class SyncCarryJournalStatus {
@@ -227,6 +233,30 @@ struct SyncCarryJournalResult {
 	const SyncCarryJournal &journal,
 	SyncCarryEventKind kind);
 [[nodiscard]] SyncCarryJournalResult AdvanceSyncCarryJournal(
+	const SyncCarryJournal &journal,
+	const SyncCarryJournalEvent &event,
+	const QString &currentLogin = {});
+enum class SyncCarryFinishRefusal {
+	None,
+	Scope,
+	Version,
+	Mode,
+	Phase,
+	Outcome,
+	RequestInFlight,
+	IncompleteResolution,
+	Action,
+	ResolutionScope,
+	InvalidWinner,
+	WinnerInTarget,
+	MarkMismatch,
+	AbsentUnproven,
+	TargetGone,
+	WinnerNotNewer,
+	Serialization,
+};
+
+[[nodiscard]] SyncCarryFinishRefusal CheckSyncCarryFinishThenFollow(
 	const SyncCarryJournal &journal,
 	const SyncCarryJournalEvent &event,
 	const QString &currentLogin = {});
@@ -264,6 +294,8 @@ struct SyncCarryJournalCommit {
 	const SyncCarryInventory &destination,
 	const SyncPlaylistCarryReceipt &playlist = {});
 [[nodiscard]] bool SyncCarryJournalHoldsWrites(const SyncCarryJournal &journal);
+[[nodiscard]] std::optional<SyncChatCache> SyncCarryJournalCacheMark(
+	const SyncCarryJournal &journal);
 
 enum class SyncCarryReaderVerdict { Hold, Proceed, WarnAndProceed };
 

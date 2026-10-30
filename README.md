@@ -26,9 +26,10 @@ mark grammar, conservative eligibility, deterministic resolution from supplied
 facts, and chat-scoped state v2 with a pending-safe move transition. The
 [carry journal](docs/sync-chat-carry.md) plans settings transfer, readback,
 state/cache commit and crash recovery, including protected pending records,
-same-chat mark repair, explicit cleanup skipping, stale-mark checks and
-interrupted-login abandonment with retained effects. Version-2 journals freeze
-reader consent before the first write. Client execution and server probes
+same-chat mark repair, explicit cleanup skipping, stale-mark checks,
+interrupted-login abandonment with retained effects, and finishing a held mark
+attempt without cleanup so the account can follow the current winner. Version-2
+journals freeze reader consent before the first write. Client execution and server probes
 remain separate work.
 
 ## Received-content archive

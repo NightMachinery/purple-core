@@ -144,7 +144,9 @@ The ordered actions are:
    A same-second mark may win only when that deterministic tie-break favors N;
    blindly retrying the same request id cannot change a losing mark's date.
    Parsing also refuses saved Switch journals whose accepted target mark loses
-   to their known old winner, including an invalid saved Done state.
+   to their known old winner, including an invalid saved Done state. A held
+   mark attempt whose current winner is outside N leaves only through
+   FinishThenFollow (see "Finishing a held mark attempt for Follow").
 5. Persist an incomplete cache receipt containing operation/account and the
    exact new mark. Only then atomically write the prepared state image. Retire
    any exact own stage, then mark the cache complete. For no-state Fill, commit
@@ -292,6 +294,75 @@ in Telegram. Logout must revoke RAM callbacks immediately and retain the journal
 outside the admitted cache; removing the account deletes it with account data.
 Repeated terminal Resume is a read-only round trip, including under a new login.
 
+## Finishing a held mark attempt for Follow
+
+`SyncCarryEventKind::FinishThenFollow` (FtF) lets a version-2 Switch or
+RepairMark journal leave the Mark phase when N is not the current winner. It binds
+the frozen N without cleanup, sends nothing and never retargets the journal; the
+account then reaches the winner W through an ordinary Follow journal with its own
+Begin and consent. The client decides when to submit it, after a read-only
+recovery check that follows a DestinationRead in the same run.
+
+FtF is accepted only at Mark with a verified destination and prepared commit, no
+verified mark, no prepared cache and no state commit, under the journal's own
+login, with Success and `noRequestInFlight`. `resolution` is a fresh resolution
+against the still-bound O cache, and `fullResolutionComplete` must be true. Its
+action must be Use, Follow, Searching or Lost, and it must not name a winner (or
+an older alternative) in N. Use and Follow name W; Searching and Lost record none.
+Invalid, Unset, VerifyMark, NewerMark, ReadWinnerInventory and Fill refuse, as do
+version 1, Follow and Fill journals, every other phase and a non-Success outcome.
+
+`mark` is the exact readback of this journal's mark. Valid needs `markAttempted`,
+must pass the mark grammar for this account and N, carry the frozen mark text, be
+Own and equal any `targetMark` already verified and any `attemptedMark` already
+seen. It is recorded in `attemptedMark`, the posted mark's id and date, which no
+later transition clears. Unknown keeps the existing `targetMark`, which may be
+empty. Absent needs the never-landed proof fields, no `targetMark` and no
+`attemptedMark`; ChatGone refuses. When both W and a mark remain, W must outrank
+the mark. Once `attemptedMark` is set, a MarkRead Absent also holds, even with
+never-landed proof, so a seen mark can never lead to a second post.
+
+A refusal returns Invalid with the unchanged input journal and no canonical bytes,
+so nothing is persisted and the stored journal stays at Mark, holding writes.
+`CheckSyncCarryFinishThenFollow` returns the typed reason (`SyncCarryFinishRefusal`)
+for the same event and login, using the same checks as Advance plus the
+serialization bound. Clients log it and keep showing the held status.
+
+The accepted event sets `finishThenFollow`, records W in `supersededBy`, keeps or
+sets `targetMark`, and moves to PrepareCache. It never sets `markVerified` and
+never clears `markAttempted`, `markRequestId`, `deliveryHistory`, plan
+reservations or issued records. `SyncCarryJournalCacheMark` returns the mark for
+the PrepareCache and CompleteCache receipts: `targetMark`, or the unmarked
+`{N, 0, 0}` for an FtF journal without one. Only that case accepts a zero receipt.
+CommitState and RetireOwnStage are unchanged, including the deferred target
+pending record. CompleteCache then enters the terminal FinishedForFollow phase in
+place of Cleanup and records every cleanup reference and the authorized old mark
+in `abandonedCleanup` as withheld, never as cleaned. The deletion checks require
+Cleanup, so nothing is deleted, and action helpers emit nothing. The account is
+left bound to N, with mark M or unmarked, and ordinary resolution offers Follow to
+W, or Searching then Lost. As with InterruptedAbandoned, clients keep exposing the
+retained mark request, attempt flag, forwards and issued records to discovery,
+stale-mark handling and record dedup. A losing mark M in N is then an ordinary own
+stale mark that only `CheckStaleMarkRemoval` may authorize removing, on request.
+RepairMark uses the same event; its state image is unchanged, so only the cache
+changes.
+
+Before the state commit, Resume clears `finishThenFollow` and `supersededBy`,
+drops a `targetMark` that loses to the known old winner and returns to
+VerifyDestination (Mark for RepairMark), so the next run classifies from fresh
+facts. Dropping only means the mark no longer counts as the target winner:
+`markAttempted`, `markRequestId` and `attemptedMark` keep the attempt and the
+posted message visible, and the next action is ReadMark, never PostMark. After the commit barrier, Resume continues to RetireOwnStage or
+CompleteCache with W kept. Terminal Resume is a read-only round trip. A changed
+login still has only `AbandonInterruptedOperation`.
+
+The codec stores the phase as 18, after every existing number, the version-2
+member `superseded_by` (a cache or null), present exactly for FtF journals, and
+`attempted_mark`, present once a mark has been seen.
+Unknown members are preserved. A version-1 journal cannot carry FtF state. An older
+build reads any FtF journal as invalid (phase 18, or a cache phase without a
+verified mark) and keeps holding, which is safe.
+
 ## Cleanup and playlists
 
 `SyncCarryCleanupCandidates` is a candidate calculator, not permission to delete.
@@ -335,7 +406,8 @@ definite account/O-scoped ChatGone readback. It records `cleanupChatGone` and
 finishes Done because nothing remains to delete. MarkGone, Absent, protection and
 uncertain reads do not qualify. Neither event changes N state or ledger.
 `SyncCarryJournalHoldsWrites` stays true for live or invalid journals and false
-only for valid Done, Aborted, CleanupSkipped or InterruptedAbandoned journals.
+only for valid Done, Aborted, CleanupSkipped, InterruptedAbandoned or
+FinishedForFollow journals.
 
 `CheckStaleMarkRemoval` is independent of a move journal. It authorizes only an
 exact Own mark readback for this account, after an explicitly complete fresh
@@ -384,4 +456,8 @@ found paths at every journal phase and effect-before-acknowledgement point,
 RepairMark crash barriers and unchanged state, cleanup terminal replay,
 interrupted-operation effect retention and login fences, exact target-stage
 installation, matched never-landed proof, reader baseline preservation, stale
-mark refusal, unreadable Fill and malformed/oversize/unknown-field codecs.
+mark refusal, unreadable Fill and malformed/oversize/unknown-field codecs. The
+finish-then-Follow group covers marked and unmarked FtF for Switch and
+RepairMark, its refusals, every crash barrier, terminal replay, the zero cache
+receipt, the later Follow and seeded simultaneous switches whose losers converge
+on the winner.

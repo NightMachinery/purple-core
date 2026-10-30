@@ -13,11 +13,13 @@ option) any later version.
 #include <QtCore/QJsonDocument>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <random>
 #include <set>
+#include <tuple>
 
 using namespace Purple;
 
@@ -703,7 +705,7 @@ struct Session {
 			break;
 		case SyncCarryPhase::PrepareCache:
 			event.kind = SyncCarryEventKind::CachePrepared;
-			event.cache = { journal.operationId, Account, *journal.targetMark, false };
+			event.cache = { journal.operationId, Account, *SyncCarryJournalCacheMark(journal), false };
 			device.pendingCache = event.cache;
 			if (restart(phase, true)) return;
 			break;
@@ -722,8 +724,8 @@ struct Session {
 			break;
 		case SyncCarryPhase::CompleteCache:
 			event.kind = SyncCarryEventKind::CacheCompleted;
-			event.cache = { journal.operationId, Account, *journal.targetMark, true };
-			device.cache = *journal.targetMark;
+			event.cache = { journal.operationId, Account, *SyncCarryJournalCacheMark(journal), true };
+			device.cache = *SyncCarryJournalCacheMark(journal);
 			device.pendingCache.reset();
 			if (restart(phase, true)) return;
 			break;
@@ -754,6 +756,7 @@ struct Session {
 		case SyncCarryPhase::Done:
 		case SyncCarryPhase::CleanupSkipped:
 		case SyncCarryPhase::InterruptedAbandoned:
+		case SyncCarryPhase::FinishedForFollow:
 		case SyncCarryPhase::Aborted:
 			return;
 		}
@@ -763,7 +766,7 @@ struct Session {
 	void run(std::optional<SyncCarryPhase> stop = std::nullopt) {
 		for (auto stepCount = 0; stepCount != 100; ++stepCount) {
 			if (held || journal.phase == SyncCarryPhase::Done || journal.phase == SyncCarryPhase::Aborted
-				|| stop == journal.phase) {
+				|| journal.phase == SyncCarryPhase::FinishedForFollow || stop == journal.phase) {
 				return;
 			}
 			step();
@@ -1679,11 +1682,11 @@ void ProtectedStep(Session &s, SyncCarrySendIntent intent) {
 		if (s.restart(phase, true)) return;
 	} else if (phase == SyncCarryPhase::CompleteCache && !s.journal.targetPendingRecord.isEmpty()) {
 		event.kind = SyncCarryEventKind::CacheCompleted;
-		event.cache = { s.journal.operationId, Account, *s.journal.targetMark, true };
+		event.cache = { s.journal.operationId, Account, *SyncCarryJournalCacheMark(s.journal), true };
 		s.device.stage = s.journal.targetPendingRecord;
 		event.targetPendingStageDurable = true;
 		event.stagedRecord = s.device.stage;
-		s.device.cache = *s.journal.targetMark;
+		s.device.cache = *SyncCarryJournalCacheMark(s.journal);
 		if (s.restart(phase, true)) return;
 	} else {
 		s.step();
@@ -1877,6 +1880,962 @@ void RepairMarkDelta() {
 	start.targetEligibility.readers.otherMembers = 1;
 	start.readerConsentAccepted = true;
 	CHECK(BeginSyncCarryJournal(start));
+}
+
+std::set<std::tuple<QString, int32_t, QString>> CloudSnapshot(const Cloud &cloud) {
+	auto result = std::set<std::tuple<QString, int32_t, QString>>();
+	for (const auto &[chat, messages] : cloud.messages) {
+		for (const auto &message : messages) {
+			result.emplace(chat, message.reference.messageId, message.reference.recordHash);
+		}
+	}
+	for (const auto &[chat, mark] : cloud.marks) {
+		result.emplace(chat, mark.messageId, mark.text);
+	}
+	return result;
+}
+
+SyncChatResolution FreshResolution(
+		const SyncChatCache &cache,
+		SyncChatDirectRead read,
+		const Cloud &cloud,
+		int retries = 0) {
+	auto input = SyncChatResolveInput();
+	input.cache = cache;
+	input.cacheRead = read;
+	input.cachedEligibility = Eligible(cache.chat);
+	input.searchRetriesCompleted = retries;
+	for (const auto &[key, mark] : cloud.marks) {
+		auto found = SyncChatMark();
+		found.location = { mark.chat, mark.messageId, mark.date };
+		found.status = SyncChatMarkStatus::Supported;
+		found.eligibility = Eligible(mark.chat);
+		found.records = cloud.inventory(mark.chat).messages.empty()
+			? SyncChatRecordPresence::Empty : SyncChatRecordPresence::Present;
+		found.readable = found.freshlyRead = true;
+		input.marks.push_back(found);
+	}
+	return ResolveSyncChat(input);
+}
+
+SyncCarryJournalEvent FtfEvent(
+		const SyncCarryJournal &journal,
+		const Device &device,
+		const SyncChatResolution &resolution,
+		const SyncCarryMarkReadback &mark = {}) {
+	auto event = SyncCarryEvent(journal, SyncCarryEventKind::FinishThenFollow);
+	event.outcome = SyncCarryOutcome::Success;
+	event.objectsDurable = true;
+	event.state = device.state;
+	event.resolution = resolution;
+	event.fullResolutionComplete = true;
+	event.noRequestInFlight = true;
+	event.mark = mark;
+	return event;
+}
+
+// Persists MarkPostPrepared with an unknown result; the mark lands only if asked.
+void HoldMark(Session &s, bool lands) {
+	s.run(SyncCarryPhase::Mark);
+	REQUIRE(s.journal.phase == SyncCarryPhase::Mark);
+	REQUIRE(NextSyncCarryJournalAction(s.journal) == SyncCarryJournalAction::PostMark);
+	const auto text = s.journal.markText;
+	const auto request = s.journal.operationId + s.journal.markRequestId;
+	auto event = SyncCarryEvent(s.journal, SyncCarryEventKind::MarkPostPrepared);
+	event.outcome = SyncCarryOutcome::Unknown;
+	s.store(DeltaAdvance(s.journal, event));
+	REQUIRE(s.journal.markAttempted);
+	if (lands) s.cloud.mark(s.target, text, request);
+}
+
+SyncCarryJournalResult FtfNow(Session &s) {
+	const auto i = s.cloud.marks.find(s.cloud.key(s.target));
+	const auto mark = i == s.cloud.marks.end() ? SyncCarryMarkReadback() : i->second;
+	return DeltaAdvance(s.journal, FtfEvent(s.journal, s.device, Resolution(s.device, s.cloud), mark));
+}
+
+// A refusal persists nothing and hands back the unchanged journal, with a typed reason.
+bool Refuses(
+		const SyncCarryJournal &journal,
+		const SyncCarryJournalEvent &event,
+		const QString &login) {
+	const auto result = AdvanceSyncCarryJournal(journal, event, login);
+	return result.status == SyncCarryJournalStatus::Invalid && result.canonical.isEmpty()
+		&& SerializeSyncCarryJournal(result.journal).canonical == SerializeSyncCarryJournal(journal).canonical
+		&& result.journal.revision == journal.revision && result.journal.phase == journal.phase
+		&& CheckSyncCarryFinishThenFollow(journal, event, login) != SyncCarryFinishRefusal::None;
+}
+
+bool RefusesFor(
+		const SyncCarryJournal &journal,
+		const SyncCarryJournalEvent &event,
+		const QString &login,
+		SyncCarryFinishRefusal reason) {
+	const auto actual = CheckSyncCarryFinishThenFollow(journal, event, login);
+	if (actual != reason) std::printf("refusal %d, expected %d\n", int(actual), int(reason));
+	return Refuses(journal, event, login) && actual == reason;
+}
+
+bool HoldsConfirmedHead(const Cloud &cloud, const Device &device, const PeerToken &chat) {
+	const auto destination = cloud.inventory(chat);
+	return std::any_of(destination.messages.begin(), destination.messages.end(), [&](const auto &message) {
+		const auto header = ParseSyncEnvelope(message.bytes).header;
+		return header && header->writerInstall == device.state.install
+			&& header->seq == device.state.config.confirmedSeq;
+	});
+}
+
+void FinishThenFollowDelta() {
+	Section = "finish then follow delta";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	const auto other = Peer(u"chat:30"_q);
+	const auto login = QString(32, u'a');
+	CHECK(int(SyncCarryPhase::Cleanup) == 13 && int(SyncCarryPhase::Done) == 14
+		&& int(SyncCarryPhase::Aborted) == 15 && int(SyncCarryPhase::CleanupSkipped) == 16
+		&& int(SyncCarryPhase::InterruptedAbandoned) == 17
+		&& int(SyncCarryPhase::FinishedForFollow) == 18);
+
+	// Case (c): our acknowledged mark M in N is outranked by W elsewhere.
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto d = Device('a', old, cloud.cache(old));
+	d.publish(cloud, Text('a'));
+	auto s = Session(d, cloud, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, true, true, login);
+	HoldMark(s, true);
+	const auto m = cloud.cache(next);
+	const auto ours = cloud.marks.at(cloud.key(next));
+	cloud.mark(other);
+	const auto w = cloud.cache(other);
+	const auto j = s.journal;
+	const auto resolution = Resolution(d, cloud);
+	REQUIRE(resolution.action == SyncChatAction::Follow && resolution.winner == w);
+	const auto event = FtfEvent(j, d, resolution, ours);
+	CHECK(CheckSyncCarryFinishThenFollow(j, event, login) == SyncCarryFinishRefusal::None);
+	using Refusal = SyncCarryFinishRefusal;
+	const auto reasons = std::array{
+		Refusal::WinnerInTarget, Refusal::WinnerNotNewer, Refusal::IncompleteResolution,
+		Refusal::RequestInFlight, Refusal::Outcome, Refusal::Outcome, Refusal::Scope, Refusal::Scope,
+		Refusal::Scope, Refusal::Scope, Refusal::Scope, Refusal::Scope, Refusal::Scope,
+		Refusal::ResolutionScope, Refusal::ResolutionScope, Refusal::TargetGone, Refusal::MarkMismatch,
+		Refusal::MarkMismatch, Refusal::MarkMismatch, Refusal::MarkMismatch, Refusal::MarkMismatch,
+		Refusal::AbsentUnproven, Refusal::AbsentUnproven, Refusal::AbsentUnproven, Refusal::Action,
+		Refusal::InvalidWinner,
+	};
+	for (auto variant = 0; variant != int(reasons.size()); ++variant) {
+		auto bad = event;
+		auto current = login;
+		switch (variant) {
+		case 0: bad.resolution.winner = m; break;
+		case 1: bad.resolution.winner = SyncChatCache{ other, w.markId, m.markDate - 1 }; break;
+		case 2: bad.fullResolutionComplete = false; break;
+		case 3: bad.noRequestInFlight = false; break;
+		case 4: bad.outcome = SyncCarryOutcome::Unknown; break;
+		case 5: bad.outcome = SyncCarryOutcome::Failed; break;
+		case 6: bad.account.environment = 1; break;
+		case 7: bad.source = other; break;
+		case 8: bad.target = other; break;
+		case 9: ++bad.revision; break;
+		case 10: bad.operationId = QString(32, u'z'); break;
+		case 11: current = QString(32, u'b'); break;
+		case 12: current.clear(); break;
+		case 13: bad.resolution.cache.reset(); break;
+		case 14: bad.resolution.cache->chat = other; break;
+		case 15: bad.mark.outcome = SyncCarryMarkOutcome::ChatGone; break;
+		case 16: bad.mark.text = u"#purplechatsync v1"_q; break;
+		case 17: bad.mark.ownership = SyncChatMessageOwnership::Other; break;
+		case 18: bad.mark.chat = other; break;
+		case 19: bad.mark.account.environment = 1; break;
+		case 20: bad.mark.hasMedia = true; break;
+		case 21: bad.mark = { SyncCarryMarkOutcome::Absent, Account, next }; break;
+		case 22:
+			bad.mark = { SyncCarryMarkOutcome::Absent, Account, next };
+			bad.neverLandedConfirmed = true;
+			bad.neverLandedRequestId = u"99999"_q;
+			break;
+		case 23:
+			bad.mark = { SyncCarryMarkOutcome::Absent, Account, other };
+			bad.neverLandedConfirmed = true;
+			bad.neverLandedRequestId = j.markRequestId;
+			break;
+		case 24: bad.resolution.winner.reset(); break;
+		case 25: bad.resolution.winner = SyncChatCache{ other, -1, w.markDate }; break;
+		}
+		if (!CHECK(RefusesFor(j, bad, current, reasons[variant]))) std::printf("refused variant %d\n", variant);
+	}
+	for (const auto action : {
+		SyncChatAction::Invalid, SyncChatAction::Unset, SyncChatAction::VerifyMark,
+		SyncChatAction::NewerMark, SyncChatAction::ReadWinnerInventory, SyncChatAction::Fill,
+	}) {
+		auto bad = event;
+		bad.resolution.action = action;
+		CHECK(RefusesFor(j, bad, login, Refusal::Action));
+	}
+	auto unnamed = event;
+	unnamed.resolution.action = SyncChatAction::Use;
+	unnamed.resolution.winner.reset();
+	CHECK(RefusesFor(j, unnamed, login, Refusal::Action));
+	unnamed.resolution.action = SyncChatAction::Searching;
+	unnamed.resolution.winner = SyncChatCache{ next, m.markId, 1 };
+	CHECK(RefusesFor(j, unnamed, login, Refusal::WinnerInTarget));
+	auto unattempted = j;
+	unattempted.markAttempted = false;
+	REQUIRE(SerializeSyncCarryJournal(unattempted));
+	CHECK(RefusesFor(unattempted, FtfEvent(unattempted, d, resolution, ours), login, Refusal::MarkMismatch));
+	const auto beforeAttempt = DeltaAdvance(unattempted, FtfEvent(unattempted, d, resolution));
+	CHECK(beforeAttempt && !beforeAttempt.journal.attemptedMark && !beforeAttempt.journal.markAttempted);
+
+	// A verified targetMark must match; Unknown keeps it; Absent cannot erase it.
+	auto verified = j;
+	verified.targetMark = m;
+	REQUIRE(SerializeSyncCarryJournal(verified));
+	auto different = event;
+	different.mark.messageId = m.markId + 7;
+	CHECK(RefusesFor(verified, different, login, Refusal::MarkMismatch));
+	auto proven = event;
+	proven.mark = { SyncCarryMarkOutcome::Absent, Account, next };
+	proven.neverLandedConfirmed = true;
+	proven.neverLandedRequestId = j.markRequestId;
+	CHECK(RefusesFor(verified, proven, login, Refusal::AbsentUnproven));
+	const auto provenUnmarked = DeltaAdvance(j, proven);
+	REQUIRE(provenUnmarked);
+	CHECK(!provenUnmarked.journal.targetMark && provenUnmarked.journal.markAttempted);
+	CHECK(!provenUnmarked.journal.attemptedMark);
+	auto unknown = event;
+	unknown.mark = {};
+	const auto kept = DeltaAdvance(verified, unknown);
+	REQUIRE(kept);
+	CHECK(kept.journal.targetMark == m && kept.journal.supersededBy == w && !kept.journal.attemptedMark);
+	unknown.resolution.winner = SyncChatCache{ other, w.markId, m.markDate - 1 };
+	CHECK(RefusesFor(verified, unknown, login, Refusal::WinnerNotNewer));
+	const auto unmarkedOlder = DeltaAdvance(j, unknown);
+	CHECK(unmarkedOlder && !unmarkedOlder.journal.targetMark);
+
+	const auto before = CloudSnapshot(cloud);
+	const auto image = d.images.at(j.nextStateHash);
+	const auto accepted = DeltaStore(DeltaAdvance(j, event));
+	CHECK(accepted.status == SyncCarryJournalStatus::Valid);
+	CHECK(accepted.journal.phase == SyncCarryPhase::PrepareCache);
+	CHECK(accepted.journal.finishThenFollow && !accepted.journal.markVerified);
+	CHECK(accepted.journal.supersededBy == w && accepted.journal.targetMark == m);
+	CHECK(accepted.journal.attemptedMark == m);
+	CHECK(accepted.journal.markAttempted && accepted.journal.markRequestId == j.markRequestId);
+	CHECK(SyncCarryJournalHoldsWrites(accepted.journal));
+	CHECK(SyncCarryJournalCacheMark(accepted.journal) == m);
+	CHECK(RefusesFor(accepted.journal, FtfEvent(accepted.journal, d, resolution, ours), login, Refusal::Phase));
+	auto zero = SyncCarryEvent(accepted.journal, SyncCarryEventKind::CachePrepared);
+	zero.outcome = SyncCarryOutcome::Success;
+	zero.objectsDurable = true;
+	zero.state = d.state;
+	zero.cache = { accepted.journal.operationId, Account, SyncChatCache{ next, 0, 0 }, false };
+	CHECK(!DeltaAdvance(accepted.journal, zero));
+	const auto abandoned = DeltaStore(AbandonInterruptedOperation(accepted.journal, Account,
+		QString(32, u'b'), true, d.state, false, d.stage, true));
+	CHECK(abandoned.journal.phase == SyncCarryPhase::InterruptedAbandoned);
+	CHECK(abandoned.journal.finishThenFollow && abandoned.journal.supersededBy == w);
+	CHECK(abandoned.journal.markAttempted && !SyncCarryJournalHoldsWrites(abandoned.journal));
+	s.store(accepted);
+	s.run();
+	const auto f = s.journal;
+	REQUIRE(f.phase == SyncCarryPhase::FinishedForFollow);
+	CHECK(f.finishThenFollow && f.supersededBy == w && f.targetMark == m && !f.markVerified);
+	CHECK(f.attemptedMark == m);
+	CHECK(f.stateCommitted && f.cacheCompleted);
+	CHECK(f.markAttempted && f.markRequestId == j.markRequestId && f.ownRequestId == j.ownRequestId);
+	CHECK(f.deliveryAttempted && f.deliveryHistory == j.deliveryHistory && !f.deliveryHistory.empty());
+	CHECK(SyncCarryPlanJson(*f.plan) == SyncCarryPlanJson(*j.plan));
+	CHECK(StateBytes(d.state) == image);
+	CHECK(d.state.chat == next && d.cache == m);
+	const auto destination = cloud.inventory(next);
+	CHECK(!d.state.ownMessages.empty());
+	for (const auto &own : d.state.ownMessages) {
+		CHECK(std::any_of(destination.messages.begin(), destination.messages.end(), [&](const auto &message) {
+			return message.reference.messageId == own.messageId
+				&& message.reference.recordHash == own.recordHash;
+		}));
+	}
+	CHECK(CloudSnapshot(cloud) == before);
+	CHECK(cloud.requests.size() == 1);
+	REQUIRE(f.abandonedCleanup.size() == 2);
+	CHECK(std::find(f.abandonedCleanup.begin(), f.abandonedCleanup.end(),
+		SyncCarryReference{ Account, old, j.oldMark->markId, {} }) != f.abandonedCleanup.end());
+	for (const auto &message : cloud.inventory(old).messages) {
+		CHECK(!CheckSyncCarryDeletion(f, message, destination));
+	}
+	CHECK(!CheckSyncCarryOldMarkDeletion(f, cloud.marks.at(cloud.key(old)), destination));
+	CHECK(!SyncCarryJournalHoldsWrites(f));
+	CHECK(NextSyncCarryJournalAction(f) == SyncCarryJournalAction::None);
+	CHECK(SyncCarryJournalForwards(f).empty() && !SyncCarryJournalPostsOwnRecord(f));
+	CHECK(CheckSyncCarryReaders(f, Eligible(next)) == SyncCarryReaderVerdict::Hold);
+	CHECK(!PrepareSyncCarryJournalCommit(f, d.state, destination).commit);
+
+	// Terminal replay.
+	const auto canonical = SerializeSyncCarryJournal(f).canonical;
+	for (const auto durable : { false, true }) {
+		CHECK(DeltaResume(f, d.state, false, durable).canonical == canonical);
+	}
+	CHECK(ResumeSyncCarryJournal(f, d.state, false, true, QString(32, u'b')).canonical == canonical);
+	for (auto kind = 0; kind <= int(SyncCarryEventKind::FinishThenFollow); ++kind) {
+		auto replay = SyncCarryEvent(f, SyncCarryEventKind(kind));
+		replay.outcome = SyncCarryOutcome::Success;
+		replay.objectsDurable = replay.noRequestInFlight = replay.skipCleanupConfirmed = true;
+		replay.state = d.state;
+		replay.fullResolutionComplete = true;
+		replay.mark = { SyncCarryMarkOutcome::ChatGone, Account, old };
+		CHECK(Refuses(f, replay, login));
+		CHECK(CheckSyncCarryFinishThenFollow(f, replay, login) == Refusal::Scope);
+	}
+	CHECK(!AbandonInterruptedOperation(f, Account, QString(32, u'b'), true, d.state, false, d.stage, true));
+
+	// Codec: phase 18, superseded_by, unknown members and malformed shapes.
+	auto json = QJsonDocument::fromJson(canonical).object();
+	CHECK(json.value(u"phase"_q).toInt() == 18);
+	CHECK(json.value(u"superseded_by"_q).toObject().value(u"id"_q).toInt() == w.markId);
+	CHECK(json.value(u"attempted_mark"_q).toObject().value(u"id"_q).toInt() == m.markId);
+	json.insert(u"future_ftf"_q, 7);
+	auto superseded = json.value(u"superseded_by"_q).toObject();
+	superseded.insert(u"future"_q, true);
+	json.insert(u"superseded_by"_q, superseded);
+	const auto future = DeltaStore(ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+	const auto roundtrip = QJsonDocument::fromJson(future.canonical).object();
+	CHECK(roundtrip.value(u"future_ftf"_q).toInt() == 7);
+	CHECK(roundtrip.value(u"superseded_by"_q).toObject().value(u"future"_q).toBool());
+	for (auto invalid = 0; invalid != 15; ++invalid) {
+		auto broken = QJsonDocument::fromJson(canonical).object();
+		auto cache = broken.value(u"superseded_by"_q).toObject();
+		auto cleanup = broken.value(u"abandoned_cleanup"_q).toArray();
+		switch (invalid) {
+		case 0: broken.insert(u"phase"_q, 19); break;
+		case 1: broken.insert(u"superseded_by"_q, u"chat:30"_q); break;
+		case 2: broken.remove(u"superseded_by"_q); break;
+		case 3: cache.insert(u"chat"_q, *PeerTokenText(next)); break;
+		case 4: cache.insert(u"date"_q, QJsonValue(qint64(m.markDate - 1))); break;
+		case 5: cleanup.removeLast(); broken.insert(u"abandoned_cleanup"_q, cleanup); break;
+		case 6: broken.insert(u"phase"_q, int(SyncCarryPhase::Cleanup)); break;
+		case 7: broken.insert(u"phase"_q, int(SyncCarryPhase::Done)); break;
+		case 8: broken.insert(u"superseded_by"_q, QJsonObject()); break;
+		case 9: broken.insert(u"mark_verified"_q, true); break;
+		case 10: broken.insert(u"cache_completed"_q, false); break;
+		case 11: broken.insert(u"attempted_mark"_q, u"chat:20"_q); break;
+		case 12: broken.insert(u"attempted_mark"_q, QJsonValue(QJsonValue::Null)); break;
+		case 13: broken.insert(u"mark_attempted"_q, false); break;
+		case 14: {
+			auto attempted = broken.value(u"attempted_mark"_q).toObject();
+			attempted.insert(u"chat"_q, *PeerTokenText(old));
+			broken.insert(u"attempted_mark"_q, attempted);
+		} break;
+		}
+		if (invalid == 3 || invalid == 4) broken.insert(u"superseded_by"_q, cache);
+		if (!CHECK(!ParseSyncCarryJournal(QJsonDocument(broken).toJson()))) {
+			std::printf("codec variant %d\n", invalid);
+		}
+	}
+	auto atMark = QJsonDocument::fromJson(SerializeSyncCarryJournal(j).canonical).object();
+	atMark.insert(u"superseded_by"_q, QJsonValue(QJsonValue::Null));
+	CHECK(!ParseSyncCarryJournal(QJsonDocument(atMark).toJson()));
+	auto oversize = j;
+	oversize.preserved.insert(u"future"_q, QString(4 * 1024 * 1024, u'x'));
+	CHECK(RefusesFor(oversize, event, login, Refusal::Serialization));
+	oversize = f;
+	oversize.preserved.insert(u"future"_q, QString(4 * 1024 * 1024, u'x'));
+	CHECK(!SerializeSyncCarryJournal(oversize));
+
+	// The later ordinary Follow carries N into W and leaves O untouched.
+	const auto oldMessages = cloud.inventory(old).messages.size();
+	const auto follow = Resolution(d, cloud);
+	CHECK(follow.action == SyncChatAction::Follow && follow.winner == w && follow.source == next);
+	auto onward = Session(d, cloud, other, SyncCarryMode::Follow, SyncCarrySourceAccess::Readable, true, false, login);
+	onward.run();
+	CHECK(onward.journal.phase == SyncCarryPhase::Done);
+	CHECK(d.state.chat == other && d.cache == w);
+	CHECK(HoldsConfirmedHead(cloud, d, other));
+	CHECK(cloud.inventory(old).messages.size() == oldMessages);
+}
+
+void FinishThenFollowUnmarked() {
+	Section = "finish then follow unmarked";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	const auto other = Peer(u"chat:30"_q);
+	const auto login = QString(32, u'a');
+	const auto zero = SyncChatCache{ next, 0, 0 };
+
+	// Case (d) after the cadence: nothing landed; W is the old mark in O.
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto d = Device('a', old, cloud.cache(old));
+	d.publish(cloud, Text('a'));
+	auto s = Session(d, cloud, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, true, true, login);
+	HoldMark(s, false);
+	const auto resolution = Resolution(d, cloud);
+	REQUIRE(resolution.action == SyncChatAction::Use && resolution.winner == d.cache);
+	const auto before = CloudSnapshot(cloud);
+	const auto accepted = DeltaStore(DeltaAdvance(s.journal, FtfEvent(s.journal, d, resolution)));
+	CHECK(!accepted.journal.targetMark && accepted.journal.supersededBy == d.cache);
+	CHECK(SyncCarryJournalCacheMark(accepted.journal) == zero);
+	auto receipt = SyncCarryEvent(accepted.journal, SyncCarryEventKind::CachePrepared);
+	receipt.outcome = SyncCarryOutcome::Success;
+	receipt.objectsDurable = true;
+	receipt.state = d.state;
+	for (const auto &mark : { SyncChatCache{ next, 1, cloud.clock }, SyncChatCache{ old, 0, 0 }, d.cache }) {
+		receipt.cache = { accepted.journal.operationId, Account, mark, false };
+		CHECK(!DeltaAdvance(accepted.journal, receipt));
+	}
+	receipt.cache = { accepted.journal.operationId, Account, zero, true };
+	CHECK(!DeltaAdvance(accepted.journal, receipt));
+	receipt.cache = { accepted.journal.operationId, Account, zero, false };
+	CHECK(DeltaAdvance(accepted.journal, receipt));
+	s.store(accepted);
+	s.run();
+	CHECK(s.journal.phase == SyncCarryPhase::FinishedForFollow);
+	CHECK(!s.journal.targetMark && s.journal.markAttempted && s.journal.supersededBy == cloud.cache(old));
+	CHECK(!s.journal.attemptedMark);
+	CHECK(!QJsonDocument::fromJson(SerializeSyncCarryJournal(s.journal).canonical).object()
+		.contains(u"attempted_mark"_q));
+	CHECK(s.journal.abandonedCleanup.size() == 2);
+	CHECK(d.state.chat == next && d.cache == zero);
+	CHECK(CloudSnapshot(cloud) == before);
+	CHECK(cloud.requests.empty());
+
+	// The unmarked binding afterwards: Follow from N, else Searching then Lost.
+	const auto gone = FreshResolution(zero, SyncChatDirectRead::MarkGone, cloud);
+	CHECK(gone.action == SyncChatAction::Follow && gone.winner == cloud.cache(old) && gone.source == next);
+	const auto empty = Cloud();
+	CHECK(FreshResolution(zero, SyncChatDirectRead::MarkGone, empty).action == SyncChatAction::Searching);
+	CHECK(FreshResolution(zero, SyncChatDirectRead::MarkGone, empty, 3).action == SyncChatAction::Lost);
+	const auto again = Session(d, cloud, other, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, false, false, login);
+	CHECK(again.journal.oldMark == zero);
+	auto back = Session(d, cloud, old, SyncCarryMode::Follow, SyncCarrySourceAccess::Readable, true, false, login);
+	CHECK(back.journal.oldMark == zero);
+	back.run();
+	CHECK(back.journal.phase == SyncCarryPhase::Done);
+	CHECK(d.state.chat == old && d.cache == cloud.cache(old));
+	CHECK(HoldsConfirmedHead(cloud, d, old));
+
+	// Searching and Lost name no W; an older alternative in N refuses.
+	for (const auto action : { SyncChatAction::Searching, SyncChatAction::Lost }) {
+		auto c = Cloud();
+		c.mark(old);
+		auto device = Device('a', old, c.cache(old));
+		device.publish(c, Text('a'));
+		auto held = Session(device, c, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, false, false, login);
+		HoldMark(held, false);
+		auto searching = SyncChatResolution();
+		searching.action = action;
+		searching.cache = device.cache;
+		auto inN = FtfEvent(held.journal, device, searching);
+		inN.resolution.winner = SyncChatCache{ next, 9, 1 };
+		CHECK(RefusesFor(held.journal, inN, login, SyncCarryFinishRefusal::WinnerInTarget));
+		auto elsewhere = inN;
+		elsewhere.resolution.winner = SyncChatCache{ other, 9, 1 };
+		const auto bare = DeltaStore(DeltaAdvance(held.journal, elsewhere));
+		CHECK(bare.journal.finishThenFollow && !bare.journal.supersededBy && !bare.journal.targetMark);
+		const auto json = QJsonDocument::fromJson(bare.canonical).object();
+		CHECK(json.contains(u"superseded_by"_q) && json.value(u"superseded_by"_q).isNull());
+		CHECK(DeltaStore(DeltaAdvance(held.journal, FtfEvent(held.journal, device, searching))).canonical
+			.size() > 0);
+	}
+}
+
+void FinishThenFollowTie() {
+	Section = "finish then follow same-second loser";
+	const auto high = Peer(u"chat:20"_q);
+	const auto low = Peer(u"chat:10"_q);
+	const auto login = QString(32, u'a');
+	using Refusal = SyncCarryFinishRefusal;
+	auto cloud = Cloud();
+	cloud.mark(high);
+	auto d = Device('a', high, cloud.cache(high));
+	d.publish(cloud, Text('a'));
+	auto s = Session(d, cloud, low, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, true, true, login);
+	s.run(SyncCarryPhase::Mark);
+	cloud.clock = s.journal.oldMark->markDate - 1;
+	HoldMark(s, true);
+	const auto m = cloud.cache(low);
+	const auto ours = cloud.marks.at(cloud.key(low));
+	REQUIRE(m.markDate == s.journal.oldMark->markDate);
+	REQUIRE(!SyncChatMarkOutranks(m, *s.journal.oldMark));
+	const auto resolution = Resolution(d, cloud);
+	REQUIRE(resolution.action == SyncChatAction::Use && resolution.winner == d.cache);
+	const auto state = StateBytes(d.state);
+	const auto before = CloudSnapshot(cloud);
+	const auto request = s.journal.markRequestId;
+	const auto held = [&](const char *where) {
+		if (!CHECK(!s.journal.stateCommitted && !s.journal.markVerified && s.journal.markAttempted
+			&& s.journal.markRequestId == request
+			&& StateBytes(d.state) == state && d.state.chat == high && d.cache.chat == high
+			&& CloudSnapshot(cloud) == before && cloud.requests.size() == 1)) {
+			std::printf("held check at %s\n", where);
+		}
+	};
+
+	// Restart after the loss is seen and before FtF: the mark read holds, nothing posts.
+	auto read = SyncCarryEvent(s.journal, SyncCarryEventKind::MarkRead);
+	read.outcome = SyncCarryOutcome::Success;
+	read.noRequestInFlight = true;
+	read.mark = ours;
+	s.store(DeltaAdvance(s.journal, read));
+	CHECK(s.held && s.journal.phase == SyncCarryPhase::Mark);
+	s.store(DeltaResume(s.journal, d.state, false, true));
+	CHECK(s.journal.phase == SyncCarryPhase::VerifyDestination);
+	s.run(SyncCarryPhase::Mark);
+	CHECK(NextSyncCarryJournalAction(s.journal) == SyncCarryJournalAction::ReadMark);
+	held("before FtF");
+
+	// FtF records our mark, then a restart before the commit drops it as the target only.
+	s.store(FtfNow(s));
+	CHECK(s.journal.targetMark == m && s.journal.attemptedMark == m && s.journal.supersededBy == d.cache);
+	s.store(DeltaResume(s.journal, d.state, false, true));
+	CHECK(s.journal.phase == SyncCarryPhase::VerifyDestination);
+	CHECK(!s.journal.finishThenFollow && !s.journal.supersededBy && !s.journal.targetMark);
+	CHECK(s.journal.attemptedMark == m);
+	CHECK(NextSyncCarryJournalAction(s.journal) == SyncCarryJournalAction::VerifyDestination);
+	held("after precommit restart");
+	s.run(SyncCarryPhase::Mark);
+	CHECK(NextSyncCarryJournalAction(s.journal) == SyncCarryJournalAction::ReadMark);
+
+	// Neither a losing read nor a never-landed claim can commit or reopen PostMark.
+	read = SyncCarryEvent(s.journal, SyncCarryEventKind::MarkRead);
+	read.outcome = SyncCarryOutcome::Success;
+	read.noRequestInFlight = true;
+	read.mark = ours;
+	const auto losing = DeltaAdvance(s.journal, read);
+	CHECK(losing.status == SyncCarryJournalStatus::NeedsReview);
+	CHECK(losing.journal.phase == SyncCarryPhase::Mark && !losing.journal.markVerified);
+	read.mark = { SyncCarryMarkOutcome::Absent, Account, low };
+	read.neverLandedConfirmed = true;
+	read.neverLandedRequestId = s.journal.markRequestId;
+	const auto absent = DeltaAdvance(s.journal, read);
+	CHECK(absent.status == SyncCarryJournalStatus::NeedsReview);
+	CHECK(absent.journal.markAttempted && absent.journal.attemptedMark == m);
+	CHECK(NextSyncCarryJournalAction(DeltaStore(absent).journal) == SyncCarryJournalAction::ReadMark);
+	auto claim = FtfEvent(s.journal, d, resolution, read.mark);
+	claim.neverLandedConfirmed = true;
+	claim.neverLandedRequestId = s.journal.markRequestId;
+	CHECK(RefusesFor(s.journal, claim, login, Refusal::AbsentUnproven));
+	auto other = ours;
+	other.messageId += 5;
+	CHECK(RefusesFor(s.journal, FtfEvent(s.journal, d, resolution, other), login, Refusal::MarkMismatch));
+	held("after refused claims");
+
+	// FtF again, then the commit and the ordinary Follow back to O.
+	s.store(FtfNow(s));
+	CHECK(s.journal.targetMark == m && s.journal.attemptedMark == m);
+	s.run();
+	CHECK(s.journal.phase == SyncCarryPhase::FinishedForFollow);
+	CHECK(s.journal.attemptedMark == m && s.journal.markAttempted);
+	CHECK(d.state.chat == low && d.cache == m);
+	CHECK(CloudSnapshot(cloud) == before && cloud.requests.size() == 1);
+	const auto follow = Resolution(d, cloud);
+	CHECK(follow.action == SyncChatAction::Follow && follow.source == low);
+	auto back = Session(d, cloud, high, SyncCarryMode::Follow, SyncCarrySourceAccess::Readable, false, false, login);
+	back.run();
+	CHECK(back.journal.phase == SyncCarryPhase::Done);
+	CHECK(d.state.chat == high && HoldsConfirmedHead(cloud, d, high));
+	CHECK(cloud.requests.size() == 1);
+}
+
+void FinishThenFollowScope() {
+	Section = "finish then follow scope";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	const auto other = Peer(u"chat:30"_q);
+	const auto login = QString(32, u'a');
+
+	// Every phase but Mark refuses, before and after the commit.
+	{
+		auto cloud = Cloud();
+		cloud.mark(old);
+		auto d = Device('a', old, cloud.cache(old));
+		d.publish(cloud, Text('a'));
+		d.prepare(Text('a', 2));
+		auto s = Session(d, cloud, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, true, true, login);
+		auto phases = std::set<SyncCarryPhase>();
+		for (auto n = 0; n != 60 && s.journal.phase != SyncCarryPhase::Done; ++n) {
+			if (s.journal.phase != SyncCarryPhase::Mark) {
+				phases.insert(s.journal.phase);
+				CHECK(RefusesFor(s.journal, FtfEvent(s.journal, d, Resolution(d, cloud)), login,
+					SyncCarryFinishRefusal::Phase));
+			}
+			s.step();
+		}
+		REQUIRE(s.journal.phase == SyncCarryPhase::Done);
+		CHECK(RefusesFor(s.journal, FtfEvent(s.journal, d, Resolution(d, cloud)), login,
+			SyncCarryFinishRefusal::Scope));
+		CHECK(phases.size() >= 11);
+		CHECK(phases.contains(SyncCarryPhase::CommitState) && phases.contains(SyncCarryPhase::Cleanup));
+	}
+
+	// Version 1 refuses the event and cannot carry its fields.
+	{
+		auto cloud = Cloud();
+		cloud.mark(old);
+		auto d = Device('a', old, cloud.cache(old));
+		d.publish(cloud, Text('a'));
+		auto s = Session(d, cloud, next);
+		HoldMark(s, true);
+		cloud.mark(other);
+		REQUIRE(s.journal.version == 1);
+		CHECK(RefusesFor(s.journal, FtfEvent(s.journal, d, Resolution(d, cloud),
+			cloud.marks.at(cloud.key(next))), {}, SyncCarryFinishRefusal::Version));
+		auto forced = s.journal;
+		forced.finishThenFollow = true;
+		CHECK(!SerializeSyncCarryJournal(forced));
+		forced = s.journal;
+		forced.attemptedMark = cloud.cache(next);
+		CHECK(!SerializeSyncCarryJournal(forced));
+		auto json = QJsonDocument::fromJson(SerializeSyncCarryJournal(s.journal).canonical).object();
+		json.insert(u"superseded_by"_q, QJsonValue(QJsonValue::Null));
+		json.insert(u"attempted_mark"_q, u"inert"_q);
+		const auto kept = DeltaStore(ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+		CHECK(!kept.journal.finishThenFollow && !kept.journal.attemptedMark);
+		CHECK(QJsonDocument::fromJson(kept.canonical).object().contains(u"superseded_by"_q));
+		json.insert(u"phase"_q, int(SyncCarryPhase::FinishedForFollow));
+		CHECK(!ParseSyncCarryJournal(QJsonDocument(json).toJson()));
+	}
+
+	// Follow and Fill journals publish no mark and refuse.
+	{
+		auto cloud = Cloud();
+		cloud.mark(old);
+		auto d = Device('a', old, cloud.cache(old));
+		d.publish(cloud, Text('a'));
+		cloud.mark(next);
+		auto follow = Session(d, cloud, next, SyncCarryMode::Follow, SyncCarrySourceAccess::Readable, false, false, login);
+		follow.run(SyncCarryPhase::Mark);
+		REQUIRE(follow.journal.phase == SyncCarryPhase::Mark);
+		cloud.mark(other);
+		CHECK(RefusesFor(follow.journal, FtfEvent(follow.journal, d, Resolution(d, cloud),
+			cloud.marks.at(cloud.key(next))), login, SyncCarryFinishRefusal::Mode));
+		auto resolver = SyncChatResolveInput();
+		for (const auto &peer : { old, next }) {
+			auto mark = SyncChatMark();
+			mark.location = cloud.cache(peer);
+			mark.status = SyncChatMarkStatus::Supported;
+			mark.eligibility = Eligible(peer);
+			mark.readable = mark.freshlyRead = true;
+			mark.records = peer == old ? SyncChatRecordPresence::Present : SyncChatRecordPresence::Empty;
+			resolver.marks.push_back(mark);
+		}
+		auto start = SyncCarryJournalStart();
+		start.operationId = QString(32, u'a');
+		start.account = Account;
+		start.source = old;
+		start.target = next;
+		start.mode = SyncCarryMode::Fill;
+		start.stateAbsentConfirmed = true;
+		start.operationConfirmed = true;
+		start.resolution = ResolveSyncChat(resolver);
+		start.targetEligibility = Eligible(next);
+		start.ownRequestId = u"42"_q;
+		start.loginAuthority = login;
+		REQUIRE(start.resolution.action == SyncChatAction::Fill);
+		const auto fill = DeltaStore(BeginSyncCarryJournal(start)).journal;
+		CHECK(fill.version == 2);
+		auto event = FtfEvent(fill, d, start.resolution);
+		event.state.reset();
+		event.stateAbsentConfirmed = true;
+		CHECK(RefusesFor(fill, event, login, SyncCarryFinishRefusal::Mode));
+	}
+
+	// Existing paths, pinned: case (b) and the never-landed proof.
+	{
+		auto cloud = Cloud();
+		cloud.mark(old);
+		auto d = Device('a', old, cloud.cache(old));
+		d.publish(cloud, Text('a'));
+		auto s = Session(d, cloud, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, true, false, login);
+		HoldMark(s, false);
+		const auto j = s.journal;
+		auto read = SyncCarryEvent(j, SyncCarryEventKind::MarkRead);
+		read.outcome = SyncCarryOutcome::Success;
+		read.noRequestInFlight = true;
+		read.mark = { SyncCarryMarkOutcome::Absent, Account, next };
+		const auto wait = DeltaAdvance(j, read);
+		CHECK(wait.status == SyncCarryJournalStatus::Wait && wait.journal.markAttempted);
+		read.neverLandedConfirmed = true;
+		read.neverLandedRequestId = j.markRequestId;
+		const auto retry = DeltaAdvance(j, read);
+		CHECK(retry.status == SyncCarryJournalStatus::Retry && !retry.journal.markAttempted);
+		CHECK(NextSyncCarryJournalAction(DeltaStore(retry).journal) == SyncCarryJournalAction::PostMark);
+		cloud.mark(next, j.markText);
+		CHECK(Resolution(d, cloud).winner == cloud.cache(next));
+		s.run();
+		CHECK(s.journal.phase == SyncCarryPhase::Done);
+		CHECK(cloud.requests.empty());
+		CHECK(d.state.chat == next && d.cache == cloud.cache(next));
+	}
+}
+
+void FinishThenFollowCrashes() {
+	Section = "finish then follow crashes";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	const auto other = Peer(u"chat:30"_q);
+	const auto login = QString(32, u'a');
+	auto resumedAt = std::set<std::pair<SyncCarryPhase, bool>>();
+	for (const auto access : { SyncCarrySourceAccess::Readable, SyncCarrySourceAccess::ChatGone }) {
+		for (const auto after : { false, true }) {
+			for (const auto phase : {
+				SyncCarryPhase::PrepareCache, SyncCarryPhase::CommitState,
+				SyncCarryPhase::RetireOwnStage, SyncCarryPhase::CompleteCache,
+			}) {
+				const auto readable = access == SyncCarrySourceAccess::Readable;
+				auto cloud = Cloud();
+				cloud.mark(old);
+				auto d = Device('a', old, cloud.cache(old));
+				d.publish(cloud, Text('a'));
+				if (!readable) d.prepare(Text('a', 2));
+				auto s = Session(d, cloud, next, SyncCarryMode::Switch, access, readable, readable, login);
+				HoldMark(s, true);
+				const auto m = cloud.cache(next);
+				cloud.mark(other);
+				const auto w = cloud.cache(other);
+				s.store(FtfNow(s));
+				REQUIRE(s.journal.phase == SyncCarryPhase::PrepareCache);
+				const auto oldMessages = cloud.inventory(old).messages.size();
+				if (after) s.crashBeforeAck = phase;
+				else s.crashBefore = phase;
+				for (auto n = 0; n != 40 && s.journal.phase != SyncCarryPhase::FinishedForFollow; ++n) {
+					const auto crashed = s.crashed;
+					s.step();
+					if (crashed || !s.crashed) continue;
+					resumedAt.emplace(phase, after);
+					if (s.journal.stateCommitted) {
+						CHECK(s.journal.finishThenFollow && s.journal.supersededBy == w);
+						CHECK(s.journal.targetMark == m);
+					} else {
+						CHECK(s.journal.phase == SyncCarryPhase::VerifyDestination);
+						CHECK(!s.journal.finishThenFollow && !s.journal.supersededBy);
+						CHECK(s.journal.markAttempted && s.journal.targetMark == m);
+						s.run(SyncCarryPhase::Mark);
+						s.store(FtfNow(s));
+						REQUIRE(s.journal.phase == SyncCarryPhase::PrepareCache);
+					}
+				}
+				CHECK(s.journal.phase == SyncCarryPhase::FinishedForFollow);
+				CHECK(s.crashed == s.visited.contains(phase));
+				CHECK(d.state.chat == next && d.cache == m);
+				CHECK(d.state.config.pendingSeq == 0 && d.stage.isEmpty());
+				CHECK(cloud.requests.size() == 1);
+				CHECK(cloud.inventory(old).messages.size() == oldMessages);
+				CHECK(HoldsConfirmedHead(cloud, d, next));
+			}
+		}
+	}
+	for (const auto phase : {
+		SyncCarryPhase::PrepareCache, SyncCarryPhase::CommitState,
+		SyncCarryPhase::RetireOwnStage, SyncCarryPhase::CompleteCache,
+	}) {
+		CHECK(resumedAt.contains({ phase, false }) && resumedAt.contains({ phase, true }));
+	}
+
+	// The written state waits without a durable confirmation.
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto d = Device('a', old, cloud.cache(old));
+	d.publish(cloud, Text('a'));
+	auto s = Session(d, cloud, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Readable, false, false, login);
+	HoldMark(s, true);
+	cloud.mark(other);
+	const auto w = cloud.cache(other);
+	s.store(FtfNow(s));
+	s.step();
+	REQUIRE(s.journal.phase == SyncCarryPhase::CommitState);
+	const auto before = s.journal;
+	const auto precommit = DeltaStore(DeltaResume(before, d.state, false, true)).journal;
+	CHECK(precommit.phase == SyncCarryPhase::VerifyDestination && !precommit.finishThenFollow);
+	d.state = ParseSyncLocalState(d.images.at(before.nextStateHash)).state;
+	const auto waiting = DeltaResume(before, d.state, false, false);
+	CHECK(waiting.status == SyncCarryJournalStatus::Wait && waiting.canonical.isEmpty());
+	const auto committed = DeltaStore(DeltaResume(before, d.state, false, true)).journal;
+	CHECK(committed.stateCommitted && committed.phase == SyncCarryPhase::CompleteCache);
+	CHECK(committed.finishThenFollow && committed.supersededBy == w);
+}
+
+void FinishThenFollowProtected() {
+	Section = "finish then follow deferred record";
+	const auto old = Peer(u"chat:10"_q);
+	const auto next = Peer(u"chat:20"_q);
+	const auto other = Peer(u"chat:30"_q);
+	const auto login = QString(32, u'a');
+	auto cloud = Cloud();
+	cloud.mark(old);
+	auto d = Device('a', old, cloud.cache(old));
+	d.publish(cloud, Text('a'));
+	d.prepare(Text('a', 2));
+	const auto pending = d.stage;
+	auto s = Session(d, cloud, next, SyncCarryMode::Switch, SyncCarrySourceAccess::Protected, false, false, login);
+	for (auto n = 0; n != 60 && (s.journal.phase != SyncCarryPhase::Mark || !s.journal.markAttempted); ++n) {
+		ProtectedStep(s, SyncCarrySendIntent::NotIssued);
+	}
+	REQUIRE(s.journal.phase == SyncCarryPhase::Mark && s.journal.markAttempted);
+	REQUIRE(!s.journal.targetPendingRecord.isEmpty());
+	cloud.mark(other);
+	s.store(FtfNow(s));
+	REQUIRE(s.journal.phase == SyncCarryPhase::PrepareCache);
+	const auto target = s.journal.targetPendingRecord;
+	for (auto n = 0; n != 20 && s.journal.phase != SyncCarryPhase::FinishedForFollow; ++n) {
+		if (!s.journal.stateCommitted) {
+			CHECK(d.stage != target && d.state.chat == old);
+		}
+		ProtectedStep(s, SyncCarrySendIntent::NotIssued);
+	}
+	REQUIRE(s.journal.phase == SyncCarryPhase::FinishedForFollow);
+	CHECK(d.stage == target && d.state.chat == next);
+	CHECK(d.state.config.pendingSeq == d.state.config.seq);
+	CHECK(!cloud.has(next, SyncCarryRecordHash(target)));
+	CHECK(!cloud.has(old, SyncCarryRecordHash(pending)));
+	CHECK(InspectConfigPayload(ParseSyncEnvelope(target)).text
+		== InspectConfigPayload(ParseSyncEnvelope(pending)).text);
+}
+
+void FinishThenFollowRepair() {
+	Section = "finish then follow repair mark";
+	const auto chat = Peer(u"chat:10"_q);
+	const auto other = Peer(u"chat:30"_q);
+	for (const auto marked : { false, true }) {
+		auto cloud = Cloud();
+		cloud.mark(chat);
+		auto d = Device('a', chat, cloud.cache(chat));
+		d.publish(cloud, Text('a'));
+		const auto state = StateBytes(d.state);
+		const auto ledger = d.state.ownMessages.size();
+		auto j = DeltaStore(BeginSyncCarryJournal(RepairStart(d))).journal;
+		auto event = SyncCarryEvent(j, SyncCarryEventKind::MarkPostPrepared);
+		event.outcome = SyncCarryOutcome::Unknown;
+		j = DeltaStore(DeltaAdvance(j, event)).journal;
+		if (marked) cloud.mark(chat, j.markText, j.markRequestId);
+		else cloud.marks.erase(cloud.key(chat));
+		cloud.mark(other);
+		const auto w = cloud.cache(other);
+		const auto resolution = FreshResolution(d.cache, SyncChatDirectRead::MarkGone, cloud);
+		REQUIRE(resolution.action == SyncChatAction::Follow && resolution.winner == w);
+		const auto readback = marked ? cloud.marks.at(cloud.key(chat)) : SyncCarryMarkReadback();
+		auto inN = FtfEvent(j, d, resolution, readback);
+		inN.resolution.winner = SyncChatCache{ chat, 99, w.markDate };
+		CHECK(RefusesFor(j, inN, j.loginAuthority, SyncCarryFinishRefusal::WinnerInTarget));
+		j = DeltaStore(DeltaAdvance(j, FtfEvent(j, d, resolution, readback))).journal;
+		CHECK(j.phase == SyncCarryPhase::PrepareCache && j.finishThenFollow && j.supersededBy == w);
+		const auto cache = marked ? cloud.cache(chat) : SyncChatCache{ chat, 0, 0 };
+		CHECK(SyncCarryJournalCacheMark(j) == cache);
+		const auto resumed = DeltaStore(DeltaResume(j, d.state, false, true)).journal;
+		CHECK(resumed.phase == SyncCarryPhase::Mark && !resumed.finishThenFollow && !resumed.supersededBy);
+		CHECK(resumed.markAttempted);
+		CHECK(NextSyncCarryJournalAction(resumed) == SyncCarryJournalAction::ReadMark);
+		event = SyncCarryEvent(j, SyncCarryEventKind::CachePrepared);
+		event.outcome = SyncCarryOutcome::Success;
+		event.objectsDurable = true;
+		event.state = d.state;
+		event.cache = { j.operationId, Account, cache, false };
+		j = DeltaStore(DeltaAdvance(j, event)).journal;
+		CHECK(j.phase == SyncCarryPhase::CommitState);
+		j = DeltaStore(DeltaResume(j, d.state, false, true)).journal;
+		CHECK(j.phase == SyncCarryPhase::CompleteCache && j.stateCommitted);
+		CHECK(j.finishThenFollow && j.supersededBy == w);
+		event = SyncCarryEvent(j, SyncCarryEventKind::CacheCompleted);
+		event.outcome = SyncCarryOutcome::Success;
+		event.objectsDurable = true;
+		event.state = d.state;
+		event.cache = { j.operationId, Account, cache, true };
+		j = DeltaStore(DeltaAdvance(j, event)).journal;
+		CHECK(j.phase == SyncCarryPhase::FinishedForFollow && j.abandonedCleanup.empty());
+		CHECK(!SyncCarryJournalHoldsWrites(j));
+		CHECK(StateBytes(d.state) == state && d.state.ownMessages.size() == ledger);
+		CHECK(cloud.requests.size() == (marked ? 1u : 0u));
+	}
+}
+
+void FinishThenFollowSeeded() {
+	Section = "finish then follow seeded switches";
+	const auto login = QString(32, u'a');
+	const auto old = Peer(u"chat:10"_q);
+	const auto targets = std::array{ Peer(u"chat:20"_q), Peer(u"chat:30"_q) };
+	auto ties = 0, loserFirst = 0, winnerFirst = 0;
+	for (auto seed = 0; seed != 12; ++seed) {
+		auto random = std::mt19937_64(0xf7f0 + seed);
+		auto cloud = Cloud();
+		cloud.mark(old);
+		auto devices = std::vector<Device>();
+		const auto count = 3 + seed % 3;
+		devices.reserve(count);
+		for (auto i = 0; i != count; ++i) {
+			devices.emplace_back(char('a' + i), old, cloud.cache(old));
+			devices.back().publish(cloud, Text(char('a' + i)));
+		}
+		const auto future = cloud.post(old, QByteArray("{\"purple_sync\":2,\"opaque\":true}"));
+		const auto heads = cloud.inventory(old).messages;
+		const auto first = int(random() % count);
+		const auto second = (first + 1 + int(random() % (count - 1))) % count;
+		const auto cleanA = random() % 2 == 0;
+		const auto markA = random() % 2 == 0;
+		const auto cleanB = random() % 2 == 0;
+		const auto markB = random() % 2 == 0;
+		auto a = Session(devices[first], cloud, targets[0], SyncCarryMode::Switch,
+			SyncCarrySourceAccess::Readable, cleanA, markA, login);
+		++cloud.clock;
+		auto b = Session(devices[second], cloud, targets[1], SyncCarryMode::Switch,
+			SyncCarrySourceAccess::Readable, cleanB, markB, login);
+		a.run(SyncCarryPhase::Mark);
+		b.run(SyncCarryPhase::Mark);
+		const auto aFirst = random() % 2 == 0;
+		HoldMark(aFirst ? a : b, true);
+		if (random() % 2) cloud.clock = cloud.marks.at(cloud.key((aFirst ? a : b).target)).date - 1;
+		HoldMark(aFirst ? b : a, true);
+		ties += cloud.cache(targets[0]).markDate == cloud.cache(targets[1]).markDate;
+		const auto aWins = SyncChatMarkOutranks(cloud.cache(targets[0]), cloud.cache(targets[1]));
+		auto &winner = aWins ? a : b;
+		auto &loser = aWins ? b : a;
+		const auto w = cloud.cache(winner.target);
+		const auto recoverLoser = [&] {
+			const auto resolution = Resolution(loser.device, cloud);
+			REQUIRE(resolution.action == SyncChatAction::Follow && resolution.winner == w);
+			loser.store(FtfNow(loser));
+			REQUIRE(loser.journal.phase == SyncCarryPhase::PrepareCache);
+			const auto before = CloudSnapshot(cloud);
+			loser.run();
+			CHECK(loser.journal.phase == SyncCarryPhase::FinishedForFollow);
+			CHECK(CloudSnapshot(cloud) == before);
+		};
+		const auto recoverWinner = [&] {
+			CHECK(Resolution(winner.device, cloud).winner == w);
+			winner.run();
+			CHECK(winner.journal.phase == SyncCarryPhase::Done);
+		};
+		if (random() % 2) {
+			++loserFirst;
+			recoverLoser();
+			recoverWinner();
+		} else {
+			++winnerFirst;
+			recoverWinner();
+			recoverLoser();
+		}
+		CHECK(loser.journal.supersededBy == w && loser.journal.markAttempted);
+		CHECK(loser.device.state.chat == loser.target);
+		auto onward = Session(loser.device, cloud, winner.target, SyncCarryMode::Follow,
+			SyncCarrySourceAccess::Readable, true, false, login);
+		onward.run();
+		CHECK(onward.journal.phase == SyncCarryPhase::Done);
+		for (auto &device : devices) {
+			if (device.state.chat != winner.target) {
+				auto follow = Session(device, cloud, winner.target, SyncCarryMode::Follow,
+					SyncCarrySourceAccess::Readable, random() % 2 == 0, false, login);
+				follow.run();
+			}
+			CHECK(device.state.chat == winner.target && device.cache.chat == winner.target);
+			CHECK(HoldsConfirmedHead(cloud, device, winner.target));
+			const auto forwardOrder = Resolution(device, cloud);
+			const auto reverseOrder = Resolution(device, cloud, true);
+			CHECK(forwardOrder.action == reverseOrder.action && forwardOrder.winner == reverseOrder.winner);
+		}
+		for (const auto &message : heads) {
+			CHECK(cloud.has(winner.target, message.reference.recordHash)
+				|| cloud.has(old, message.reference.recordHash));
+		}
+		CHECK(cloud.has(winner.target, future.reference.recordHash));
+	}
+	CHECK(ties > 0 && loserFirst > 0 && winnerFirst > 0);
 }
 
 void CleanupAndInterruptedDelta() {
@@ -2568,6 +3527,14 @@ void OtherRecoveredRecordBindings() {
 int main() {
 	ProtectedPendingDelta();
 	RepairMarkDelta();
+	FinishThenFollowDelta();
+	FinishThenFollowUnmarked();
+	FinishThenFollowTie();
+	FinishThenFollowScope();
+	FinishThenFollowCrashes();
+	FinishThenFollowProtected();
+	FinishThenFollowRepair();
+	FinishThenFollowSeeded();
 	CleanupAndInterruptedDelta();
 	ReaderStaleAndFillDelta();
 	JournalDeltaGuards();
