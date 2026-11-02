@@ -273,6 +273,10 @@ struct SyncPublishDecision {
 	int32_t messageId = 0;
 };
 
+// The state was moved to another chat (MoveSyncChat) and its confirmed config head
+// is not published there yet, so its absence is expected and the next publish fills it.
+[[nodiscard]] bool SyncConfigAwaitsMovedPublish(const SyncLocalState &state);
+
 [[nodiscard]] SyncPublishDecision PlanSyncPublish(
 	const SyncLocalState &state,
 	const QByteArray &accountPrefToken,

@@ -6,6 +6,7 @@ Licensed under the GNU General Public License, version 2 or (at your
 option) any later version.
 */
 #include "purple/purple_sync_auto.h"
+#include "purple/purple_sync_chat.h"
 #include "purple/purple_config_payload.h"
 
 #include <QtCore/QJsonArray>
@@ -986,6 +987,63 @@ void TestCodec() {
 
 }
 
+void TestMovedChatPublishes() {
+	Section = "a state moved to an empty chat publishes there";
+	auto h = Harness();
+	h.seedOwn(T0);
+	const auto moved = MoveSyncChat(*h.facts.state, { PeerTokenKind::Channel, 123 }, false);
+	CHECK(moved && moved.state.ownMessages.empty() && moved.state.config.confirmedSeq != 0);
+	h.facts.state = moved.state;
+	h.facts.chat = moved.state.chat;
+	h.cloud.clear();
+	auto send = Stage(h);
+	CHECK(SendAndConfirm(h, send).action == SyncAutoAction::NoOp);
+	CHECK(h.facts.state->ownMessages.size() == 1);
+	CHECK(h.facts.state->config.confirmedSeq == 2);
+
+	Section = "a published record later missing from the moved chat still needs review";
+	h.cloud.clear();
+	h.now += kSyncAutoCheckSeconds;
+	CHECK(h.event(SyncAutoEvent::Foreground).action == SyncAutoAction::Check);
+	const auto missing = h.inventory();
+	CHECK(missing.action == SyncAutoAction::Hold && missing.reason == SyncAutoReason::NeedsReview);
+
+	Section = "an unmoved state missing its record still needs review";
+	auto unmoved = Harness();
+	unmoved.seedOwn(T0);
+	unmoved.facts.state->ownMessages.clear();
+	unmoved.cloud.clear();
+	CHECK(!SyncConfigAwaitsMovedPublish(*unmoved.facts.state));
+	CHECK(unmoved.event(SyncAutoEvent::Enable).action == SyncAutoAction::Check);
+	const auto review = unmoved.inventory();
+	CHECK(review.action == SyncAutoAction::Hold && review.reason == SyncAutoReason::NeedsReview);
+
+	Section = "a moved state without saved bytes waits for a save";
+	auto unsaved = Harness();
+	unsaved.seedOwn(T0);
+	unsaved.facts.state = MoveSyncChat(*unsaved.facts.state, { PeerTokenKind::Channel, 123 }, false).state;
+	unsaved.facts.chat = unsaved.facts.state->chat;
+	unsaved.cloud.clear();
+	unsaved.setLocal(T0, false);
+	CHECK(unsaved.event(SyncAutoEvent::Enable).action == SyncAutoAction::Check);
+	const auto held = unsaved.inventory();
+	CHECK(held.action == SyncAutoAction::Hold && held.reason == SyncAutoReason::NoSavedBytes);
+
+	Section = "a moved state finding another device's newer record applies it";
+	auto joined = Harness();
+	joined.seedOwn(T0);
+	const auto parent = joined.cloud.begin()->second;
+	joined.facts.state = MoveSyncChat(*joined.facts.state, { PeerTokenKind::Channel, 123 }, false).state;
+	joined.facts.chat = joined.facts.state->chat;
+	joined.cloud.clear();
+	joined.cloud[joined.nextId++] = parent;
+	joined.remote(T1);
+	joined.cloud.erase(joined.cloud.begin());
+	CHECK(joined.event(SyncAutoEvent::Enable).action == SyncAutoAction::Check);
+	const auto apply = joined.inventory();
+	CHECK(apply.action == SyncAutoAction::AutoApply);
+}
+
 int main() {
 	TestPublishAndEdit();
 	TestEditRefusalAndRetire();
@@ -1008,6 +1066,7 @@ int main() {
 	RecheckTerminalBudgetAfterGateAndDisable();
 	TestStoppedRunSurvivesInterveningTransitions();
 	TestHoldsAndDisablePreserveActiveBackoff();
+	TestMovedChatPublishes();
 	TestCodec();
 	std::printf("%d checks, %d failures\n", Checks, Failures);
 	return Failures ? 1 : 0;

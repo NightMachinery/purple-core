@@ -209,6 +209,7 @@ ConfigSyncState SyncConfigStateOf(const SyncLocalState &state) {
 		.equiv = data.equiv,
 		.pending = data.pending,
 		.seenSeq = data.seenSeq,
+		.baseUnpublished = SyncConfigAwaitsMovedPublish(state),
 	};
 }
 

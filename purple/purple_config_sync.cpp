@@ -361,7 +361,8 @@ constexpr auto kLineageLimit = 64;
 	} else if (state.base.isEmpty() && !others) {
 		result.verdict = ConfigSyncVerdict::Empty;
 	} else if (!state.base.isEmpty()
-		&& (Fingerprint(state.base) != localFp || result.ownStale)) {
+		&& (Fingerprint(state.base) != localFp || result.ownStale
+			|| (state.baseUnpublished && !ownHead))) {
 		result.verdict = ConfigSyncVerdict::LocalChanges;
 	} else {
 		result.verdict = ConfigSyncVerdict::UpToDate;

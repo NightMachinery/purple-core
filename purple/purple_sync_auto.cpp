@@ -218,7 +218,8 @@ SyncAutoPlan Inventory(SyncAutoRecord record, const SyncAutoInput &input) {
 		&& own.status != SyncOwnInventoryStatus::PendingFound) {
 		return Hold(std::move(record), SyncAutoReason::NeedsReview);
 	}
-	if ((own.status == SyncOwnInventoryStatus::Absent && state.config.confirmedSeq != 0)
+	if ((own.status == SyncOwnInventoryStatus::Absent && state.config.confirmedSeq != 0
+			&& !SyncConfigAwaitsMovedPublish(state))
 		|| (own.status == SyncOwnInventoryStatus::Present && own.observation.seq < state.config.confirmedSeq)) {
 		return Hold(std::move(record), SyncAutoReason::NeedsReview);
 	}

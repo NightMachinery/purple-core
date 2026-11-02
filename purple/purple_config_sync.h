@@ -44,6 +44,8 @@ struct ConfigSyncState {
 	std::vector<QString> equiv;
 	QString pending;
 	std::map<QString, uint64_t> seenSeq;
+	// The base was published by this install, but not in the current sync chat.
+	bool baseUnpublished = false;
 };
 
 struct ConfigHead {

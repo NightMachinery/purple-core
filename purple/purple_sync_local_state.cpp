@@ -683,6 +683,14 @@ SyncAccountBindingVerdict CheckSyncAccountBinding(
 		: SyncAccountBindingVerdict::Mismatch;
 }
 
+bool SyncConfigAwaitsMovedPublish(const SyncLocalState &state) {
+	// WHY: MoveSyncChat empties the own-message ledger and a confirmed head is
+	// never dropped from it, so an empty v2 ledger means nothing was published here.
+	return state.version == 2
+		&& state.config.confirmedSeq != 0
+		&& state.ownMessages.empty();
+}
+
 SyncPublishDecision PlanSyncPublish(
 		const SyncLocalState &state,
 		const QByteArray &accountPrefToken,
@@ -715,7 +723,9 @@ SyncPublishDecision PlanSyncPublish(
 	const auto &local = Select(state, stream);
 	const auto &own = observations.ownRecord;
 	if ((own.kind == OwnRecordObservationKind::Absent
-			&& local.confirmedSeq != 0)
+			&& local.confirmedSeq != 0
+			&& !(stream == SyncLocalStream::Config
+				&& SyncConfigAwaitsMovedPublish(state)))
 		|| (own.kind == OwnRecordObservationKind::Present
 			&& own.seq != local.confirmedSeq
 			&& own.seq != local.pendingSeq)

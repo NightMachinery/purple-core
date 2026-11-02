@@ -69,8 +69,28 @@ Problem.
 `CompleteSyncChatVerify` checks fresh full info. It either binds the chat in
 magic mode, finishing any creation record, or raises the problem.
 
+## Moving the state into the bound chat
+
+A client moves its existing state with `MoveSyncChat` once the lookup binds a
+chat other than the one in `state.json`. The move empties the own-message
+ledger, because those message ids belong to the old chat. Nothing of this
+install is in the new chat yet, so the confirmed config head is expectedly
+absent there. `SyncConfigAwaitsMovedPublish` names that case: a v2 state with a
+confirmed head and an empty ledger. A confirmed head is never removed from the
+ledger, so the ledger is empty only between the move and the first publish.
+
+In that case the config review reports LocalChanges instead of UpToDate,
+`PlanSyncPublish` lets the absent head through, and automatic sync publishes
+the local settings as a new version whose parent is the old base. Later
+absence of a published head is still NeedsReview. When the new chat already
+holds another device's newer version, the ordinary review applies, so a move
+never needs its own merge rules.
+
 ## Tests
 
 `tests/test_sync_chat_magic.cpp` covers the title, every refusal, the oldest
 pick, the codec round trip and refusals, the persisted waits, show-once
 problems, the unbound, magic and manual plans, and verification.
+`tests/test_sync_auto.cpp` covers the first publish after a move, a later
+missing head, an unmoved missing head, a move without saved bytes and a move
+into a chat with a newer version.
