@@ -7,7 +7,7 @@
 # proving that takes a few hundred fixture edits - far too slow to iterate on
 # through a full app build.
 #
-# Ten programs run: config, settings flow, sync-chat decisions, carry recovery,
+# Eleven programs run: config, settings flow, sync-chat decisions, the magic sync chat, carry recovery,
 # archive transitions/codecs/source, automatic settings policy, storage and staging.
 # All link against the same core objects. ARCHIVE_SQLITE_TESTS=1 additionally
 # executes the shared SQL against the system SQLite library.
@@ -34,6 +34,7 @@ Sources=(
     purple/purple_sync_auto_state.cpp
     purple/purple_peer_token.cpp
     purple/purple_sync_chat.cpp
+    purple/purple_sync_chat_magic.cpp
     purple/purple_archive_envelope.cpp
     purple/purple_archive_sql.cpp
     purple/purple_archive_sql_body.cpp
@@ -101,7 +102,7 @@ if [ "$CompileStatus" != 0 ]; then
 fi
 
 Status=0
-for Test in test_config test_sync_flow test_sync_chat test_sync_chat_carry test_archive test_archive_codec test_archive_source test_sync_auto test_archive_storage test_archive_staging; do
+for Test in test_config test_sync_flow test_sync_chat test_sync_chat_magic test_sync_chat_carry test_archive test_archive_codec test_archive_source test_sync_auto test_archive_storage test_archive_staging; do
     clang++ "${Flags[@]}" -o "$BuildPath/$Test" \
         "$RepoPath/tests/$Test.cpp" \
         "${Objects[@]}" \

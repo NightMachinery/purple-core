@@ -1,0 +1,396 @@
+/*
+purple-core - the Work Mode core shared by Purple Telegram apps.
+https://github.com/NightMachinery/purple-core
+
+Licensed under the GNU General Public License, version 2 or (at your
+option) any later version.
+*/
+#include "purple/purple_sync_chat_magic.h"
+
+#include "purple/purple_sync_json.h"
+#include "purple/purple_types.h"
+
+#include <QtCore/QJsonDocument>
+
+#include <algorithm>
+#include <array>
+#include <limits>
+#include <utility>
+
+namespace Purple {
+namespace {
+
+constexpr auto kBindingLimit = 16 * 1024;
+constexpr auto kWaitLimit = 32;
+
+const auto Problems = std::array<std::pair<SyncChatProblem, const char*>, 16>{ {
+	{ SyncChatProblem::None, "none" },
+	{ SyncChatProblem::ChatGone, "chat_gone" },
+	{ SyncChatProblem::ChatLeft, "chat_left" },
+	{ SyncChatProblem::NotMegagroup, "not_megagroup" },
+	{ SyncChatProblem::NotCreator, "not_creator" },
+	{ SyncChatProblem::ExtraMember, "extra_member" },
+	{ SyncChatProblem::ExtraAdmin, "extra_admin" },
+	{ SyncChatProblem::PublicUsername, "public_username" },
+	{ SyncChatProblem::Restricted, "restricted" },
+	{ SyncChatProblem::CannotPost, "cannot_post" },
+	{ SyncChatProblem::ForeignRecord, "foreign_record" },
+	{ SyncChatProblem::ForwardedRecord, "forwarded_record" },
+	{ SyncChatProblem::ViaBotRecord, "via_bot_record" },
+	{ SyncChatProblem::CreateLimit, "create_limit" },
+	{ SyncChatProblem::MagicIneligible, "magic_ineligible" },
+	{ SyncChatProblem::SpaceMismatch, "space_mismatch" },
+} };
+
+const auto Modes = std::array<std::pair<SyncChatBindingMode, const char*>, 3>{ {
+	{ SyncChatBindingMode::None, "none" },
+	{ SyncChatBindingMode::Magic, "magic" },
+	{ SyncChatBindingMode::Manual, "manual" },
+} };
+
+const auto CreateSteps = std::array<std::pair<SyncChatCreateStep, const char*>, 6>{ {
+	{ SyncChatCreateStep::None, "none" },
+	{ SyncChatCreateStep::Requested, "requested" },
+	{ SyncChatCreateStep::Uncertain, "uncertain" },
+	{ SyncChatCreateStep::Created, "created" },
+	{ SyncChatCreateStep::Archived, "archived" },
+	{ SyncChatCreateStep::Muted, "muted" },
+} };
+
+const auto Migrations = std::array<std::pair<SyncChatMigrationStep, const char*>, 5>{ {
+	{ SyncChatMigrationStep::None, "none" },
+	{ SyncChatMigrationStep::Moved, "moved" },
+	{ SyncChatMigrationStep::Published, "published" },
+	{ SyncChatMigrationStep::Joined, "joined" },
+	{ SyncChatMigrationStep::Done, "done" },
+} };
+
+template <typename Value, size_t Size>
+QString Code(const std::array<std::pair<Value, const char*>, Size> &table, Value value) {
+	for (const auto &[known, code] : table) {
+		if (known == value) { return QString::fromLatin1(code); }
+	}
+	return QString();
+}
+
+template <typename Value, size_t Size>
+std::optional<Value> Parse(const std::array<std::pair<Value, const char*>, Size> &table, const QString &code) {
+	for (const auto &[known, text] : table) {
+		if (code == QLatin1String(text)) { return known; }
+	}
+	return std::nullopt;
+}
+
+std::optional<int64_t> Time(const QJsonValue &value) {
+	if (!value.isString()) { return std::nullopt; }
+	auto ok = false;
+	const auto result = value.toString().toLongLong(&ok);
+	return (ok && result >= 0 && QString::number(result) == value.toString())
+		? std::make_optional(int64_t(result)) : std::nullopt;
+}
+
+std::optional<PeerToken> Token(const QJsonValue &value) {
+	return value.isString() ? ParsePeerToken(value.toString()) : std::nullopt;
+}
+
+bool MethodName(const QString &method) {
+	if (method.isEmpty() || method.size() > 64) { return false; }
+	for (const auto ch : method) {
+		if (!((ch >= u'a' && ch <= u'z') || (ch >= u'A' && ch <= u'Z')
+			|| (ch >= u'0' && ch <= u'9') || ch == u'.' || ch == u'_')) { return false; }
+	}
+	return true;
+}
+
+PeerToken Channel(uint64_t id) {
+	return PeerToken{ PeerTokenKind::Channel, id };
+}
+
+bool Usable(const MagicChatCandidate &chat) {
+	return CheckMagicChat(chat).verdict != MagicChatVerdict::Ineligible;
+}
+
+SyncChatLookupPlan Problem(SyncChatProblem problem, bool show, std::optional<PeerToken> chat = std::nullopt) {
+	auto result = SyncChatLookupPlan();
+	result.action = SyncChatLookupAction::Problem;
+	result.problem = problem;
+	result.show = show;
+	result.chat = std::move(chat);
+	return result;
+}
+
+SyncChatLookupPlan Act(SyncChatLookupAction action, std::optional<PeerToken> chat = std::nullopt, bool rebind = false) {
+	auto result = SyncChatLookupPlan();
+	result.action = action;
+	result.chat = std::move(chat);
+	result.rebind = rebind;
+	return result;
+}
+
+SyncChatLookupPlan WaitUntil(int64_t retryAt) {
+	auto result = SyncChatLookupPlan();
+	result.action = SyncChatLookupAction::Wait;
+	result.retryAt = retryAt;
+	return result;
+}
+
+SyncChatLookupPlan Manual(const SyncChatLookupInput &input) {
+	const auto &chat = *input.binding.chat;
+	if (chat.kind == PeerTokenKind::Self) { return Act(SyncChatLookupAction::Use, chat); }
+	switch (input.boundState) {
+	case SyncChatBoundState::Unknown: return Act(SyncChatLookupAction::Wait);
+	case SyncChatBoundState::Gone: return Problem(SyncChatProblem::ChatGone, true, chat);
+	case SyncChatBoundState::Present: break;
+	}
+	if (!input.bound.member) { return Problem(SyncChatProblem::ChatLeft, true, chat); }
+	if (input.bound.facts.otherMembers.value_or(0) != 0) { return Problem(SyncChatProblem::ExtraMember, true, chat); }
+	if (input.bound.facts.otherAdmins.value_or(0) != 0) { return Problem(SyncChatProblem::ExtraAdmin, true, chat); }
+	const auto refusal = SyncChatEligibility(input.bound.facts, SyncChatBroadcastOwnership::CreatorAndSoleAdmin).refusal;
+	if (refusal == SyncChatRefusal::CannotSendFiles) { return Problem(SyncChatProblem::CannotPost, true, chat); }
+	if (refusal != SyncChatRefusal::None) { return Problem(SyncChatProblem::Restricted, true, chat); }
+	return Act(SyncChatLookupAction::Use, chat);
+}
+
+SyncChatLookupPlan Magic(const SyncChatLookupInput &input) {
+	const auto &binding = input.binding;
+	const auto &chat = *binding.chat;
+	if (chat.kind != PeerTokenKind::Channel) { return Problem(SyncChatProblem::NotMegagroup, true, chat); }
+	switch (input.boundState) {
+	case SyncChatBoundState::Unknown: return Act(SyncChatLookupAction::Wait);
+	case SyncChatBoundState::Gone: return Problem(SyncChatProblem::ChatGone, true, chat);
+	case SyncChatBoundState::Present: break;
+	}
+	const auto check = CheckMagicChat(input.bound);
+	if (check.verdict == MagicChatVerdict::Ineligible) { return Problem(check.problem, true, chat); }
+	auto pool = input.visible;
+	if (input.allChats) { pool.insert(pool.end(), input.allChats->begin(), input.allChats->end()); }
+	const auto oldest = PickMagicChat(pool);
+	if (oldest && *oldest < chat.id) { return Act(SyncChatLookupAction::Verify, Channel(*oldest), true); }
+	const auto stale = binding.verifiedAt <= 0 || binding.verifiedAt > input.now
+		|| input.now - binding.verifiedAt >= kSyncChatVerifySeconds;
+	const auto due = stale && (input.fresh || check.verdict == MagicChatVerdict::Unverified);
+	const auto waiting = SyncChatWaitUntil(binding, QString::fromLatin1(kSyncChatFullInfoMethod), input.now) != 0;
+	return Act((due && !waiting) ? SyncChatLookupAction::Verify : SyncChatLookupAction::Use, chat);
+}
+
+SyncChatLookupPlan Unbound(const SyncChatLookupInput &input) {
+	const auto &binding = input.binding;
+	if (const auto pick = PickMagicChat(input.visible)) {
+		return Act(SyncChatLookupAction::Verify, Channel(*pick), true);
+	}
+	if (!input.visible.empty()) { return Problem(SyncChatProblem::MagicIneligible, true); }
+	if (!input.allChats) {
+		if (const auto until = SyncChatWaitUntil(binding, QString::fromLatin1(kSyncChatAllChatsMethod), input.now)) {
+			return WaitUntil(until);
+		}
+		return Act(SyncChatLookupAction::ProveAbsent);
+	}
+	if (const auto pick = PickMagicChat(*input.allChats)) {
+		return Act(SyncChatLookupAction::Verify, Channel(*pick), true);
+	}
+	if (!input.allChats->empty()) { return Problem(SyncChatProblem::MagicIneligible, true); }
+	if (binding.createStep != SyncChatCreateStep::None
+		&& binding.createAt <= input.now
+		&& input.now - binding.createAt < kSyncChatCreateUncertainSeconds) {
+		return WaitUntil(binding.createAt + kSyncChatCreateUncertainSeconds);
+	}
+	if (const auto until = SyncChatWaitUntil(binding, QString::fromLatin1(kSyncChatCreateMethod), input.now)) {
+		return WaitUntil(until);
+	}
+	return Act(SyncChatLookupAction::Create);
+}
+
+} // namespace
+
+bool IsMagicSyncChatTitle(const QString &title) {
+	return title == QLatin1String(kMagicSyncChatTitle);
+}
+
+QString SyncChatProblemCode(SyncChatProblem problem) {
+	return Code(Problems, problem);
+}
+
+std::optional<SyncChatProblem> ParseSyncChatProblemCode(const QString &code) {
+	return Parse(Problems, code);
+}
+
+MagicChatCheck CheckMagicChat(const MagicChatCandidate &chat) {
+	const auto refuse = [](SyncChatProblem problem, SyncChatRefusal refusal = SyncChatRefusal::None) {
+		return MagicChatCheck{ MagicChatVerdict::Ineligible, problem, refusal };
+	};
+	if (!chat.member) { return refuse(SyncChatProblem::ChatLeft); }
+	if (!chat.megagroup || chat.gigagroup || chat.facts.kind != SyncChatKind::Supergroup) {
+		return refuse(SyncChatProblem::NotMegagroup);
+	}
+	if (chat.facts.publicUsername) { return refuse(SyncChatProblem::PublicUsername); }
+	if (!chat.facts.creator) { return refuse(SyncChatProblem::NotCreator); }
+	if (chat.facts.otherMembers.value_or(0) != 0) { return refuse(SyncChatProblem::ExtraMember); }
+	if (chat.facts.otherAdmins.value_or(0) != 0) { return refuse(SyncChatProblem::ExtraAdmin); }
+	const auto refusal = SyncChatEligibility(chat.facts, SyncChatBroadcastOwnership::CreatorAndSoleAdmin).refusal;
+	if (refusal == SyncChatRefusal::CannotSendFiles) { return refuse(SyncChatProblem::CannotPost, refusal); }
+	if (refusal != SyncChatRefusal::None) { return refuse(SyncChatProblem::Restricted, refusal); }
+	const auto known = chat.facts.otherMembers && chat.facts.otherAdmins;
+	return MagicChatCheck{ known ? MagicChatVerdict::Eligible : MagicChatVerdict::Unverified };
+}
+
+std::optional<uint64_t> PickMagicChat(const std::vector<MagicChatCandidate> &chats) {
+	auto result = std::optional<uint64_t>();
+	for (const auto &chat : chats) {
+		if (chat.channelId == 0 || !Usable(chat)) { continue; }
+		if (!result || chat.channelId < *result) { result = chat.channelId; }
+	}
+	return result;
+}
+
+std::optional<QByteArray> SerializeSyncChatBinding(const SyncChatBinding &binding) {
+	if (binding.version != 1 || (binding.mode != SyncChatBindingMode::None) != bool(binding.chat)
+		|| binding.verifiedAt < 0 || binding.createAt < 0 || int(binding.waits.size()) > kWaitLimit
+		|| (binding.problem == SyncChatProblem::None && binding.problemShown)
+		|| SyncChatProblemCode(binding.problem).isEmpty()
+		|| Code(Modes, binding.mode).isEmpty() || Code(CreateSteps, binding.createStep).isEmpty()
+		|| Code(Migrations, binding.migration).isEmpty()) {
+		return std::nullopt;
+	}
+	auto object = binding.preserved;
+	object.insert(u"version"_q, binding.version);
+	object.insert(u"mode"_q, Code(Modes, binding.mode));
+	if (binding.chat) {
+		const auto text = PeerTokenText(*binding.chat);
+		if (!text) { return std::nullopt; }
+		object.insert(u"chat"_q, *text);
+	} else {
+		object.remove(u"chat"_q);
+	}
+	object.insert(u"verifiedAt"_q, QString::number(binding.verifiedAt));
+	auto waits = QJsonObject();
+	for (const auto &[method, retryAt] : binding.waits) {
+		if (!MethodName(method) || retryAt <= 0) { return std::nullopt; }
+		waits.insert(method, QString::number(retryAt));
+	}
+	object.insert(u"waits"_q, waits);
+	auto create = QJsonObject();
+	create.insert(u"step"_q, Code(CreateSteps, binding.createStep));
+	create.insert(u"at"_q, QString::number(binding.createAt));
+	if (binding.created) {
+		const auto text = PeerTokenText(*binding.created);
+		if (!text) { return std::nullopt; }
+		create.insert(u"chat"_q, *text);
+	}
+	object.insert(u"create"_q, create);
+	object.insert(u"problem"_q, SyncChatProblemCode(binding.problem));
+	object.insert(u"problemShown"_q, binding.problemShown);
+	object.insert(u"migration"_q, Code(Migrations, binding.migration));
+	object.insert(u"login"_q, binding.login);
+	const auto json = CanonicalizeSyncJson(QJsonDocument(object).toJson(QJsonDocument::Compact));
+	return (json && json.canonical.size() <= kBindingLimit) ? std::make_optional(json.canonical) : std::nullopt;
+}
+
+std::optional<SyncChatBinding> ParseSyncChatBinding(const QByteArray &bytes) {
+	if (bytes.size() > kBindingLimit) { return std::nullopt; }
+	const auto canonical = CanonicalizeSyncJson(bytes);
+	if (!canonical) { return std::nullopt; }
+	const auto document = QJsonDocument::fromJson(canonical.canonical);
+	if (!document.isObject()) { return std::nullopt; }
+	auto object = document.object();
+	auto result = SyncChatBinding();
+	const auto version = object.take(u"version"_q);
+	if (!version.isDouble() || version.toInteger(-1) != 1) { return std::nullopt; }
+	const auto mode = object.take(u"mode"_q);
+	const auto parsedMode = mode.isString() ? Parse(Modes, mode.toString()) : std::nullopt;
+	if (!parsedMode) { return std::nullopt; }
+	result.mode = *parsedMode;
+	if (object.contains(u"chat"_q)) {
+		result.chat = Token(object.take(u"chat"_q));
+		if (!result.chat) { return std::nullopt; }
+	}
+	const auto verifiedAt = Time(object.take(u"verifiedAt"_q));
+	if (!verifiedAt) { return std::nullopt; }
+	result.verifiedAt = *verifiedAt;
+	const auto waitsValue = object.take(u"waits"_q);
+	const auto waits = waitsValue.toObject();
+	if (!waitsValue.isObject() || waits.size() > kWaitLimit) { return std::nullopt; }
+	for (auto i = waits.begin(); i != waits.end(); ++i) {
+		const auto retryAt = Time(i.value());
+		if (!MethodName(i.key()) || !retryAt || *retryAt <= 0) { return std::nullopt; }
+		result.waits.emplace(i.key(), *retryAt);
+	}
+	const auto create = object.take(u"create"_q).toObject();
+	const auto step = create.value(u"step"_q);
+	const auto parsedStep = step.isString() ? Parse(CreateSteps, step.toString()) : std::nullopt;
+	const auto createAt = Time(create.value(u"at"_q));
+	if (!parsedStep || !createAt || create.size() > 3 || (create.size() == 3 && !create.contains(u"chat"_q))) {
+		return std::nullopt;
+	}
+	result.createStep = *parsedStep;
+	result.createAt = *createAt;
+	if (create.contains(u"chat"_q)) {
+		result.created = Token(create.value(u"chat"_q));
+		if (!result.created) { return std::nullopt; }
+	}
+	const auto problem = object.take(u"problem"_q);
+	const auto parsedProblem = problem.isString() ? ParseSyncChatProblemCode(problem.toString()) : std::nullopt;
+	const auto shown = object.take(u"problemShown"_q);
+	if (!parsedProblem || !shown.isBool()) { return std::nullopt; }
+	result.problem = *parsedProblem;
+	result.problemShown = shown.toBool();
+	const auto migration = object.take(u"migration"_q);
+	const auto parsedMigration = migration.isString() ? Parse(Migrations, migration.toString()) : std::nullopt;
+	const auto login = object.take(u"login"_q);
+	if (!parsedMigration || !login.isString()) { return std::nullopt; }
+	result.migration = *parsedMigration;
+	result.login = login.toString();
+	result.preserved = object;
+	return SerializeSyncChatBinding(result) ? std::make_optional(result) : std::nullopt;
+}
+
+void RecordSyncChatWait(SyncChatBinding &binding, const QString &method, int64_t retryAt) {
+	if (!MethodName(method) || retryAt <= 0) { return; }
+	auto &value = binding.waits[method];
+	value = std::max(value, retryAt);
+}
+
+int64_t SyncChatWaitUntil(const SyncChatBinding &binding, const QString &method, int64_t now) {
+	const auto i = binding.waits.find(method);
+	return (i != binding.waits.end() && i->second > now) ? i->second : 0;
+}
+
+void RaiseSyncChatProblem(SyncChatBinding &binding, SyncChatProblem problem) {
+	if (problem == SyncChatProblem::None || binding.problem == problem) { return; }
+	binding.problem = problem;
+	binding.problemShown = false;
+}
+
+void ClearSyncChatProblem(SyncChatBinding &binding) {
+	binding.problem = SyncChatProblem::None;
+	binding.problemShown = false;
+}
+
+SyncChatLookupPlan PlanSyncChatLookup(const SyncChatLookupInput &input) {
+	const auto &binding = input.binding;
+	if (binding.problem != SyncChatProblem::None) {
+		return Problem(binding.problem, !binding.problemShown, binding.chat);
+	}
+	if (binding.mode == SyncChatBindingMode::None || !binding.chat) { return Unbound(input); }
+	return binding.mode == SyncChatBindingMode::Manual ? Manual(input) : Magic(input);
+}
+
+SyncChatProblem CompleteSyncChatVerify(SyncChatBinding &binding, const MagicChatCandidate &chat, int64_t now) {
+	const auto check = CheckMagicChat(chat);
+	const auto problem = check.verdict == MagicChatVerdict::Eligible ? SyncChatProblem::None
+		: check.verdict == MagicChatVerdict::Unverified ? SyncChatProblem::MagicIneligible
+		: check.problem;
+	if (problem != SyncChatProblem::None) {
+		RaiseSyncChatProblem(binding, problem);
+		return problem;
+	}
+	binding.mode = SyncChatBindingMode::Magic;
+	binding.chat = Channel(chat.channelId);
+	binding.verifiedAt = now;
+	binding.createStep = SyncChatCreateStep::None;
+	binding.createAt = 0;
+	binding.created.reset();
+	ClearSyncChatProblem(binding);
+	return SyncChatProblem::None;
+}
+
+}

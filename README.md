@@ -32,6 +32,12 @@ attempt without cleanup so the account can follow the current winner. Version-2
 journals freeze reader consent before the first write. Client execution and server probes
 remain separate work.
 
+The [Magic Purple Sync chat](docs/sync-chat-magic.md) replaces search-based
+discovery: each device finds a private supergroup with that exact title in its
+local chat list, proves absence with one `messages.getAllChats` reply and only
+then creates one. A per-device binding keeps the chosen chat, persisted
+transient waits and show-once problems that pause automatic sync.
+
 ## Received-content archive
 
 The storage-independent archive model, event reducers, version codec and
@@ -421,7 +427,8 @@ harness and drives them against several hundred fixture documents - far too
 slow to iterate on through a full app build, which is the point.
 `tests/test_sync_flow.cpp` runs the settings sync flow end to end on in-memory
 devices; `tests/test_sync_chat.cpp` covers peer tokens, marks, eligibility and
-chat resolution. `tests/test_sync_chat_carry.cpp` covers carry, scoped readback,
+chat resolution; `tests/test_sync_chat_magic.cpp` covers the Magic Purple Sync
+lookup and binding. `tests/test_sync_chat_carry.cpp` covers carry, scoped readback,
 ordered commits and crash recovery. `tests/test_archive.cpp` covers archive
 events, transactions, media and purges; `tests/test_archive_codec.cpp` covers
 identity and codec compatibility; `tests/test_archive_source.cpp` covers copy-source
