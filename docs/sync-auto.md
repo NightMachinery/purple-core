@@ -39,9 +39,11 @@ the existing Retry at or after its retained deadline.
 
 The record belongs to a full account key, including server environment. All
 facts, inventory and exact server reads must refer to that account and chat.
-A state-v2 non-self stream is held as SyncChatNotResolved under the frozen
-policy, including after carry support is available. Existing local-state and
-sync-chat decisions remain unchanged for manual callers.
+Any resolved sync chat may carry the stream: the gate requires the resolved
+chat to equal the state's chat, Saved Messages or a state-v2 chat alike. A
+sync chat with a real problem the user has not acted on (`chatProblem`) holds
+as SyncChatProblem, which is noticed once like every other hold. Existing
+local-state and sync-chat decisions remain unchanged for manual callers.
 
 ## Persist before execution
 

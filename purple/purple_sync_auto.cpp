@@ -110,8 +110,8 @@ SyncAutoReason Gate(const SyncAutoFacts &facts) {
 		!= SyncAccountBindingVerdict::Bound || facts.state->space.isEmpty()) {
 		return SyncAutoReason::AccountUnbound;
 	}
-	if (!facts.chatResolved || facts.chat != facts.state->chat
-		|| facts.chat.kind != PeerTokenKind::Self) {
+	if (facts.chatProblem) { return SyncAutoReason::SyncChatProblem; }
+	if (!facts.chatResolved || facts.chat != facts.state->chat) {
 		return SyncAutoReason::SyncChatNotResolved;
 	}
 	if (!facts.chatWritable) { return SyncAutoReason::ChatNotWritable; }

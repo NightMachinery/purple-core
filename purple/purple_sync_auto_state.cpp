@@ -121,7 +121,7 @@ bool IsSyncAutoRecord(const SyncAutoRecord &record) {
 	if (record.version != kSyncAutoVersion || !AccountKeyText(record.account.environment, record.account.userId)
 		|| int(record.pending) < 0 || int(record.pending) > int(SyncAutoAction::Retire)
 		|| (record.active && (record.session.isEmpty() || !record.ticket || record.pending == SyncAutoAction::NoOp))
-		|| int(record.held) < 0 || int(record.held) > int(SyncAutoReason::StateChanged)
+		|| int(record.held) < 0 || int(record.held) > int(SyncAutoReason::SyncChatProblem)
 		|| record.session.size() > 256 || (record.commitOnly && record.pending != SyncAutoAction::Reconcile)
 		|| record.lastCheck < 0 || (!record.checked && record.lastCheck != 0)
 		|| (record.runStopped && (record.active || record.retryAt || !record.run
@@ -142,7 +142,7 @@ bool IsSyncAutoRecord(const SyncAutoRecord &record) {
 	}
 	for (auto i = size_t(0); i != record.noticed.size(); ++i) {
 		const auto reason = record.noticed[i];
-		if (reason == SyncAutoReason::None || int(reason) < 0 || int(reason) > int(SyncAutoReason::StateChanged)
+		if (reason == SyncAutoReason::None || int(reason) < 0 || int(reason) > int(SyncAutoReason::SyncChatProblem)
 			|| std::find(record.noticed.begin(), record.noticed.begin() + i, reason) != record.noticed.begin() + i) {
 			return false;
 		}
@@ -212,7 +212,7 @@ SyncAutoDecodeResult ParseSyncAutoRecord(const QByteArray &bytes) {
 	if (!noticed.isArray()) { return result; }
 	for (const auto &value : noticed.toArray()) {
 		if (!value.isDouble() || value.toInteger(-1) < 0
-			|| value.toInteger() > int(SyncAutoReason::StateChanged)) { return result; }
+			|| value.toInteger() > int(SyncAutoReason::SyncChatProblem)) { return result; }
 		record.noticed.push_back(SyncAutoReason(value.toInt()));
 	}
 	record.preserved = reader.remaining();

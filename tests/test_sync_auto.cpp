@@ -255,7 +255,7 @@ void TestEditRefusalAndRetire() {
 
 void TestGateAndNotices() {
 	Section = "default off binding Q1 exact account and moved stream";
-	for (auto test = 0; test != 11; ++test) {
+	for (auto test = 0; test != 12; ++test) {
 		auto h = Harness();
 		auto reason = SyncAutoReason::None;
 		switch (test) {
@@ -265,17 +265,32 @@ void TestGateAndNotices() {
 		case 3: h.facts.state.reset(); reason = SyncAutoReason::AccountUnbound; break;
 		case 4: h.facts.bindingToken.clear(); reason = SyncAutoReason::AccountUnbound; break;
 		case 5: h.facts.state->version = 2; h.facts.state->chat = { PeerTokenKind::Channel, 123 };
-			h.facts.chat = h.facts.state->chat; reason = SyncAutoReason::SyncChatNotResolved; break;
+			h.facts.chat = { PeerTokenKind::Channel, 124 }; reason = SyncAutoReason::SyncChatNotResolved; break;
 		case 6: h.facts.chatWritable = false; reason = SyncAutoReason::ChatNotWritable; break;
 		case 7: h.facts.local = MakeSyncSettingsFile(SyncSettingsFileStatus::Absent); reason = SyncAutoReason::FileAbsent; break;
 		case 8: h.facts.local.usingLastGood = true; reason = SyncAutoReason::LastGood; break;
 		case 9: h.facts.currentDevice = u"clone"_q; reason = SyncAutoReason::CloneDetected; break;
 		case 10: h.facts.signedIn = false; reason = SyncAutoReason::AccountUnavailable; break;
+		case 11: h.facts.chatProblem = true; reason = SyncAutoReason::SyncChatProblem; break;
 		}
 		const auto first = h.event(SyncAutoEvent::Enable);
 		CHECK(first.action == SyncAutoAction::Hold && first.reason == reason && first.notice);
 		const auto repeated = h.event(SyncAutoEvent::Foreground);
 		CHECK(repeated.action == SyncAutoAction::Hold && repeated.reason == reason && !repeated.notice);
+	}
+	{
+		Section = "a resolved non-Self sync chat passes the gate";
+		auto moved = Harness();
+		moved.facts.state->version = 2;
+		moved.facts.state->chat = { PeerTokenKind::Channel, 123 };
+		moved.facts.chat = moved.facts.state->chat;
+		CHECK(moved.event(SyncAutoEvent::Enable).action == SyncAutoAction::Check);
+		moved.facts.chatProblem = true;
+		const auto paused = moved.event(SyncAutoEvent::Foreground);
+		CHECK(paused.action == SyncAutoAction::Hold && paused.reason == SyncAutoReason::SyncChatProblem && paused.notice);
+		moved.facts.chatProblem = false;
+		CHECK(moved.event(SyncAutoEvent::Foreground).action != SyncAutoAction::Hold);
+		Section = "default off binding Q1 exact account and moved stream";
 	}
 	auto h = Harness();
 	h.facts.accountLock = false;

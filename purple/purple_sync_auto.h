@@ -26,7 +26,7 @@ enum class SyncAutoReason {
 	AccountUnbound, SyncChatNotResolved, ChatNotWritable, InvalidSettings, FileAbsent,
 	LastGood, NoSavedBytes, NeedsReview, Conflict, UnsafeImpact, WorkModeScopeChanged,
 	CloneDetected, StoreMismatch, OwnershipChanged, DeletionRefused, RetryStopped,
-	InterruptedApply, StateChanged,
+	InterruptedApply, StateChanged, SyncChatProblem,
 };
 
 enum class SyncAutoEvent {
@@ -81,6 +81,8 @@ struct SyncAutoFacts {
 	QString inFlightSession;
 	bool chatResolved = false;
 	bool chatWritable = false;
+	// The sync chat has a real problem the user has not acted on yet.
+	bool chatProblem = false;
 	PeerToken chat;
 	std::optional<SyncLocalState> state;
 	QByteArray bindingToken;
