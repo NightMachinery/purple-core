@@ -458,7 +458,11 @@ staging. `tests/test_sync_auto.cpp` covers automatic settings policy.
 `tests/test_mp4_repair.cpp` covers the round video journal and the MP4 repair
 scanner on synthetic MP4Builder-shaped streams. `tests/test_recording.cpp`
 covers the nudge schedule, bin expiry and seek clamping.
-`run.sh` compiles the core once and runs all fifteen. Set
+`tests/test_recording_fuzz.cpp` is a seeded fuzz loop over the Ogg finaliser,
+the journal reader and the MP4 repair (truncation, flips, junk, and
+well-formed journals with hostile values), checking invariants such as every
+recovered sample lying inside the media file; it runs in a few seconds.
+`run.sh` compiles the core once and runs all sixteen. Set
 `ARCHIVE_SQLITE_TESTS=1` to also execute the SQL against system SQLite.
 
 ```sh
@@ -467,7 +471,9 @@ QT_PREFIX=/path/to/qt tests/run.sh
 
 `QT_PREFIX` must hold `frameworks/QtCore.framework`; it defaults to
 `$HOME/code/misc/tdesktop-libs/local/qt`, the prefix the desktop fork builds
-against. The build lands in the gitignored `tests/build/`. The script exits
+against. Without that framework (Linux, or a Qt that is not a framework
+build) the script takes Qt Core from pkg-config's `Qt6Core`, so plain
+`tests/run.sh` works once a Qt 6 Core development package is installed. The build lands in the gitignored `tests/build/`. The script exits
 nonzero if anything fails to compile or any check fails.
 
 ## History

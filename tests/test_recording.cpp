@@ -8,6 +8,7 @@ option) any later version.
 #include "purple/purple_recording.h"
 
 #include <cstdio>
+#include <limits>
 
 using namespace Purple;
 
@@ -66,6 +67,15 @@ void TestNudge() {
 	CHECK(!NudgeDue(settings, 30 * kMinute - 1, 30 * kMinute));
 	settings.longNudgeSeconds = 10 * 60;
 	CHECK(NudgeDue(settings, 10 * kMinute - 1, 10 * kMinute));
+
+	// P3-5: no overflow near the largest time; past the last representable
+	// multiple there is simply no next nudge.
+	constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
+	CHECK(!NextNudgeAt(kMax, interval).has_value());
+	const auto lastMultiple = (kMax / (interval * 1000LL)) * (interval * 1000LL);
+	CHECK(NextNudgeAt(lastMultiple - 1, interval) == lastMultiple);
+	CHECK(!NextNudgeAt(lastMultiple, interval).has_value());
+	CHECK(!NudgeDue(kMax - 1, kMax, interval));
 }
 
 void TestBinExpiry() {
@@ -94,6 +104,14 @@ void TestBinExpiry() {
 	settings.binKeepSeconds = 0;
 	CHECK(!BinItemExpired(settings, binned, binned + 7 * 86400));
 	CHECK(kBinSweepIntervalSeconds == 3600);
+
+	// P3-5: a damaged binnedAt near the largest time saturates instead of
+	// overflowing, and such an item is never expired.
+	constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
+	CHECK(BinItemExpiresAt(kMax - 10, keep) == kMax);
+	CHECK(!BinItemExpired(kMax - 10, binned, keep));
+	CHECK(!BinItemExpired(kMax - 10, kMax - 1, keep));
+	CHECK(BinItemExpiresAt(std::numeric_limits<std::int64_t>::min(), keep).has_value());
 }
 
 void TestSeek() {
@@ -131,6 +149,10 @@ void TestSeek() {
 		CHECK(SeekTarget(settings, 30000, 120000, back) == 30000 - step * 1000);
 	}
 	CHECK(SeekTarget(30000, duration, 0, forward) == 30000);
+	// Absurd positions saturate.
+	constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
+	CHECK(SeekTarget(kMax - 5, 0, 30, forward) == kMax);
+	CHECK(SeekTarget(kMax - 5, kMax, 30, forward) == kMax - 5);
 }
 
 } // namespace

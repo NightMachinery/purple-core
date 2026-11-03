@@ -9,6 +9,7 @@ option) any later version.
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <system_error>
 
 namespace Purple::RecordingFile {
@@ -24,11 +25,19 @@ namespace {
 
 } // namespace
 
-bool ReadAll(const std::string &path, std::vector<std::uint8_t> &bytes) {
+bool ReadAll(
+		const std::string &path,
+		std::vector<std::uint8_t> &bytes,
+		std::uint64_t maxBytes) try {
+	bytes.clear();
 	auto error = std::error_code();
 	const auto native = Native(path);
 	const auto size = std::filesystem::file_size(native, error);
-	if (error) {
+	// Checked before the cast, so a 32-bit build never reads a prefix of a
+	// file of 4 GiB or more as if it were the whole file.
+	if (error
+		|| size > maxBytes
+		|| size > std::uint64_t(std::numeric_limits<std::size_t>::max())) {
 		return false;
 	}
 	auto file = std::ifstream(native, std::ios::binary);
@@ -43,13 +52,17 @@ bool ReadAll(const std::string &path, std::vector<std::uint8_t> &bytes) {
 		return false;
 	}
 	return true;
+} catch (...) {
+	// bad_alloc, or a path std::filesystem refuses: never into JNI.
+	bytes.clear();
+	return false;
 }
 
 bool WriteAt(
 		const std::string &path,
 		std::uint64_t offset,
 		const std::uint8_t *data,
-		std::size_t size) {
+		std::size_t size) try {
 	auto file = std::fstream(
 		Native(path),
 		std::ios::binary | std::ios::in | std::ios::out);
@@ -60,12 +73,16 @@ bool WriteAt(
 	file.write(reinterpret_cast<const char*>(data), std::streamsize(size));
 	file.flush();
 	return bool(file);
+} catch (...) {
+	return false;
 }
 
-bool Truncate(const std::string &path, std::uint64_t size) {
+bool Truncate(const std::string &path, std::uint64_t size) try {
 	auto error = std::error_code();
 	std::filesystem::resize_file(Native(path), size, error);
 	return !error;
+} catch (...) {
+	return false;
 }
 
 } // namespace Purple::RecordingFile

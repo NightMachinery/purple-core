@@ -15,10 +15,14 @@ pages). A crash leaves it with a torn last page and no end-of-stream flag. `Fina
 
 1. walk the pages from offset 0. A page is good when it starts with `OggS` and version 0, its lacing table and
    body fit in the file, and its CRC matches (the Ogg CRC-32: polynomial `0x04C11DB7`, not reflected, initial
-   value 0, no final xor, computed with the page's CRC field as zero);
+   value 0, no final xor, computed with the page's CRC field as zero), and it continues the stream: the same
+   serial number as the first page and the next sequence number. A good page of another stream or out of
+   sequence (stale pages of an earlier recording left in a reused file) is not good;
 2. stop at the first page that is not good. Nothing after it is kept, even if a later page would be good: the
    walk never resynchronises, so a corrupt middle page cannot splice two halves of a recording;
-3. cut the stream after the last good page;
+3. cut the stream after the last good page that carries a granule position: trailing pages on which no packet
+   ends (granule -1) go too, because the end-of-stream page must carry the final granule position (RFC 7845
+   end trimming);
 4. set the end-of-stream flag (`0x04`) on that page and recompute its CRC. The file variant rewrites only that
    page's 27-byte header and then truncates the file;
 5. read the duration: for Opus, `(granule - pre_skip) / 48` milliseconds, at least 0, from the last good page
@@ -30,9 +34,13 @@ and `Unrecoverable` (no good page, or only the Opus header pages, so no audio). 
 byte for byte as it was, so the bin can keep it raw. `FinaliseOggFile` also sets `ioError` when it cannot read or
 write the file.
 
-A last kept page whose final packet continues onto the lost next page (its lacing ends in 255) is kept as it is:
-decoders drop the unfinished packet at the end of the stream. The recorders write one packet per page, so this is
-rare.
+A last kept page that completes some packets but whose final packet continues onto the lost next page (its
+lacing ends in 255) is kept as it is: it has a granule position, and decoders drop the unfinished packet at the
+end of the stream. The recorders write one packet per page, so this is rare.
+
+`FinaliseOggFile` reads the file whole and refuses one above `RecordingFile::kMaxBytes` (512 MB; no voice
+recording is that large), so a 32-bit build never mistakes a prefix for the file. None of the file operations
+throw.
 
 `ScanOgg(data, size)` is the walker on its own. Its `pages` give each page's offset, size, flags, granule,
 serial and sequence; the orphan scan uses `endOfStream` to find unfinished files, and Desktop's preview trim cuts
@@ -132,10 +140,16 @@ At about 77 samples a second a batch costs 16 + 24 × 77 bytes, about 1.9 KB per
 
 1. **Read the journal.** Without one, without a config header, or without tracks, the status is `Unrecoverable`
    (`NoConfig`); a journal of an unknown version is `UnknownVersion`.
-2. **Check the exact part.** Journaled samples are used in order until the first one that ends past the media
-   file (not on disk yet), overlaps the previous one, or, for video, no longer matches the bytes at its offset
-   (the 4-byte length is not `size - 4`, or AVCC's first NAL does not fit, or the NAL header is not valid: the
-   file was rewritten). The rest are counted in `journalDropped`.
+2. **Check the exact part.** A journal is checked by CRC, not trusted: anything that can write the sidecar can
+   write good CRCs. The reader already treats a sample whose `offset + size` does not fit 64 bits as damage.
+   Journaled samples are then used in order until the first one that is empty, names an unknown track, does
+   not lie inside the media file (`offset <= size` and `size <= mediaSize - offset`, compared without adding),
+   starts inside `ftyp` or overlaps the previous sample, has a time outside `[0, 2^40)` µs (`kRoundMaxPtsUs`,
+   about 12.7 days), goes back more than one frame within its track (an audio frame, or 1/60 s for video),
+   or, for video, no longer matches the bytes at its offset (the 4-byte length is not `size - 4`, or AVCC's
+   first NAL does not fit, or the NAL header is not valid: the file was rewritten). That sample and the rest
+   are counted in `journalDropped`. `RepairRound` applies the same checks to the samples it is given, so the
+   timing arithmetic below always starts from an in-range base and cannot overflow.
 3. **Scan the rest** (`RepairRound`), starting at the end of the last exact sample, or after `ftyp` (no `ftyp`
    and no exact sample: `NotMp4`). At each sample boundary, in order:
    - `moov`: the file was finished; the scan ends there;
@@ -148,7 +162,9 @@ At about 77 samples a second a batch costs 16 + 24 × 77 bytes, about 1.9 KB per
      to 0 (the first bit of the slice header set). In AVCC framing an access unit is non-VCL units followed by
      a picture's slices; further slices of the picture (`first_mb_in_slice` above 0) continue it. A video sample
      is accepted only if a valid boundary follows it: the end of the data, a box, another video sample, a
-     measurable AAC frame, or a torn tail (below);
+     measurable AAC frame, or a torn video sample (a plausible length and NAL header running past the end).
+     A short tail alone is not a boundary, so the lookahead holds in the last 8 KB too; the price is that a
+     last video sample followed only by a torn audio frame or a torn `mdat` header is dropped with it;
    - an AAC frame: `measure(audioTrack, data, available)` returns the bytes one 1024-sample frame takes,
      decoding with the track's AudioSpecificConfig; `available` is at most 8 KB and the callback must not read
      past it.
@@ -170,6 +186,18 @@ The client rebuilds the file from `samples` with its own muxer, reading each sam
 Android through `MP4Builder` (`createMovie` with the config's split flag, `addTrack` with a `MediaFormat` from
 the track record, `writeSampleData(track, bytes, info, false)` per sample, which reproduces a video sample's
 length prefix exactly, then `finishMovie`); Desktop through FFmpeg. The result has the layout upstream sends.
+
+### To verify on Android: a split `mdat` header not yet on disk
+
+The scanner assumes every `mdat` header between samples is on disk at the time of the crash. For the Android
+lane to confirm against `MP4Builder` (the split path the design cites at `MP4Builder.java:147-156`): if a new
+`mdat`'s 16 bytes are only reserved when it starts and written when that box is flushed (a seek back), a crash
+leaves 16 zero bytes in their place. `box()` does not recognise those, nothing else matches them, and the scan
+stops there: Partial, losing everything after the last written header (up to one 32 KB stretch, about one
+second, per crash, on every V2 recording, since V2 always splits). If that is what happens, the fix in
+purple-core is small: skip exactly 16 zero bytes when a valid sample follows them. Check the source first (does
+`writeSampleData` write the new header in place before its first sample, or only reserve it?), then confirm
+with the planned device corpus check (truncating real V2 rounds at random offsets).
 
 How the two sources combine: journal on and fresh gives the exact part plus a repaired tail of at most one
 interval, timed with the learned encoder offset; a stale journal (a gap, a CRC failure, a rewritten file) gives

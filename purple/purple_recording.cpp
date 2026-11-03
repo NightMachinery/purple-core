@@ -8,8 +8,19 @@ option) any later version.
 #include "purple/purple_recording.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace Purple {
+namespace {
+
+constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
+
+// a + b for b >= 0, stopping at the largest value instead of overflowing.
+[[nodiscard]] std::int64_t SaturatingAdd(std::int64_t a, std::int64_t b) {
+	return (a > kMax - b) ? kMax : (a + b);
+}
+
+} // namespace
 
 std::optional<std::int64_t> NextNudgeAt(
 		std::int64_t elapsedMs,
@@ -21,7 +32,12 @@ std::optional<std::int64_t> NextNudgeAt(
 	if (elapsedMs < 0) {
 		return interval;
 	}
-	return (elapsedMs / interval + 1) * interval;
+	const auto multiple = elapsedMs / interval + 1;
+	if (multiple > kMax / interval) {
+		// No later multiple is representable: there is no next nudge.
+		return std::nullopt;
+	}
+	return multiple * interval;
 }
 
 bool NudgeDue(
@@ -48,7 +64,9 @@ std::optional<std::int64_t> BinItemExpiresAt(
 	if (keepSeconds <= 0) {
 		return std::nullopt;
 	}
-	return binnedAt + keepSeconds;
+	// A damaged recordings.json can hold any binnedAt; past the largest
+	// time the item simply never expires, like an item from the future.
+	return SaturatingAdd(binnedAt, keepSeconds);
 }
 
 bool BinItemExpired(
@@ -76,7 +94,7 @@ std::int64_t SeekTarget(
 	if (direction == SeekDirection::Back) {
 		return std::max<std::int64_t>(position - step, 0);
 	}
-	const auto target = position + step;
+	const auto target = SaturatingAdd(position, step);
 	if (durationMs <= 0) {
 		return target;
 	}

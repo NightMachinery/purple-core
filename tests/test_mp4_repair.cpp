@@ -420,6 +420,134 @@ void TestJournalDamage() {
 	CHECK(noConfig.samples.empty());
 }
 
+// Journals with good CRCs and values no recorder writes: they must never
+// make the recovery read outside the media file or overflow its timing.
+void TestHostileJournal() {
+	Section = "hostile journal";
+	auto stream = Record(false, { { 30, 1000 } });
+	const auto &bytes = stream.bytes;
+	const auto config = Config(false);
+	const auto measure = MeasureFor(stream, bytes);
+	const auto recover = [&](std::vector<RoundSample> samples) {
+		const auto journal = JournalFor(config, samples);
+		return RecoverRound(bytes.data(), bytes.size(), journal.data(), journal.size(), measure.bind());
+	};
+	const auto inside = [&](const RoundRecovery &got) {
+		for (const auto &sample : got.samples) {
+			if (sample.offset > bytes.size() || sample.size > bytes.size() - sample.offset) {
+				return false;
+			}
+		}
+		return true;
+	};
+	const auto good = std::vector<RoundSample>(stream.truth.begin(), stream.truth.begin() + 20);
+
+	// P1-1: offset + size wraps past 2^64. The reader calls it damage.
+	for (const auto track : { std::uint8_t(0), std::uint8_t(1) }) {
+		auto wrap = RoundSample();
+		wrap.track = track;
+		wrap.size = 32;
+		wrap.offset = UINT64_MAX - 15;
+		const auto journal = JournalFor(config, { wrap });
+		const auto read = ReadRoundJournal(journal.data(), journal.size());
+		CHECK(read.damaged);
+		CHECK(read.samples.empty());
+		const auto got = recover({ wrap });
+		CHECK(got.exactSamples == 0);
+		CHECK(inside(got));
+		CHECK(got.status == RoundRecoveryStatus::Repaired);
+		// Handed straight to RepairRound, it is dropped there as well.
+		const auto direct = RepairRound(bytes.data(), bytes.size(), config, { wrap }, measure.bind());
+		CHECK(direct.exactSamples == 0);
+		CHECK(direct.journalDropped == 1);
+		CHECK(inside(direct));
+	}
+
+	// Offsets past the end, a size past the end, a size of 0, a sample inside
+	// ftyp: each ends the exact part there.
+	const auto cutAt = [&](RoundSample bad) {
+		auto samples = good;
+		samples.insert(samples.begin() + 10, bad);
+		const auto got = recover(samples);
+		return got.exactSamples == 10
+			&& got.journalDropped == 11
+			&& inside(got)
+			&& SameLayout(got.samples, stream.truth, stream.truth.size());
+	};
+	auto bad = stream.truth[10];
+	bad.offset = bytes.size() + 1;
+	CHECK(cutAt(bad));
+	bad = stream.truth[10];
+	bad.size = std::uint32_t(bytes.size());
+	CHECK(cutAt(bad));
+	bad = stream.truth[10];
+	bad.size = 0;
+	CHECK(cutAt(bad));
+	auto inFtyp = stream.truth[0];
+	inFtyp.track = 1;
+	inFtyp.offset = 4;
+	inFtyp.size = 16;
+	const auto ftyp = recover({ inFtyp });
+	CHECK(ftyp.exactSamples == 0);
+	CHECK(ftyp.journalDropped == 1);
+	CHECK(SameLayout(ftyp.samples, stream.truth, stream.truth.size()));
+
+	// P2-1: extreme times. Each ends the exact part, and the repaired times
+	// stay in range (UBSan would flag the old arithmetic here).
+	const auto timed = [&](std::size_t index, std::int64_t pts) {
+		auto samples = good;
+		samples[index].ptsUs = pts;
+		const auto got = recover(samples);
+		auto sane = true;
+		for (const auto &sample : got.samples) {
+			sane = sane && sample.ptsUs >= 0 && sample.ptsUs < kRoundMaxPtsUs;
+		}
+		return got.exactSamples == index && sane && inside(got);
+	};
+	const auto audioAt = std::size_t(std::find_if(good.begin() + 5, good.end(), [](const RoundSample &s) { return s.track == 1; }) - good.begin());
+	const auto videoAt = std::size_t(std::find_if(good.begin() + 5, good.end(), [](const RoundSample &s) { return s.track == 0; }) - good.begin());
+	CHECK(timed(audioAt, INT64_MAX));
+	CHECK(timed(audioAt, INT64_MAX - 21000));
+	CHECK(timed(videoAt, INT64_MIN));
+	CHECK(timed(videoAt, -1));
+	CHECK(timed(videoAt, kRoundMaxPtsUs));
+	// A time just inside the range is kept.
+	{
+		auto samples = std::vector<RoundSample>(good.begin(), good.begin() + 1);
+		samples[0].ptsUs = kRoundMaxPtsUs - 1;
+		const auto got = recover(samples);
+		CHECK(got.exactSamples == 1);
+		auto sane = true;
+		for (const auto &sample : got.samples) {
+			sane = sane && sample.ptsUs >= 0;
+		}
+		CHECK(sane);
+	}
+	// Going back by more than a frame within a track is damage; within a
+	// frame is jitter and kept.
+	{
+		auto samples = good;
+		samples[videoAt].ptsUs = 0;
+		const auto back = recover(samples);
+		CHECK(back.exactSamples == videoAt);
+		auto jitter = good;
+		const auto previousVideo = std::find_if(
+			std::make_reverse_iterator(jitter.begin() + videoAt),
+			jitter.rend(),
+			[](const RoundSample &s) { return s.track == 0; });
+		if (previousVideo != jitter.rend()) {
+			jitter[videoAt].ptsUs = previousVideo->ptsUs - 1000;
+			CHECK(recover(jitter).exactSamples == good.size());
+		}
+	}
+	// A track index past the declared tracks never reaches RepairRound.
+	auto unknown = good[3];
+	unknown.track = 5;
+	const auto direct = RepairRound(bytes.data(), bytes.size(), config, { good[0], unknown }, measure.bind());
+	CHECK(direct.exactSamples == 1);
+	CHECK(inside(direct));
+}
+
 void CheckRecovery(bool split) {
 	auto stream = Record(split, { { 30, 3000 } });
 	const auto &bytes = stream.bytes;
@@ -466,7 +594,9 @@ void CheckRecovery(bool split) {
 
 	// Truncation at every byte of the last three samples, with the journal
 	// Off: every complete sample is kept, the torn one is dropped, and it is
-	// not reported as partial.
+	// not reported as partial. The one exception is the lookahead's price: a
+	// last complete video sample followed only by a torn audio frame or a
+	// torn mdat header is dropped too, never anything earlier.
 	auto allPrefix = true;
 	const auto from = std::size_t(stream.truth[stream.truth.size() - 3].offset);
 	for (auto end = from; end <= bytes.size(); ++end) {
@@ -474,8 +604,13 @@ void CheckRecovery(bool split) {
 		const auto local = MeasureFor(stream, copy);
 		const auto got = RecoverRound(copy.data(), copy.size(), header.data(), header.size(), local.bind());
 		const auto complete = CompleteBefore(stream.truth, end);
+		const auto lastIsVideo = complete > 0
+			&& stream.truth[complete - 1].track == 0
+			&& stream.truth[complete - 1].end() < end;
 		const auto ok = (got.status == RoundRecoveryStatus::Repaired)
-			&& SameLayout(got.samples, stream.truth, complete);
+			&& (SameLayout(got.samples, stream.truth, complete)
+				|| (lastIsVideo
+					&& SameLayout(got.samples, stream.truth, complete - 1)));
 		if (!ok) {
 			std::printf("split=%d cut=%zu complete=%zu got=%zu status=%d\n",
 				int(split), end, complete, got.samples.size(), int(got.status));
@@ -611,6 +746,34 @@ void TestLookahead() {
 	CHECK(got.samples.size() > 2 && got.samples[2].size == 300 && got.samples[2].track == 1);
 }
 
+// P3-2: in the last 8 KB the lookahead still holds. An audio frame that reads
+// as a small length and a slice header, near the end of the data, is not
+// taken for video.
+void TestLookaheadNearEnd() {
+	Section = "lookahead near end";
+	auto stream = BuilderStream(false);
+	auto random = Random{ 9 };
+	for (auto i = 0; i != 20; ++i) {
+		stream.write(0, VideoSample(i == 0, 700, random), i * 33333, i == 0);
+		stream.write(1, AudioFrame(180, random), AudioPts(i), true);
+	}
+	auto trick = Bytes(300, 0xFF);
+	trick[3] = 100;
+	trick[4] = 0x41;
+	trick[5] = 0x88;
+	trick[0] = trick[1] = trick[2] = 0;
+	stream.write(1, trick, AudioPts(20), true);
+	stream.write(1, AudioFrame(180, random), AudioPts(21), true);
+	const auto config = Config(false);
+	const auto measure = MeasureFor(stream, stream.bytes);
+	const auto header = EncodeRoundJournalStart(config);
+	const auto tail = stream.bytes.size() - stream.truth[stream.truth.size() - 2].offset;
+	CHECK(tail < kRoundMaxAacFrame);
+	const auto got = RecoverRound(stream.bytes.data(), stream.bytes.size(), header.data(), header.size(), measure.bind());
+	CHECK(got.status == RoundRecoveryStatus::Repaired);
+	CHECK(SameLayout(got.samples, stream.truth, stream.truth.size()));
+}
+
 void TestStops() {
 	Section = "stops";
 	auto stream = Record(false, { { 30, 2000 } });
@@ -741,10 +904,12 @@ void TestAvcc() {
 int main() {
 	TestJournalFormat();
 	TestJournalDamage();
+	TestHostileJournal();
 	TestRecovery();
 	TestVariableFrameRate();
 	TestJournalPlusTail();
 	TestLookahead();
+	TestLookaheadNearEnd();
 	TestStops();
 	TestAvcc();
 	std::printf("%d checks, %d failures\n", Checks, Failures);

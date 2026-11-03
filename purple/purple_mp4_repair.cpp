@@ -8,6 +8,7 @@ option) any later version.
 #include "purple/purple_mp4_repair.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 
 namespace Purple {
@@ -208,32 +209,39 @@ public:
 			: 0;
 	}
 
-	// Whether what is left from `at' is only a torn last sample: a video
-	// length running past the end, or fewer bytes than the largest AAC frame
-	// (which covers a torn mdat header too).
-	[[nodiscard]] bool tornTail(std::size_t at) const {
+	// Whether what is left from `at' starts a video sample that runs past
+	// the end: a plausible length and NAL header, torn by the crash.
+	[[nodiscard]] bool tornVideo(std::size_t at) const {
 		const auto left = _size - at;
-		if (left <= kRoundMaxAacFrame) {
-			return true;
-		} else if (left >= 5) {
-			const auto length = Big32(_data + at);
-			auto idr = false;
-			return std::uint64_t(length) + 4 > left
-				&& std::uint64_t(length) + 4 <= kRoundMaxVideoSample
-				&& ReadNal(_data + at + 4, left - 4, idr)
-					!= NalStart::Invalid;
+		if (left < 5) {
+			return false;
 		}
-		return false;
+		const auto length = Big32(_data + at);
+		auto idr = false;
+		return std::uint64_t(length) + 4 > left
+			&& std::uint64_t(length) + 4 <= kRoundMaxVideoSample
+			&& ReadNal(_data + at + 4, left - 4, idr) != NalStart::Invalid;
 	}
 
-	// The one-step lookahead after a video sample.
+	// Whether what is left from `at' is only a torn last sample: a torn
+	// video sample, or fewer bytes than the largest AAC frame (which covers
+	// a torn mdat header too). Decides Partial versus Repaired only.
+	[[nodiscard]] bool tornTail(std::size_t at) const {
+		return (_size - at <= kRoundMaxAacFrame) || tornVideo(at);
+	}
+
+	// The one-step lookahead after a video sample: a real boundary, or a
+	// torn video sample. A short tail alone is not enough, so near the end
+	// an audio frame that reads as a small length is still rejected; the
+	// price is that a last video sample followed only by a torn audio frame
+	// or a torn mdat header is dropped with it.
 	[[nodiscard]] bool boundary(std::size_t at) const {
 		return (at == _size)
 			|| box(at)
 			|| moov(at)
 			|| video(at).size
 			|| audio(at)
-			|| tornTail(at);
+			|| tornVideo(at);
 	}
 
 private:
@@ -247,11 +255,28 @@ private:
 
 // Exact frame times on the audio clock: frame n of a track that starts at
 // `base' is at base + n * 1024 / rate, in microseconds.
+//
+// Split so that no intermediate product overflows: the whole seconds of
+// `index' frames first, then the remainder below one second's worth.
 [[nodiscard]] std::int64_t AudioTime(
 		std::int64_t base,
 		std::int64_t index,
 		std::uint32_t rate) {
-	return base + (index * 1024 * 1000000) / std::int64_t(rate);
+	const auto r = std::int64_t(rate);
+	const auto whole = (index / r) * 1024 * 1000000;
+	const auto part = ((index % r) * 1024 * 1000000) / r;
+	return base + whole + part;
+}
+
+// The end of the ftyp box at the start of the file, or 0.
+[[nodiscard]] std::size_t FtypEnd(const std::uint8_t *media, std::size_t size) {
+	if (size >= 8 && BoxType(media, "ftyp")) {
+		const auto box = Big32(media);
+		if (box >= 8 && box <= size) {
+			return box;
+		}
+	}
+	return 0;
 }
 
 [[nodiscard]] std::uint32_t AudioRate(const RoundConfig &config) {
@@ -290,15 +315,62 @@ private:
 		: (std::uint64_t(length) + 4 == sample.size);
 }
 
+// How many of the journaled samples, from the first, can be used as they
+// are. A journal is checked by CRC, not trusted: anything that can write the
+// sidecar can write good CRCs. Stops at the first sample that is empty, names
+// a track that does not exist, lies outside the media file (compared without
+// adding, so offset + size cannot wrap), starts inside ftyp or overlaps the
+// previous sample, has a time outside [0, kRoundMaxPtsUs) or goes back more
+// than one frame within its track, or no longer matches the bytes at its
+// offset.
+[[nodiscard]] std::size_t UsableExact(
+		const std::uint8_t *media,
+		std::size_t mediaSize,
+		const RoundConfig &config,
+		const std::vector<RoundSample> &samples) {
+	const auto rate = AudioRate(config);
+	const auto audioFrameUs = rate ? AudioTime(0, 1, rate) : 0;
+	auto lastPts = std::vector<std::int64_t>(config.tracks.size(), -1);
+	auto previousEnd = std::uint64_t(FtypEnd(media, mediaSize));
+	for (auto i = std::size_t(0); i != samples.size(); ++i) {
+		const auto &sample = samples[i];
+		if (!sample.size
+			|| sample.track >= config.tracks.size()
+			|| sample.offset > mediaSize
+			|| sample.size > mediaSize - sample.offset
+			|| sample.offset < previousEnd
+			|| sample.ptsUs < 0
+			|| sample.ptsUs >= kRoundMaxPtsUs) {
+			return i;
+		}
+		const auto video = (config.tracks[sample.track].kind
+			== RoundTrackKind::Video);
+		const auto tolerance = video ? kRoundMinVideoStepUs : audioFrameUs;
+		auto &last = lastPts[sample.track];
+		if ((last >= 0 && sample.ptsUs < last - tolerance)
+			|| !MatchesMedia(media, config, sample)) {
+			return i;
+		}
+		last = sample.ptsUs;
+		previousEnd = sample.offset + sample.size;
+	}
+	return samples.size();
+}
+
 } // namespace
 
 RoundRecovery RepairRound(
 		const std::uint8_t *media,
 		std::size_t mediaSize,
 		const RoundConfig &config,
-		const std::vector<RoundSample> &exact,
+		const std::vector<RoundSample> &journaled,
 		const AacFrameMeasure &measure) {
+	const auto usable = UsableExact(media, mediaSize, config, journaled);
+	const auto exact = std::vector<RoundSample>(
+		journaled.begin(),
+		journaled.begin() + std::ptrdiff_t(usable));
 	auto result = RoundRecovery();
+	result.journalDropped = journaled.size() - usable;
 	result.config = config;
 	const auto videoTrack = config.videoTrack();
 	const auto audioTrack = config.audioTrack();
@@ -309,14 +381,9 @@ RoundRecovery RepairRound(
 
 	auto start = std::size_t(0);
 	if (!exact.empty()) {
-		start = std::size_t(std::min<std::uint64_t>(
-			exact.back().end(),
-			mediaSize));
-	} else if (mediaSize >= 8
-		&& BoxType(media, "ftyp")
-		&& Big32(media) >= 8
-		&& Big32(media) <= mediaSize) {
-		start = Big32(media);
+		start = std::size_t(exact.back().end());
+	} else if (const auto ftyp = FtypEnd(media, mediaSize)) {
+		start = ftyp;
 	} else {
 		result.reason = RoundUnrecoverable::NotMp4;
 		return result;
@@ -437,22 +504,7 @@ RoundRecovery RecoverRound(
 			: RoundUnrecoverable::NoConfig;
 		return result;
 	}
-	auto exact = std::vector<RoundSample>();
-	exact.reserve(read.samples.size());
-	auto previousEnd = std::uint64_t(0);
-	for (const auto &sample : read.samples) {
-		if (sample.end() > mediaSize
-			|| sample.offset < previousEnd
-			|| !sample.size
-			|| !MatchesMedia(media, read.config, sample)) {
-			break;
-		}
-		exact.push_back(sample);
-		previousEnd = sample.end();
-	}
-	auto result = RepairRound(media, mediaSize, read.config, exact, measure);
-	result.journalDropped = read.samples.size() - exact.size();
-	return result;
+	return RepairRound(media, mediaSize, read.config, read.samples, measure);
 }
 
 } // namespace Purple

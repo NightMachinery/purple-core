@@ -160,6 +160,15 @@ OggScan ScanOgg(const std::uint8_t *data, std::size_t size) {
 	while (offset < size && ReadPage(data, size, offset, page)) {
 		if (result.pages.empty()) {
 			ReadOpusHead(data, page, result);
+		} else {
+			// One logical stream, numbered without gaps: a good page of
+			// another stream, or one out of sequence (stale bytes of an
+			// earlier recording in a reused file), ends the walk.
+			const auto &previous = result.pages.back();
+			if (page.serial != result.pages.front().serial
+				|| page.sequence != previous.sequence + 1) {
+				break;
+			}
 		}
 		result.pages.push_back(page);
 		offset += page.size;
@@ -178,6 +187,14 @@ OggFinish FinaliseOgg(std::vector<std::uint8_t> &bytes) {
 		result.status = OggFinishStatus::Unrecoverable;
 		return result;
 	}
+	// The end-of-stream page must carry the final granule position (RFC
+	// 7845 end trimming), so trailing pages on which no packet ends go too.
+	// hasAudio() guarantees a page with a granule remains.
+	auto &pages = result.scan.pages;
+	while (pages.back().granule < 0) {
+		pages.pop_back();
+	}
+	Finish(result.scan);
 	result.status = OggFinishStatus::Finalised;
 	result.droppedBytes = bytes.size() - result.scan.goodBytes;
 	bytes.resize(std::size_t(result.scan.goodBytes));

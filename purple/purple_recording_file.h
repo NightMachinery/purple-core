@@ -17,10 +17,16 @@ option) any later version.
 // too. Every call reports failure instead of throwing.
 namespace Purple::RecordingFile {
 
-// The whole file into `bytes'. False if it cannot be opened or read.
+// The largest file the repairs read whole: a voice recording beyond this is
+// not one of ours.
+inline constexpr std::uint64_t kMaxBytes = 512ULL * 1024 * 1024;
+
+// The whole file into `bytes'. False, with `bytes' empty, if it cannot be
+// opened or read, is larger than `maxBytes', or does not fit in memory.
 [[nodiscard]] bool ReadAll(
 	const std::string &path,
-	std::vector<std::uint8_t> &bytes);
+	std::vector<std::uint8_t> &bytes,
+	std::uint64_t maxBytes = kMaxBytes);
 
 // Overwrites `size' bytes at `offset' without truncating the file.
 [[nodiscard]] bool WriteAt(

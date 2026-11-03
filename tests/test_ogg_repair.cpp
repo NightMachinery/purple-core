@@ -44,7 +44,8 @@ void AppendPage(
 		std::int64_t granule,
 		std::uint32_t sequence,
 		const std::vector<Bytes> &packets,
-		bool openTail = false) {
+		bool openTail = false,
+		std::uint32_t serial = 0x50555250U) {
 	auto lacing = Bytes();
 	auto body = Bytes();
 	for (auto p = std::size_t(0); p != packets.size(); ++p) {
@@ -68,7 +69,7 @@ void AppendPage(
 	out.resize(out.size() + 8 + 4 + 4 + 4);
 	Put32(out, start + 6, std::uint32_t(std::uint64_t(granule)));
 	Put32(out, start + 10, std::uint32_t(std::uint64_t(granule) >> 32));
-	Put32(out, start + 14, 0x50555250U);
+	Put32(out, start + 14, serial);
 	Put32(out, start + 18, sequence);
 	out.push_back(std::uint8_t(lacing.size()));
 	out.insert(out.end(), lacing.begin(), lacing.end());
@@ -284,6 +285,60 @@ void TestCorruptMiddle() {
 	CHECK(ScanOgg(lying.data(), lying.size()).pages.size() == 5);
 }
 
+// P3-3: one logical stream, numbered without gaps. Stale pages of an earlier
+// recording left in a reused file have good CRCs but another serial or a
+// sequence that does not follow; the walk stops there.
+void TestStaleStream() {
+	Section = "stale stream";
+	auto bytes = Voice(10, false);
+	const auto size = bytes.size();
+	// An earlier recording's pages: another serial.
+	AppendPage(bytes, 0, 312 + 500 * 960, 12, { Packet(7, 100) }, false, 0x11111111U);
+	AppendPage(bytes, 0, 312 + 501 * 960, 13, { Packet(8, 100) }, false, 0x11111111U);
+	const auto other = ScanOgg(bytes.data(), bytes.size());
+	CHECK(other.pages.size() == 12);
+	CHECK(other.goodBytes == size);
+	CHECK(other.durationMs == 200);
+	auto copy = bytes;
+	const auto finish = FinaliseOgg(copy);
+	CHECK(finish.status == OggFinishStatus::Finalised);
+	CHECK(copy.size() == size);
+	CHECK(finish.scan.durationMs == 200);
+
+	// The same serial, but the sequence jumps (a gap, or old pages).
+	auto gap = Voice(10, false);
+	AppendPage(gap, 0, 312 + 500 * 960, 40, { Packet(7, 100) });
+	CHECK(ScanOgg(gap.data(), gap.size()).pages.size() == 12);
+	auto repeat = Voice(10, false);
+	AppendPage(repeat, 0, 312 + 500 * 960, 5, { Packet(7, 100) });
+	CHECK(ScanOgg(repeat.data(), repeat.size()).pages.size() == 12);
+	// The next sequence number is accepted.
+	auto next = Voice(10, false);
+	AppendPage(next, 0, 312 + 11 * 960, 12, { Packet(7, 100) });
+	CHECK(ScanOgg(next.data(), next.size()).pages.size() == 13);
+}
+
+// P3-4: the end-of-stream flag goes on a page with a granule position.
+void TestEosGranule() {
+	Section = "eos granule";
+	auto open = Voice(10, false);
+	const auto size = open.size();
+	AppendPage(open, 0, -1, 12, { Packet(99, 510) }, true);
+	AppendPage(open, OggPage::kContinued, -1, 13, { Packet(98, 255) }, true);
+	const auto finish = FinaliseOgg(open);
+	CHECK(finish.status == OggFinishStatus::Finalised);
+	CHECK(open.size() == size);
+	CHECK(finish.droppedBytes > 0);
+	CHECK(finish.endOfStreamSet);
+	CHECK(finish.scan.pages.size() == 12);
+	CHECK(finish.scan.pages.back().granule == 312 + 10 * 960);
+	CHECK(finish.scan.durationMs == 200);
+	CHECK(open == Voice(10, true));
+	auto again = open;
+	CHECK(FinaliseOgg(again).status == OggFinishStatus::Clean);
+	CHECK(again == open);
+}
+
 void TestUnrecoverable() {
 	Section = "unrecoverable";
 	auto empty = Bytes();
@@ -335,6 +390,13 @@ void TestFile() {
 	CHECK(ScanOgg(onDisk.data(), onDisk.size()).clean());
 	CHECK(onDisk == Voice(24, true));
 
+	// P3-1: a file above the cap is refused, not read in part.
+	auto capped = Bytes{ 1, 2, 3 };
+	CHECK(!RecordingFile::ReadAll(path, capped, onDisk.size() - 1));
+	CHECK(capped.empty());
+	CHECK(RecordingFile::ReadAll(path, capped, onDisk.size()));
+	CHECK(capped == onDisk);
+
 	// Finalising again finds it clean and leaves it alone.
 	CHECK(FinaliseOggFile(path).status == OggFinishStatus::Clean);
 
@@ -353,6 +415,8 @@ int main() {
 	TestMissingEos();
 	TestTruncatedPage();
 	TestCorruptMiddle();
+	TestStaleStream();
+	TestEosGranule();
 	TestUnrecoverable();
 	TestFile();
 	std::printf("%d checks, %d failures\n", Checks, Failures);

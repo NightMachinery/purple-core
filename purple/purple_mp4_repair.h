@@ -45,6 +45,9 @@ inline constexpr std::uint32_t kRoundMaxVideoSample = 1024 * 1024;
 inline constexpr std::uint32_t kRoundMaxAacFrame = 8192;
 // A repaired video sample is at least this much after the previous one.
 inline constexpr std::int64_t kRoundMinVideoStepUs = 16667;
+// Journaled times at or above this (2^40 us, about 12.7 days) are damage, so
+// the timing arithmetic stays far from overflow.
+inline constexpr std::int64_t kRoundMaxPtsUs = std::int64_t(1) << 40;
 
 enum class RoundRecoveryStatus {
 	// Every sample came from the journal; at most a torn last sample was
@@ -88,8 +91,9 @@ struct RoundRecovery {
 	std::size_t repairedSamples = 0;
 
 	// Journal samples not used: past the end of the media file (not on disk
-	// yet), or not matching the bytes there (the file was rewritten). A
-	// nonzero count, or a nonzero repairedSamples, makes the journal stale.
+	// yet), not matching the bytes there (the file was rewritten), or with
+	// values no recorder writes (see RepairRound). A nonzero count, or a
+	// nonzero repairedSamples, makes the journal stale.
 	std::size_t journalDropped = 0;
 
 	// Where the scan started and stopped, and the bytes after that it could
@@ -104,19 +108,23 @@ struct RoundRecovery {
 	std::int64_t encoderOffsetUs = 0;
 };
 
-// Scans `media' from `exact''s last sample (or after `ftyp') and returns the
-// exact samples followed by the repaired ones. `exact' must already be
-// checked against the file; RecoverRound() does that.
+// Keeps the journaled samples from the first while they are usable, then
+// scans `media' from the last kept one (or after `ftyp') and returns the kept
+// samples followed by the repaired ones. A journaled sample is not usable,
+// and it and every later one are counted in journalDropped, when it is
+// empty, names an unknown track, does not lie inside the media file, starts
+// inside ftyp or overlaps the previous sample, has a time outside
+// [0, kRoundMaxPtsUs), goes back more than one frame within its track, or
+// (video) no longer matches the bytes at its offset.
 [[nodiscard]] RoundRecovery RepairRound(
 	const std::uint8_t *media,
 	std::size_t mediaSize,
 	const RoundConfig &config,
-	const std::vector<RoundSample> &exact,
+	const std::vector<RoundSample> &journaled,
 	const AacFrameMeasure &measure);
 
-// The whole recovery: reads the journal, drops its samples that are past the
-// end of the media file or do not match the bytes there, and repairs the
-// rest. `journal' may be empty (no journal: unrecoverable, there is no config
+// The whole recovery: reads the journal and hands its config and samples to
+// RepairRound. `journal' may be empty (no journal: unrecoverable, there is no config
 // header).
 [[nodiscard]] RoundRecovery RecoverRound(
 	const std::uint8_t *media,

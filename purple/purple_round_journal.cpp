@@ -9,6 +9,7 @@ option) any later version.
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstring>
 
 namespace Purple {
@@ -366,7 +367,10 @@ RoundJournal ReadRoundJournal(const std::uint8_t *data, std::size_t size) {
 				sample.size = batch.u32();
 				sample.offset = batch.u64();
 				sample.ptsUs = std::int64_t(batch.u64());
-				if (sample.track >= result.config.tracks.size()) {
+				// A sample whose end does not fit 64 bits is damage, so no
+				// reader of samples can meet an offset + size that wraps.
+				if (sample.track >= result.config.tracks.size()
+					|| sample.offset > UINT64_MAX - sample.size) {
 					valid = false;
 					break;
 				}
