@@ -132,6 +132,9 @@ struct SyncChatBinding {
 	// The user chose to see the bound chat in Purple's chat lists, which
 	// hide it otherwise. Written only when set.
 	bool listed = false;
+	// Candidates whose full info failed the magic rules: channel id -> unix
+	// time. Lookups skip them until a manual check. Written only when set.
+	std::map<uint64_t, int64_t> rejected;
 	// Opaque per-login authority supplied by the client, never logged.
 	QString login;
 	QJsonObject preserved;
@@ -159,6 +162,11 @@ void RecordSyncChatWait(
 void RaiseSyncChatProblem(SyncChatBinding &binding, SyncChatProblem problem);
 // The user acted; the next lookup decides afresh.
 void ClearSyncChatProblem(SyncChatBinding &binding);
+// A manual check: every rejected candidate is considered again.
+void ReadmitSyncChatCandidates(SyncChatBinding &binding);
+[[nodiscard]] bool SyncChatCandidateRejected(
+	const SyncChatBinding &binding,
+	uint64_t channelId);
 
 enum class SyncChatLookupAction {
 	Use,
@@ -208,7 +216,8 @@ struct SyncChatLookupPlan {
 [[nodiscard]] SyncChatLookupPlan PlanSyncChatLookup(
 	const SyncChatLookupInput &input);
 
-// Binds `chat` after a Verify read, or raises and returns its problem.
+// Binds `chat` after a Verify read, or returns its problem. The bound chat's
+// problem is raised; any other candidate is only rejected.
 SyncChatProblem CompleteSyncChatVerify(
 	SyncChatBinding &binding,
 	const MagicChatCandidate &chat,

@@ -40,6 +40,8 @@ unknown fields) records this device's choice for one account:
 - the migration step;
 - whether the user chose to see the chat in Purple's chat lists (`listed`,
   written only when set);
+- candidates that failed verification (`rejected`: channel id and time, at
+  most 16, written only when set);
 - an opaque login authority supplied by the client.
 
 `RecordSyncChatWait` only extends a deadline. `SyncChatWaitUntil` tells every
@@ -69,7 +71,13 @@ Problem.
   so the chat can still arrive through updates.
 
 `CompleteSyncChatVerify` checks fresh full info. It either binds the chat in
-magic mode, finishing any creation record, or raises the problem.
+magic mode, finishing any creation record, or returns the problem. Only a
+problem of the bound chat itself is raised. Any other candidate (an older chat
+seen while bound, or a pick while unbound) is rejected instead: the plan skips
+it from then on, so sync keeps working in the bound chat, and an unbound lookup
+tries the next candidate. MagicIneligible is raised only when no candidate is
+left. A manual check calls `ReadmitSyncChatCandidates`, so every rejected chat
+is considered again.
 
 ## Moving the state into the bound chat
 
@@ -102,7 +110,8 @@ never needs its own merge rules.
 
 `tests/test_sync_chat_magic.cpp` covers the title, every refusal, the oldest
 pick, the codec round trip and refusals, the persisted waits, show-once
-problems, the unbound, magic and manual plans, and verification.
+problems, the unbound, magic and manual plans, verification and rejected
+candidates.
 It also covers moves that abandon a stage, keep the same chat or are refused.
 `tests/test_sync_auto.cpp` covers the first publish after a move, a move that
 abandoned a stage, a moved record with a step in flight, a later

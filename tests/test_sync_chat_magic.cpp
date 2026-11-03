@@ -318,10 +318,63 @@ void TestVerify() {
 	CHECK(binding.createStep == SyncChatCreateStep::None && !binding.created);
 	auto extra = Magic(41); extra.facts.otherAdmins = 1;
 	CHECK(CompleteSyncChatVerify(binding, extra, Now) == SyncChatProblem::ExtraAdmin);
-	CHECK(binding.problem == SyncChatProblem::ExtraAdmin && binding.chat == Channel(40));
-	ClearSyncChatProblem(binding);
+	CHECK(binding.problem == SyncChatProblem::None && binding.chat == Channel(40));
+	CHECK(SyncChatCandidateRejected(binding, 41) && !SyncChatCandidateRejected(binding, 40));
 	CHECK(CompleteSyncChatVerify(binding, Magic(42, false), Now) == SyncChatProblem::MagicIneligible);
+	CHECK(binding.problem == SyncChatProblem::None && SyncChatCandidateRejected(binding, 42));
+	auto bound = Magic(40); bound.facts.otherMembers = 1;
+	CHECK(CompleteSyncChatVerify(binding, bound, Now) == SyncChatProblem::ExtraMember);
+	CHECK(binding.problem == SyncChatProblem::ExtraMember && !SyncChatCandidateRejected(binding, 40));
 	CHECK(SerializeSyncChatBinding(binding).has_value());
+}
+
+void TestRejected() {
+	Section = "a candidate failing verification is skipped, not raised";
+	auto input = SyncChatLookupInput();
+	input.binding = Bound(20);
+	input.now = Now;
+	input.boundState = SyncChatBoundState::Present;
+	input.bound = Magic(20);
+	input.visible = { Magic(15), Magic(20) };
+	auto plan = PlanSyncChatLookup(input);
+	CHECK(plan.action == SyncChatLookupAction::Verify && plan.chat == Channel(15) && plan.rebind);
+	auto older = Magic(15); older.facts.otherMembers = 1;
+	CHECK(CompleteSyncChatVerify(input.binding, older, Now) == SyncChatProblem::ExtraMember);
+	CHECK(input.binding.problem == SyncChatProblem::None && input.binding.chat == Channel(20));
+	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Use);
+	input.visible = { Magic(15), Magic(12), Magic(20) };
+	plan = PlanSyncChatLookup(input);
+	CHECK(plan.action == SyncChatLookupAction::Verify && plan.chat == Channel(12));
+	const auto bytes = SerializeSyncChatBinding(input.binding);
+	CHECK(bytes && bytes->contains("\"rejected\":{\"15\":\""));
+	const auto parsed = bytes ? ParseSyncChatBinding(*bytes) : std::nullopt;
+	CHECK(parsed && *parsed == input.binding);
+	ReadmitSyncChatCandidates(input.binding);
+	CHECK(!SyncChatCandidateRejected(input.binding, 15));
+	CHECK(!SerializeSyncChatBinding(input.binding)->contains("rejected"));
+	CHECK(!ParseSyncChatBinding(QByteArray(R"({"create":{"at":"0","step":"none"},"login":"","migration":"none","mode":"none","problem":"none","problemShown":false,"rejected":{},"verifiedAt":"0","version":1,"waits":{}})")));
+	CHECK(!ParseSyncChatBinding(QByteArray(R"({"create":{"at":"0","step":"none"},"login":"","migration":"none","mode":"none","problem":"none","problemShown":false,"rejected":{"07":"1"},"verifiedAt":"0","version":1,"waits":{}})")));
+
+	Section = "unbound: the next candidate, and magic_ineligible only when none is left";
+	auto unbound = SyncChatLookupInput();
+	unbound.now = Now;
+	unbound.visible = { Magic(6), Magic(9) };
+	auto bad = Magic(6); bad.facts.otherAdmins = 1;
+	CHECK(CompleteSyncChatVerify(unbound.binding, bad, Now) == SyncChatProblem::ExtraAdmin);
+	CHECK(unbound.binding.problem == SyncChatProblem::None && !unbound.binding.chat);
+	plan = PlanSyncChatLookup(unbound);
+	CHECK(plan.action == SyncChatLookupAction::Verify && plan.chat == Channel(9));
+	CHECK(CompleteSyncChatVerify(unbound.binding, Magic(9, false), Now) == SyncChatProblem::MagicIneligible);
+	plan = PlanSyncChatLookup(unbound);
+	CHECK(plan.action == SyncChatLookupAction::Problem && plan.problem == SyncChatProblem::MagicIneligible);
+
+	Section = "the rejection list stays bounded";
+	auto full = SyncChatBinding();
+	for (auto id = 100; id < 120; ++id) {
+		CHECK(CompleteSyncChatVerify(full, Magic(id, false), Now + id) == SyncChatProblem::MagicIneligible);
+	}
+	CHECK(full.rejected.size() == 16 && !SyncChatCandidateRejected(full, 100) && SyncChatCandidateRejected(full, 119));
+	CHECK(SerializeSyncChatBinding(full).has_value());
 }
 
 SyncLocalState Staged(bool confirmFirst) {
@@ -407,6 +460,7 @@ int main() {
 	TestMagic();
 	TestManual();
 	TestVerify();
+	TestRejected();
 	TestMoveState();
 	std::printf("%d checks, %d failures\n", Checks, Failures);
 	return Failures ? 1 : 0;

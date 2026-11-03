@@ -22,6 +22,7 @@ namespace {
 
 constexpr auto kBindingLimit = 16 * 1024;
 constexpr auto kWaitLimit = 32;
+constexpr auto kRejectLimit = 16;
 
 const auto Problems = std::array<std::pair<SyncChatProblem, const char*>, 16>{ {
 	{ SyncChatProblem::None, "none" },
@@ -151,6 +152,15 @@ SyncChatLookupPlan Manual(const SyncChatLookupInput &input) {
 	return Act(SyncChatLookupAction::Use, chat);
 }
 
+std::vector<MagicChatCandidate> Admitted(
+		const SyncChatBinding &binding,
+		std::vector<MagicChatCandidate> chats) {
+	chats.erase(std::remove_if(chats.begin(), chats.end(), [&](const MagicChatCandidate &chat) {
+		return SyncChatCandidateRejected(binding, chat.channelId);
+	}), chats.end());
+	return chats;
+}
+
 SyncChatLookupPlan Magic(const SyncChatLookupInput &input) {
 	const auto &binding = input.binding;
 	const auto &chat = *binding.chat;
@@ -164,7 +174,7 @@ SyncChatLookupPlan Magic(const SyncChatLookupInput &input) {
 	if (check.verdict == MagicChatVerdict::Ineligible) { return Problem(check.problem, true, chat); }
 	auto pool = input.visible;
 	if (input.allChats) { pool.insert(pool.end(), input.allChats->begin(), input.allChats->end()); }
-	const auto oldest = PickMagicChat(pool);
+	const auto oldest = PickMagicChat(Admitted(binding, std::move(pool)));
 	if (oldest && *oldest < chat.id) { return Act(SyncChatLookupAction::Verify, Channel(*oldest), true); }
 	const auto stale = binding.verifiedAt <= 0 || binding.verifiedAt > input.now
 		|| input.now - binding.verifiedAt >= kSyncChatVerifySeconds;
@@ -175,7 +185,7 @@ SyncChatLookupPlan Magic(const SyncChatLookupInput &input) {
 
 SyncChatLookupPlan Unbound(const SyncChatLookupInput &input) {
 	const auto &binding = input.binding;
-	if (const auto pick = PickMagicChat(input.visible)) {
+	if (const auto pick = PickMagicChat(Admitted(binding, input.visible))) {
 		return Act(SyncChatLookupAction::Verify, Channel(*pick), true);
 	}
 	if (!input.visible.empty()) { return Problem(SyncChatProblem::MagicIneligible, true); }
@@ -185,7 +195,7 @@ SyncChatLookupPlan Unbound(const SyncChatLookupInput &input) {
 		}
 		return Act(SyncChatLookupAction::ProveAbsent);
 	}
-	if (const auto pick = PickMagicChat(*input.allChats)) {
+	if (const auto pick = PickMagicChat(Admitted(binding, *input.allChats))) {
 		return Act(SyncChatLookupAction::Verify, Channel(*pick), true);
 	}
 	if (!input.allChats->empty()) { return Problem(SyncChatProblem::MagicIneligible, true); }
@@ -245,6 +255,7 @@ std::optional<uint64_t> PickMagicChat(const std::vector<MagicChatCandidate> &cha
 std::optional<QByteArray> SerializeSyncChatBinding(const SyncChatBinding &binding) {
 	if (binding.version != 1 || (binding.mode != SyncChatBindingMode::None) != bool(binding.chat)
 		|| binding.verifiedAt < 0 || binding.createAt < 0 || int(binding.waits.size()) > kWaitLimit
+		|| int(binding.rejected.size()) > kRejectLimit
 		|| (binding.problem == SyncChatProblem::None && binding.problemShown)
 		|| SyncChatProblemCode(binding.problem).isEmpty()
 		|| Code(Modes, binding.mode).isEmpty() || Code(CreateSteps, binding.createStep).isEmpty()
@@ -285,6 +296,16 @@ std::optional<QByteArray> SerializeSyncChatBinding(const SyncChatBinding &bindin
 		object.insert(u"listed"_q, true);
 	} else {
 		object.remove(u"listed"_q);
+	}
+	if (binding.rejected.empty()) {
+		object.remove(u"rejected"_q);
+	} else {
+		auto rejected = QJsonObject();
+		for (const auto &[id, at] : binding.rejected) {
+			if (id == 0 || at < 0) { return std::nullopt; }
+			rejected.insert(QString::number(id), QString::number(at));
+		}
+		object.insert(u"rejected"_q, rejected);
 	}
 	const auto json = CanonicalizeSyncJson(QJsonDocument(object).toJson(QJsonDocument::Compact));
 	return (json && json.canonical.size() <= kBindingLimit) ? std::make_optional(json.canonical) : std::nullopt;
@@ -349,6 +370,18 @@ std::optional<SyncChatBinding> ParseSyncChatBinding(const QByteArray &bytes) {
 		if (!listed.isBool() || !listed.toBool()) { return std::nullopt; }
 		result.listed = true;
 	}
+	if (object.contains(u"rejected"_q)) {
+		const auto value = object.take(u"rejected"_q);
+		const auto rejected = value.toObject();
+		if (!value.isObject() || rejected.isEmpty() || rejected.size() > kRejectLimit) { return std::nullopt; }
+		for (auto i = rejected.begin(); i != rejected.end(); ++i) {
+			auto ok = false;
+			const auto id = i.key().toULongLong(&ok);
+			const auto at = Time(i.value());
+			if (!ok || id == 0 || QString::number(id) != i.key() || !at) { return std::nullopt; }
+			result.rejected.emplace(id, *at);
+		}
+	}
 	result.preserved = object;
 	return SerializeSyncChatBinding(result) ? std::make_optional(result) : std::nullopt;
 }
@@ -375,6 +408,14 @@ void ClearSyncChatProblem(SyncChatBinding &binding) {
 	binding.problemShown = false;
 }
 
+void ReadmitSyncChatCandidates(SyncChatBinding &binding) {
+	binding.rejected.clear();
+}
+
+bool SyncChatCandidateRejected(const SyncChatBinding &binding, uint64_t channelId) {
+	return binding.rejected.contains(channelId);
+}
+
 SyncChatLookupPlan PlanSyncChatLookup(const SyncChatLookupInput &input) {
 	const auto &binding = input.binding;
 	if (binding.problem != SyncChatProblem::None) {
@@ -390,7 +431,17 @@ SyncChatProblem CompleteSyncChatVerify(SyncChatBinding &binding, const MagicChat
 		: check.verdict == MagicChatVerdict::Unverified ? SyncChatProblem::MagicIneligible
 		: check.problem;
 	if (problem != SyncChatProblem::None) {
-		RaiseSyncChatProblem(binding, problem);
+		if (binding.chat == Channel(chat.channelId)) {
+			RaiseSyncChatProblem(binding, problem);
+		} else {
+			// WHY: an older chat someone else joined must not pause sync in a working one;
+			// the lookup skips it and picks again.
+			if (int(binding.rejected.size()) >= kRejectLimit && !binding.rejected.contains(chat.channelId)) {
+				binding.rejected.erase(std::min_element(binding.rejected.begin(), binding.rejected.end(),
+					[](const auto &a, const auto &b) { return a.second < b.second; }));
+			}
+			binding.rejected[chat.channelId] = std::max<int64_t>(now, 0);
+		}
 		return problem;
 	}
 	binding.mode = SyncChatBindingMode::Magic;
