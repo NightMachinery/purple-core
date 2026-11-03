@@ -24,7 +24,7 @@ constexpr auto kBindingLimit = 16 * 1024;
 constexpr auto kWaitLimit = 32;
 constexpr auto kRejectLimit = 16;
 
-const auto Problems = std::array<std::pair<SyncChatProblem, const char*>, 16>{ {
+const auto Problems = std::array<std::pair<SyncChatProblem, const char*>, 17>{ {
 	{ SyncChatProblem::None, "none" },
 	{ SyncChatProblem::ChatGone, "chat_gone" },
 	{ SyncChatProblem::ChatLeft, "chat_left" },
@@ -41,6 +41,7 @@ const auto Problems = std::array<std::pair<SyncChatProblem, const char*>, 16>{ {
 	{ SyncChatProblem::CreateLimit, "create_limit" },
 	{ SyncChatProblem::MagicIneligible, "magic_ineligible" },
 	{ SyncChatProblem::SpaceMismatch, "space_mismatch" },
+	{ SyncChatProblem::RequestRefused, "request_refused" },
 } };
 
 const auto Modes = std::array<std::pair<SyncChatBindingMode, const char*>, 3>{ {
@@ -128,10 +129,11 @@ SyncChatLookupPlan Act(SyncChatLookupAction action, std::optional<PeerToken> cha
 	return result;
 }
 
-SyncChatLookupPlan WaitUntil(int64_t retryAt) {
+SyncChatLookupPlan WaitUntil(int64_t retryAt, bool telegram = false) {
 	auto result = SyncChatLookupPlan();
 	result.action = SyncChatLookupAction::Wait;
 	result.retryAt = retryAt;
+	result.telegram = telegram;
 	return result;
 }
 
@@ -166,15 +168,14 @@ SyncChatLookupPlan Magic(const SyncChatLookupInput &input) {
 	const auto &chat = *binding.chat;
 	if (chat.kind != PeerTokenKind::Channel) { return Problem(SyncChatProblem::NotMegagroup, true, chat); }
 	switch (input.boundState) {
-	case SyncChatBoundState::Unknown: return Act(SyncChatLookupAction::Wait);
+	case SyncChatBoundState::Unknown:
+		return input.listsComplete ? Problem(SyncChatProblem::ChatGone, true, chat) : Act(SyncChatLookupAction::Wait);
 	case SyncChatBoundState::Gone: return Problem(SyncChatProblem::ChatGone, true, chat);
 	case SyncChatBoundState::Present: break;
 	}
 	const auto check = CheckMagicChat(input.bound);
 	if (check.verdict == MagicChatVerdict::Ineligible) { return Problem(check.problem, true, chat); }
-	auto pool = input.visible;
-	if (input.allChats) { pool.insert(pool.end(), input.allChats->begin(), input.allChats->end()); }
-	const auto oldest = PickMagicChat(Admitted(binding, std::move(pool)));
+	const auto oldest = PickMagicChat(Admitted(binding, input.visible));
 	if (oldest && *oldest < chat.id) { return Act(SyncChatLookupAction::Verify, Channel(*oldest), true); }
 	const auto stale = binding.verifiedAt <= 0 || binding.verifiedAt > input.now
 		|| input.now - binding.verifiedAt >= kSyncChatVerifySeconds;
@@ -189,23 +190,14 @@ SyncChatLookupPlan Unbound(const SyncChatLookupInput &input) {
 		return Act(SyncChatLookupAction::Verify, Channel(*pick), true);
 	}
 	if (!input.visible.empty()) { return Problem(SyncChatProblem::MagicIneligible, true); }
-	if (!input.allChats) {
-		if (const auto until = SyncChatWaitUntil(binding, QString::fromLatin1(kSyncChatAllChatsMethod), input.now)) {
-			return WaitUntil(until);
-		}
-		return Act(SyncChatLookupAction::ProveAbsent);
-	}
-	if (const auto pick = PickMagicChat(Admitted(binding, *input.allChats))) {
-		return Act(SyncChatLookupAction::Verify, Channel(*pick), true);
-	}
-	if (!input.allChats->empty()) { return Problem(SyncChatProblem::MagicIneligible, true); }
+	if (!input.listsComplete) { return Act(SyncChatLookupAction::Wait); }
 	if (binding.createStep != SyncChatCreateStep::None
 		&& binding.createAt <= input.now
 		&& input.now - binding.createAt < kSyncChatCreateUncertainSeconds) {
 		return WaitUntil(binding.createAt + kSyncChatCreateUncertainSeconds);
 	}
 	if (const auto until = SyncChatWaitUntil(binding, QString::fromLatin1(kSyncChatCreateMethod), input.now)) {
-		return WaitUntil(until);
+		return WaitUntil(until, true);
 	}
 	return Act(SyncChatLookupAction::Create);
 }
@@ -425,23 +417,54 @@ SyncChatLookupPlan PlanSyncChatLookup(const SyncChatLookupInput &input) {
 	return binding.mode == SyncChatBindingMode::Manual ? Manual(input) : Magic(input);
 }
 
+SyncChatError ClassifySyncChatError(int code, const QString &type, bool timeout) {
+	for (const auto prefix : { "FLOOD_WAIT_", "FLOOD_PREMIUM_WAIT_", "SLOWMODE_WAIT_" }) {
+		const auto name = QString::fromLatin1(prefix);
+		if (!type.startsWith(name)) { continue; }
+		auto ok = false;
+		const auto seconds = type.mid(name.size()).toLongLong(&ok);
+		if (ok && seconds >= 0 && QString::number(seconds) == type.mid(name.size())) {
+			return { SyncChatErrorKind::Wait, std::min<int64_t>(seconds, 366 * 24 * 60 * 60) };
+		}
+	}
+	if (timeout || code < 0 || code == 401 || (code >= 500 && code < 600)) { return { SyncChatErrorKind::Transient }; }
+	return { SyncChatErrorKind::Refused };
+}
+
+SyncChatProblem SyncChatRefusalProblem(const QString &method, const QString &type) {
+	if (method == QLatin1String(kSyncChatCreateMethod)
+		&& (type.contains(u"TOO_MUCH"_q) || type.startsWith(u"USER_RESTRICTED"_q))) {
+		return SyncChatProblem::CreateLimit;
+	} else if (method == QLatin1String(kSyncChatFullInfoMethod)
+		&& (type == u"CHANNEL_PRIVATE"_q || type == u"CHANNEL_INVALID"_q)) {
+		return SyncChatProblem::ChatGone;
+	}
+	return SyncChatProblem::RequestRefused;
+}
+
+void RecordSyncChatVerifyProblem(SyncChatBinding &binding, uint64_t channelId, SyncChatProblem problem, int64_t now) {
+	if (problem == SyncChatProblem::None) {
+		return;
+	} else if (binding.chat == Channel(channelId)) {
+		RaiseSyncChatProblem(binding, problem);
+		return;
+	}
+	// WHY: an older chat someone else joined must not pause sync in a working one;
+	// the lookup skips it and picks again.
+	if (int(binding.rejected.size()) >= kRejectLimit && !binding.rejected.contains(channelId)) {
+		binding.rejected.erase(std::min_element(binding.rejected.begin(), binding.rejected.end(),
+			[](const auto &a, const auto &b) { return a.second < b.second; }));
+	}
+	binding.rejected[channelId] = std::max<int64_t>(now, 0);
+}
+
 SyncChatProblem CompleteSyncChatVerify(SyncChatBinding &binding, const MagicChatCandidate &chat, int64_t now) {
 	const auto check = CheckMagicChat(chat);
 	const auto problem = check.verdict == MagicChatVerdict::Eligible ? SyncChatProblem::None
 		: check.verdict == MagicChatVerdict::Unverified ? SyncChatProblem::MagicIneligible
 		: check.problem;
 	if (problem != SyncChatProblem::None) {
-		if (binding.chat == Channel(chat.channelId)) {
-			RaiseSyncChatProblem(binding, problem);
-		} else {
-			// WHY: an older chat someone else joined must not pause sync in a working one;
-			// the lookup skips it and picks again.
-			if (int(binding.rejected.size()) >= kRejectLimit && !binding.rejected.contains(chat.channelId)) {
-				binding.rejected.erase(std::min_element(binding.rejected.begin(), binding.rejected.end(),
-					[](const auto &a, const auto &b) { return a.second < b.second; }));
-			}
-			binding.rejected[chat.channelId] = std::max<int64_t>(now, 0);
-		}
+		RecordSyncChatVerifyProblem(binding, chat.channelId, problem, now);
 		return problem;
 	}
 	binding.mode = SyncChatBindingMode::Magic;

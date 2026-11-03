@@ -106,7 +106,7 @@ void TestPick() {
 void TestCodec() {
 	Section = "binding codec";
 	auto binding = Bound(77);
-	binding.waits.emplace(QString::fromLatin1(kSyncChatAllChatsMethod), Now + 43200);
+	binding.waits.emplace(QString::fromLatin1(kSyncChatCreateMethod), Now + 43200);
 	binding.createStep = SyncChatCreateStep::Archived;
 	binding.createAt = Now - 5;
 	binding.created = Channel(77);
@@ -153,7 +153,7 @@ void TestCodec() {
 void TestWaits() {
 	Section = "persisted waits";
 	auto binding = SyncChatBinding();
-	const auto method = QString::fromLatin1(kSyncChatAllChatsMethod);
+	const auto method = QString::fromLatin1(kSyncChatFullInfoMethod);
 	CHECK(SyncChatWaitUntil(binding, method, Now) == 0);
 	RecordSyncChatWait(binding, method, Now + 100);
 	RecordSyncChatWait(binding, method, Now + 50);
@@ -192,11 +192,11 @@ void TestProblems() {
 }
 
 void TestUnbound() {
-	Section = "unbound: local lists first, one absence proof, then create";
+	Section = "unbound: local lists first, complete lists prove absence, then create";
 	auto input = SyncChatLookupInput();
 	input.now = Now;
 	auto plan = PlanSyncChatLookup(input);
-	CHECK(plan.action == SyncChatLookupAction::ProveAbsent);
+	CHECK(plan.action == SyncChatLookupAction::Wait && plan.retryAt == 0 && !plan.telegram);
 	input.visible = { Magic(9), Magic(6, false) };
 	plan = PlanSyncChatLookup(input);
 	CHECK(plan.action == SyncChatLookupAction::Verify && plan.chat == Channel(6) && plan.rebind);
@@ -204,22 +204,22 @@ void TestUnbound() {
 	input.visible = { extra };
 	plan = PlanSyncChatLookup(input);
 	CHECK(plan.action == SyncChatLookupAction::Problem && plan.problem == SyncChatProblem::MagicIneligible && plan.show);
-	input.visible.clear();
-	RecordSyncChatWait(input.binding, QString::fromLatin1(kSyncChatAllChatsMethod), Now + 43200);
-	plan = PlanSyncChatLookup(input);
-	CHECK(plan.action == SyncChatLookupAction::Wait && plan.retryAt == Now + 43200);
-	input.binding.waits.clear();
-	input.allChats = std::vector<MagicChatCandidate>{ Magic(12) };
-	plan = PlanSyncChatLookup(input);
-	CHECK(plan.action == SyncChatLookupAction::Verify && plan.chat == Channel(12));
-	input.allChats = std::vector<MagicChatCandidate>{ extra };
+	input.listsComplete = true;
 	CHECK(PlanSyncChatLookup(input).problem == SyncChatProblem::MagicIneligible);
-	input.allChats = std::vector<MagicChatCandidate>();
+	input.visible.clear();
+	input.listsComplete = false;
+	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Wait);
+	input.listsComplete = true;
 	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Create);
+	RecordSyncChatWait(input.binding, QString::fromLatin1(kSyncChatCreateMethod), Now + 600);
+	plan = PlanSyncChatLookup(input);
+	CHECK(plan.action == SyncChatLookupAction::Wait && plan.retryAt == Now + 600 && plan.telegram);
+	input.binding.waits.clear();
 	input.binding.createStep = SyncChatCreateStep::Uncertain;
 	input.binding.createAt = Now - 10;
 	plan = PlanSyncChatLookup(input);
-	CHECK(plan.action == SyncChatLookupAction::Wait && plan.retryAt == Now - 10 + kSyncChatCreateUncertainSeconds);
+	CHECK(plan.action == SyncChatLookupAction::Wait && plan.retryAt == Now - 10 + kSyncChatCreateUncertainSeconds
+		&& !plan.telegram);
 	input.now = Now - 10 + kSyncChatCreateUncertainSeconds;
 	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Create);
 	input.now = Now;
@@ -234,6 +234,10 @@ void TestMagic() {
 	input.binding = Bound(20);
 	input.now = Now;
 	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Wait);
+	input.listsComplete = true;
+	auto gone = PlanSyncChatLookup(input);
+	CHECK(gone.action == SyncChatLookupAction::Problem && gone.problem == SyncChatProblem::ChatGone && gone.show);
+	input.listsComplete = false;
 	input.boundState = SyncChatBoundState::Gone;
 	auto plan = PlanSyncChatLookup(input);
 	CHECK(plan.action == SyncChatLookupAction::Problem && plan.problem == SyncChatProblem::ChatGone);
@@ -277,6 +281,43 @@ void TestMagic() {
 	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Verify);
 }
 
+void TestErrors() {
+	Section = "only Telegram's waits are waits; refusals are problems";
+	const auto kind = [](int code, const char *type, bool timeout = false) {
+		return ClassifySyncChatError(code, QString::fromLatin1(type), timeout);
+	};
+	CHECK(kind(420, "FLOOD_WAIT_30").kind == SyncChatErrorKind::Wait && kind(420, "FLOOD_WAIT_30").seconds == 30);
+	CHECK(kind(420, "FLOOD_PREMIUM_WAIT_5").seconds == 5);
+	CHECK(kind(400, "SLOWMODE_WAIT_12").kind == SyncChatErrorKind::Wait);
+	CHECK(kind(420, "FLOOD_WAIT_").kind == SyncChatErrorKind::Refused);
+	CHECK(kind(420, "FLOOD_WAIT_-3").kind == SyncChatErrorKind::Refused);
+	CHECK(kind(400, "INPUT_METHOD_INVALID_1_2").kind == SyncChatErrorKind::Refused);
+	CHECK(kind(400, "PEER_FLOOD").kind == SyncChatErrorKind::Refused);
+	CHECK(kind(400, "CHAT_ID_INVALID").kind == SyncChatErrorKind::Refused);
+	CHECK(kind(403, "CHAT_WRITE_FORBIDDEN").kind == SyncChatErrorKind::Refused);
+	CHECK(kind(406, "CHANNEL_PRIVATE").kind == SyncChatErrorKind::Refused);
+	CHECK(kind(0, "", true).kind == SyncChatErrorKind::Transient);
+	CHECK(kind(-1, "").kind == SyncChatErrorKind::Transient);
+	CHECK(kind(-503, "Timedout").kind == SyncChatErrorKind::Transient);
+	CHECK(kind(500, "INTERNAL").kind == SyncChatErrorKind::Transient);
+	CHECK(kind(401, "AUTH_KEY_UNREGISTERED").kind == SyncChatErrorKind::Transient);
+	const auto create = QString::fromLatin1(kSyncChatCreateMethod);
+	const auto full = QString::fromLatin1(kSyncChatFullInfoMethod);
+	CHECK(SyncChatRefusalProblem(create, u"CHANNELS_TOO_MUCH"_q) == SyncChatProblem::CreateLimit);
+	CHECK(SyncChatRefusalProblem(create, u"USER_RESTRICTED"_q) == SyncChatProblem::CreateLimit);
+	CHECK(SyncChatRefusalProblem(create, u"PEER_FLOOD"_q) == SyncChatProblem::RequestRefused);
+	CHECK(SyncChatRefusalProblem(full, u"CHANNEL_PRIVATE"_q) == SyncChatProblem::ChatGone);
+	CHECK(SyncChatRefusalProblem(full, u"INPUT_METHOD_INVALID"_q) == SyncChatProblem::RequestRefused);
+	CHECK(SyncChatProblemCode(SyncChatProblem::RequestRefused) == u"request_refused"_q);
+	CHECK(ParseSyncChatProblemCode(u"request_refused"_q) == SyncChatProblem::RequestRefused);
+	auto binding = Bound(20);
+	RecordSyncChatVerifyProblem(binding, 20, SyncChatProblem::RequestRefused, Now);
+	CHECK(binding.problem == SyncChatProblem::RequestRefused && !binding.problemShown && binding.rejected.empty());
+	binding = Bound(20);
+	RecordSyncChatVerifyProblem(binding, 15, SyncChatProblem::ChatGone, Now);
+	CHECK(binding.problem == SyncChatProblem::None && SyncChatCandidateRejected(binding, 15));
+}
+
 void TestManual() {
 	Section = "manual binding";
 	auto input = SyncChatLookupInput();
@@ -292,8 +333,7 @@ void TestManual() {
 	input.bound.facts.otherMembers = 0;
 	input.bound.facts.otherAdmins = 0;
 	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Use);
-	input.visible = { Magic(1) };
-	input.allChats = std::vector<MagicChatCandidate>{ Magic(2) };
+	input.visible = { Magic(1), Magic(2) };
 	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Use);
 	input.bound.facts.otherMembers = 1;
 	CHECK(PlanSyncChatLookup(input).problem == SyncChatProblem::ExtraMember);
@@ -458,6 +498,7 @@ int main() {
 	TestProblems();
 	TestUnbound();
 	TestMagic();
+	TestErrors();
 	TestManual();
 	TestVerify();
 	TestRejected();

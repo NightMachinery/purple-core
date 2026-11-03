@@ -49,8 +49,7 @@ caller, after a restart too, whether a method may be sent.
 
 ## Lookup
 
-`PlanSyncChatLookup` returns one of Use, Verify, Wait, ProveAbsent, Create or
-Problem.
+`PlanSyncChatLookup` returns one of Use, Verify, Wait, Create or Problem.
 
 - A recorded problem stays until the user acts (`ClearSyncChatProblem`). It is
   reported with `show` until the client records that it was shown. Raising a
@@ -65,10 +64,33 @@ Problem.
   or the local counts are unknown, unless that read is under a wait.
 - No binding: the oldest usable magic chat in the local lists is verified.
   Magic chats that are all ineligible are a Problem (MagicIneligible), never a
-  reason to create another. Otherwise one `messages.getAllChats` reply is the
-  absence proof (ProveAbsent). Only an empty reply leads to Create.
+  reason to create another. The absence proof is `listsComplete`: the client
+  reports that the account's main list and archive folder are both fully
+  loaded by its own upstream dialog loaders, unfiltered by any Work Mode view.
+  Until then the plan is Wait; with complete lists and no magic chat, Create.
+  There is no server-side search or `messages.getAllChats`, which is not in
+  the clients' pinned layer (the server answers 400 INPUT_METHOD_INVALID).
+- A magic binding whose chat is not in memory waits for the lists too. Once
+  they are complete, a chat still missing from them is gone (ChatGone).
 - A creation that was requested or uncertain blocks another one for 24 hours,
   so the chat can still arrive through updates.
+
+Only a wait from the binding (a flood Telegram asked for) sets `telegram` on
+the plan, so a client never words its own waits (lists loading, an uncertain
+creation) as Telegram's.
+
+`ClassifySyncChatError` sorts a failed lookup request:
+
+- Wait: FLOOD_WAIT_n, FLOOD_PREMIUM_WAIT_n and SLOWMODE_WAIT_n. The client
+  keeps the deadline in the binding.
+- Transient: a timeout, a network failure (negative code), 5xx or 401. The
+  client retries with its short backoff and records nothing.
+- Refused: anything else, such as 400 INPUT_METHOD_INVALID, PEER_FLOOD,
+  CHAT_*_INVALID, 403 or 406. `SyncChatRefusalProblem` names the problem:
+  CreateLimit for creation limits, ChatGone for a private or invalid channel's
+  full info, else RequestRefused. A refusal is a problem like any other: shown
+  once, pausing automatic sync until the user acts. For a candidate that is
+  not the bound chat, `RecordSyncChatVerifyProblem` only rejects it.
 
 `CompleteSyncChatVerify` checks fresh full info. It either binds the chat in
 magic mode, finishing any creation record, or returns the problem. Only a

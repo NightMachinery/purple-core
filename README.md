@@ -34,9 +34,9 @@ remain separate work.
 
 The [Magic Purple Sync chat](docs/sync-chat-magic.md) replaces search-based
 discovery: each device finds a private supergroup with that exact title in its
-local chat list, proves absence with one `messages.getAllChats` reply and only
-then creates one. A per-device binding keeps the chosen chat, persisted
-transient waits and show-once problems that pause automatic sync.
+local chat list, and creates one only once the main list and archive are
+fully loaded without it. A per-device binding keeps the chosen chat,
+Telegram's flood waits and show-once problems that pause automatic sync.
 
 ## Received-content archive
 

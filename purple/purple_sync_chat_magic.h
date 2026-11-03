@@ -24,8 +24,7 @@ namespace Purple {
 // The sync chat every device finds or creates itself; see docs/sync-chat-magic.md.
 inline constexpr auto kMagicSyncChatTitle = "Magic Purple Sync";
 
-// Telegram methods whose transient waits the binding remembers by name.
-inline constexpr auto kSyncChatAllChatsMethod = "messages.getAllChats";
+// Telegram methods whose flood waits the binding remembers by name.
 inline constexpr auto kSyncChatCreateMethod = "channels.createChannel";
 inline constexpr auto kSyncChatFullInfoMethod = "channels.getFullChannel";
 
@@ -55,6 +54,8 @@ enum class SyncChatProblem {
 	CreateLimit,
 	MagicIneligible,
 	SpaceMismatch,
+	// Telegram refused a lookup request outright (a 400-class error).
+	RequestRefused,
 };
 
 // Stable lowercase codes, used in the binding file and in diagnostics.
@@ -174,8 +175,6 @@ enum class SyncChatLookupAction {
 	Verify,
 	// Wait for a list, a load or the deadline in `retryAt`.
 	Wait,
-	// Read messages.getAllChats once and plan again with its result.
-	ProveAbsent,
 	Create,
 	Problem,
 };
@@ -195,8 +194,9 @@ struct SyncChatLookupInput {
 	MagicChatCandidate bound;
 	// Chats titled kMagicSyncChatTitle in the local lists.
 	std::vector<MagicChatCandidate> visible;
-	// Chats titled kMagicSyncChatTitle in a messages.getAllChats reply.
-	std::optional<std::vector<MagicChatCandidate>> allChats;
+	// The account's main list and archive folder are both fully loaded from the server, unfiltered: the only
+	// proof that no magic chat exists and that a bound chat missing from them is gone.
+	bool listsComplete = false;
 	// The trigger needs fresh evidence (manual check or an automatic post).
 	bool fresh = false;
 	int64_t now = 0;
@@ -209,12 +209,34 @@ struct SyncChatLookupPlan {
 	// Show the problem now: it has not been shown before.
 	bool show = false;
 	int64_t retryAt = 0;
+	// The wait is one Telegram asked for (a flood wait kept in the binding).
+	bool telegram = false;
 	// The plan's chat replaces the bound one.
 	bool rebind = false;
 };
 
 [[nodiscard]] SyncChatLookupPlan PlanSyncChatLookup(
 	const SyncChatLookupInput &input);
+
+enum class SyncChatErrorKind { Wait, Transient, Refused };
+
+struct SyncChatError {
+	SyncChatErrorKind kind = SyncChatErrorKind::Refused;
+	// Wait only: Telegram's seconds.
+	int64_t seconds = 0;
+};
+
+// Only FLOOD_WAIT_n, FLOOD_PREMIUM_WAIT_n and SLOWMODE_WAIT_n are waits. Timeouts, network failures (negative
+// codes), 5xx and 401 are transient. Anything else (400, 403, 406, PEER_FLOOD, an unknown method) is refused.
+[[nodiscard]] SyncChatError ClassifySyncChatError(int code, const QString &type, bool timeout);
+// The problem a refused lookup request raises.
+[[nodiscard]] SyncChatProblem SyncChatRefusalProblem(const QString &method, const QString &type);
+// A verify of `channelId` found `problem`: raised for the bound chat, a rejection for any other.
+void RecordSyncChatVerifyProblem(
+	SyncChatBinding &binding,
+	uint64_t channelId,
+	SyncChatProblem problem,
+	int64_t now);
 
 // Binds `chat` after a Verify read, or returns its problem. The bound chat's
 // problem is raised; any other candidate is only rejected.
