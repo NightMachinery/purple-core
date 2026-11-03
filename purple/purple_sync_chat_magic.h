@@ -211,4 +211,17 @@ SyncChatProblem CompleteSyncChatVerify(
 	const MagicChatCandidate &chat,
 	int64_t now);
 
+struct SyncStateMoveResult {
+	SyncChatMoveResult move;
+	// The abandoned config stage sequence, or 0.
+	uint64_t abandonedSeq = 0;
+};
+
+// Moves the state into the bound chat. A config stage still pending in the old
+// chat is abandoned: the old chat is never read again, so its outcome is moot.
+[[nodiscard]] SyncStateMoveResult MoveSyncStateToChat(
+	const SyncLocalState &state,
+	const PeerToken &chat,
+	uint64_t selfUserId = 0);
+
 }

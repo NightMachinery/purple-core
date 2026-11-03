@@ -393,4 +393,31 @@ SyncChatProblem CompleteSyncChatVerify(SyncChatBinding &binding, const MagicChat
 	return SyncChatProblem::None;
 }
 
+SyncStateMoveResult MoveSyncStateToChat(
+		const SyncLocalState &state,
+		const PeerToken &chat,
+		uint64_t selfUserId) {
+	auto result = SyncStateMoveResult();
+	const auto text = PeerTokenText(chat, selfUserId);
+	if (text && ParsePeerToken(*text) == state.chat) {
+		result.move.state = state;
+		return result;
+	}
+	auto next = state;
+	if (state.config.pendingSeq != 0) {
+		// WHY: only a v2 state may record an abandoned stage; the move makes it v2.
+		next.version = 2;
+		next.config.abandonedSeq = state.config.pendingSeq;
+		next.config.pendingSeq = 0;
+		next.configData.pending.clear();
+		result.abandonedSeq = next.config.abandonedSeq;
+	}
+	result.move = MoveSyncChat(next, chat, false, selfUserId);
+	if (!result.move) {
+		result.move.state = state;
+		result.abandonedSeq = 0;
+	}
+	return result;
+}
+
 }

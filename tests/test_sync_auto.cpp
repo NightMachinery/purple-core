@@ -7,6 +7,7 @@ option) any later version.
 */
 #include "purple/purple_sync_auto.h"
 #include "purple/purple_sync_chat.h"
+#include "purple/purple_sync_chat_magic.h"
 #include "purple/purple_config_payload.h"
 
 #include <QtCore/QJsonArray>
@@ -1007,6 +1008,24 @@ void TestMovedChatPublishes() {
 	CHECK(h.event(SyncAutoEvent::Foreground).action == SyncAutoAction::Check);
 	const auto missing = h.inventory();
 	CHECK(missing.action == SyncAutoAction::Hold && missing.reason == SyncAutoReason::NeedsReview);
+
+	Section = "a move that abandoned a stage publishes in the new chat";
+	auto staged = Harness();
+	staged.seedOwn(T0);
+	staged.setLocal(T1);
+	CHECK(Stage(staged).action == SyncAutoAction::Post);
+	const auto abandoned = MoveSyncStateToChat(*staged.facts.state, { PeerTokenKind::Channel, 123 });
+	CHECK(abandoned.move && abandoned.abandonedSeq == 2);
+	staged.facts.state = abandoned.move.state;
+	staged.facts.chat = abandoned.move.state.chat;
+	staged.facts.stagedRecord.clear();
+	staged.record = SyncAutoRecord();
+	staged.record.account = staged.facts.account;
+	staged.cloud.clear();
+	const auto restaged = Stage(staged);
+	CHECK(SendAndConfirm(staged, restaged).action == SyncAutoAction::NoOp);
+	CHECK(staged.facts.state->config.confirmedSeq == 3 && staged.facts.state->config.abandonedSeq == 0);
+	CHECK(staged.facts.state->ownMessages.size() == 1);
 
 	Section = "an unmoved state missing its record still needs review";
 	auto unmoved = Harness();

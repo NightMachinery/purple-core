@@ -6,6 +6,8 @@ Licensed under the GNU General Public License, version 2 or (at your
 option) any later version.
 */
 #include "purple/purple_sync_chat_magic.h"
+#include "purple/purple_config_payload.h"
+#include "purple/purple_sync_local_state.h"
 #include "purple/purple_types.h"
 
 #include <cstdio>
@@ -311,6 +313,76 @@ void TestVerify() {
 	CHECK(SerializeSyncChatBinding(binding).has_value());
 }
 
+SyncLocalState Staged(bool confirmFirst) {
+	auto state = SyncLocalState();
+	state.install = *FormatSyncInstallId(QByteArray(16, 'a'));
+	state.createdDevice = u"android:"_q + state.install;
+	state.space = *FormatSyncSpaceId(QByteArray(16, 's'));
+	state.bindingToken = *FormatSyncBindingToken(QByteArray(16, 't'));
+	const auto stage = [&](const QByteArray &text) {
+		const auto built = BuildConfigRecord({ text, {}, std::nullopt, state.space, state.install,
+			state.createdDevice, u"Android"_q, u"test"_q, state.config.seq + 1, uint64_t(Now) });
+		CHECK(built);
+		const auto reserved = ReserveSyncSeq(state, SyncLocalStream::Config, built.payloadHash);
+		CHECK(reserved);
+		auto next = reserved.state;
+		next.configData.pending = built.version.key;
+		const auto issued = AppendIssuedConfigRecord(next, built.canonical);
+		CHECK(issued);
+		return std::make_pair(issued.state, built);
+	};
+	if (confirmFirst) {
+		const auto [issued, built] = stage("version = 1\n# first\n");
+		const auto confirmed = ConfirmConfigReadBack(issued, state.createdDevice,
+			{ OwnRecordObservationKind::Present, issued.config.pendingSeq, built.payloadHash }, built.version);
+		CHECK(confirmed.changed);
+		state = confirmed.state;
+	}
+	state = stage("version = 1\n# second\n").first;
+	CHECK(SerializeSyncLocalState(state));
+	return state;
+}
+
+QByteArray Canonical(const SyncLocalState &state) {
+	return SerializeSyncLocalState(state).canonical;
+}
+
+void TestMoveState() {
+	Section = "moving abandons a stage left in the old chat";
+	const auto magic = PeerToken{ PeerTokenKind::Channel, 42 };
+	for (const auto confirmFirst : { false, true }) {
+		const auto state = Staged(confirmFirst);
+		CHECK(state.config.pendingSeq != 0);
+		CHECK(!MoveSyncChat(state, magic, false));
+		const auto moved = MoveSyncStateToChat(state, magic);
+		CHECK(moved.move && moved.move.changed);
+		CHECK(moved.abandonedSeq == state.config.pendingSeq);
+		CHECK(moved.move.state.chat == magic && moved.move.state.version == 2);
+		CHECK(moved.move.state.config.pendingSeq == 0 && moved.move.state.configData.pending.isEmpty());
+		CHECK(moved.move.state.config.abandonedSeq == state.config.pendingSeq);
+		CHECK(moved.move.state.config.seq == state.config.seq);
+		CHECK(moved.move.state.config.confirmedSeq == state.config.confirmedSeq);
+		CHECK(SerializeSyncLocalState(moved.move.state));
+		const auto again = MoveSyncStateToChat(moved.move.state, magic);
+		CHECK(again.move && !again.move.changed && again.abandonedSeq == 0);
+		CHECK(Canonical(again.move.state) == Canonical(moved.move.state));
+	}
+
+	Section = "moving to the same chat keeps a stage";
+	auto self = Staged(true);
+	const auto same = MoveSyncStateToChat(self, self.chat);
+	CHECK(same.move && !same.move.changed && same.abandonedSeq == 0);
+	CHECK(Canonical(same.move.state) == Canonical(self));
+
+	Section = "a refused move changes nothing";
+	auto library = Staged(true);
+	library.library.pendingSeq = 1;
+	const auto refused = MoveSyncStateToChat(library, magic);
+	CHECK(!refused.move && refused.abandonedSeq == 0 && Canonical(refused.move.state) == Canonical(library));
+	const auto invalid = MoveSyncStateToChat(Staged(true), PeerToken{ PeerTokenKind::Channel, 0 });
+	CHECK(!invalid.move && invalid.abandonedSeq == 0);
+}
+
 } // namespace
 
 int main() {
@@ -324,6 +396,7 @@ int main() {
 	TestMagic();
 	TestManual();
 	TestVerify();
+	TestMoveState();
 	std::printf("%d checks, %d failures\n", Checks, Failures);
 	return Failures ? 1 : 0;
 }

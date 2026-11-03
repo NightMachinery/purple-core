@@ -71,8 +71,11 @@ magic mode, finishing any creation record, or raises the problem.
 
 ## Moving the state into the bound chat
 
-A client moves its existing state with `MoveSyncChat` once the lookup binds a
-chat other than the one in `state.json`. The move empties the own-message
+A client moves its existing state with `MoveSyncStateToChat` once the lookup
+binds a chat other than the one in `state.json`. A config stage still pending in
+the old chat is abandoned first, since the old chat is never read again; the
+next publish reserves a fresh sequence. A pending library stage refuses the
+move. The move empties the own-message
 ledger, because those message ids belong to the old chat. Nothing of this
 install is in the new chat yet, so the confirmed config head is expectedly
 absent there. `SyncConfigAwaitsMovedPublish` names that case: a v2 state with a
@@ -91,6 +94,8 @@ never needs its own merge rules.
 `tests/test_sync_chat_magic.cpp` covers the title, every refusal, the oldest
 pick, the codec round trip and refusals, the persisted waits, show-once
 problems, the unbound, magic and manual plans, and verification.
-`tests/test_sync_auto.cpp` covers the first publish after a move, a later
+It also covers moves that abandon a stage, keep the same chat or are refused.
+`tests/test_sync_auto.cpp` covers the first publish after a move, a move that
+abandoned a stage, a later
 missing head, an unmoved missing head, a move without saved bytes and a move
 into a chat with a newer version.
