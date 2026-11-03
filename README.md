@@ -69,6 +69,9 @@ schema and lifecycle are independent of settings sync.
   recording (CRC walk, cut after the last good page, end-of-stream flag,
   duration). `purple/purple_recording_file.{h,cpp}` holds the UTF-8 path file
   operations the recording repairs share.
+- `purple/purple_recording.{h,cpp}` - the recording rules: `NextNudgeAt` and
+  `NudgeDue` (the long-recording nudge), `BinItemExpired` (Recording bin
+  expiry) and `SeekTarget` (where a seek step lands).
 - `purple/purple_round_journal.{h,cpp}` - the round video journal (`.pjr`):
   the config header (track formats and codec configuration) and the sample
   batches, encoders and a reader that stops at the first bad record.
@@ -453,8 +456,9 @@ staging. `tests/test_sync_auto.cpp` covers automatic settings policy.
 `tests/test_playback.cpp` covers the private-chat voice queue rule.
 `tests/test_ogg_repair.cpp` covers the Ogg finaliser on synthetic streams.
 `tests/test_mp4_repair.cpp` covers the round video journal and the MP4 repair
-scanner on synthetic MP4Builder-shaped streams.
-`run.sh` compiles the core once and runs all fourteen. Set
+scanner on synthetic MP4Builder-shaped streams. `tests/test_recording.cpp`
+covers the nudge schedule, bin expiry and seek clamping.
+`run.sh` compiles the core once and runs all fifteen. Set
 `ARCHIVE_SQLITE_TESTS=1` to also execute the SQL against system SQLite.
 
 ```sh
@@ -554,6 +558,17 @@ disk or no longer match, scans the rest (the client's `AacFrameMeasure`
 decodes AAC frame lengths) and returns the sample list to rebuild, with a
 status: Exact, Repaired, Partial or Unrecoverable. See
 [the recording formats](docs/recording-formats.md).
+
+`purple/purple_recording.h` holds the rules the clients time against.
+`NextNudgeAt(elapsedMs, longNudgeSeconds)` is the recorded time (pauses
+excluded) of the next "Still recording" nudge, at every whole multiple of the
+interval, and `NudgeDue(previousMs, elapsedMs, ...)` says whether a poll
+crossed one. `BinItemExpired(binnedAt, now, binKeepSeconds)` is true from
+exactly `bin_keep` after the item entered the bin, never with `"off"` and never
+for a time in the future; clients sweep at start and every
+`kBinSweepIntervalSeconds`. `SeekTarget(positionMs, durationMs, seekStep,
+direction)` stops at 0 going back and one second before the end going forward,
+and never moves a forward seek backwards.
 
 ## Settings scope and Reset (source candidate)
 
