@@ -8,6 +8,7 @@ option) any later version.
 #include "purple/purple_sync_config_flow.h"
 
 #include "purple/purple_config_payload.h"
+#include "purple/purple_settings.h"
 #include "purple/purple_state.h"
 
 #include <QtCore/QCryptographicHash>
@@ -26,6 +27,16 @@ namespace {
 	return QString::fromLatin1(QCryptographicHash::hash(
 		bytes,
 		QCryptographicHash::Sha256).toHex());
+}
+
+[[nodiscard]] SyncConfigReviewReason InventoryReason(
+		const SyncAccountInventoryResult &inventory) {
+	const auto &directory = inventory.directory;
+	if (directory.unreadableCandidate
+		|| (inventory.read && inventory.read->status == SyncCandidateReadStatus::NeedsReview)) {
+		return SyncConfigReviewReason::Unreadable;
+	}
+	return SyncConfigReviewReason::Ambiguous;
 }
 
 [[nodiscard]] SyncConfigReviewStatus InventoryStatus(
@@ -63,9 +74,26 @@ namespace {
 
 [[nodiscard]] SyncConfigReview Refuse(
 		SyncConfigReview review,
-		SyncConfigReviewStatus status) {
+		SyncConfigReviewStatus status,
+		SyncConfigReviewReason reason = SyncConfigReviewReason::None) {
 	review.status = status;
+	review.reason = (status == SyncConfigReviewStatus::NeedsReview) ? reason : SyncConfigReviewReason::None;
 	return review;
+}
+
+[[nodiscard]] std::optional<Settings> SettingsMeaning(const SyncSettingsFile &file) {
+	if (file.status == SyncSettingsFileStatus::Absent) {
+		return ParseSettings(QString(), QString()).settings;
+	} else if (file.status != SyncSettingsFileStatus::Present || !SyncSettingsTextWritable(file.text)) {
+		return std::nullopt;
+	}
+	auto parsed = ParseSettings(QString::fromUtf8(file.text), QString());
+	if (!parsed.ok() || !parsed.warnings.empty()) {
+		return std::nullopt;
+	}
+	parsed.settings.version = kDefaultSettingsVersion;
+	parsed.settings.sync = Sync();
+	return std::move(parsed.settings);
 }
 
 [[nodiscard]] bool SameConfigData(
@@ -426,7 +454,7 @@ SyncConfigReview ReviewSyncConfigInventory(
 	}
 	const auto inventoryStatus = InventoryStatus(inventory);
 	if (inventoryStatus != SyncConfigReviewStatus::Ready) {
-		return Refuse(std::move(result), inventoryStatus);
+		return Refuse(std::move(result), inventoryStatus, InventoryReason(inventory));
 	}
 	if (!state) {
 		const auto &selected = inventory.directory.selectedSpace;
@@ -443,7 +471,10 @@ SyncConfigReview ReviewSyncConfigInventory(
 			|| AnyNewerSchema(heads.heads)) {
 			return Refuse(
 				std::move(result),
-				SyncConfigReviewStatus::NeedsReview);
+				SyncConfigReviewStatus::NeedsReview,
+				AnyNewerSchema(heads.heads)
+					? SyncConfigReviewReason::NewerSchema
+					: SyncConfigReviewReason::HeadsUnclear);
 		}
 		result.space = *selected;
 		result.state.space = *selected;
@@ -459,7 +490,8 @@ SyncConfigReview ReviewSyncConfigInventory(
 	SelectSyncSpaceIfEmpty(scoped, state->space);
 	if (!scoped.directory.selectedSpace
 		|| *scoped.directory.selectedSpace != state->space) {
-		return Refuse(std::move(result), SyncConfigReviewStatus::NeedsReview);
+		return Refuse(std::move(result), SyncConfigReviewStatus::NeedsReview,
+			SyncConfigReviewReason::SpaceMismatch);
 	}
 	const auto own = ReconcileOwnConfigInventory(
 		*state,
@@ -474,7 +506,8 @@ SyncConfigReview ReviewSyncConfigInventory(
 			std::move(result),
 			SyncConfigReviewStatus::CloneDetected);
 	case SyncOwnInventoryStatus::NeedsReview:
-		return Refuse(std::move(result), SyncConfigReviewStatus::NeedsReview);
+		return Refuse(std::move(result), SyncConfigReviewStatus::NeedsReview,
+			SyncConfigReviewReason::OwnRecords);
 	case SyncOwnInventoryStatus::Absent:
 	case SyncOwnInventoryStatus::Present:
 	case SyncOwnInventoryStatus::PendingFound:
@@ -488,7 +521,10 @@ SyncConfigReview ReviewSyncConfigInventory(
 	if (!ownHead.valid
 		|| heads.status != SyncConfigHeadsStatus::Complete
 		|| AnyNewerSchema(heads.heads)) {
-		return Refuse(std::move(result), SyncConfigReviewStatus::NeedsReview);
+		return Refuse(std::move(result), SyncConfigReviewStatus::NeedsReview,
+			AnyNewerSchema(heads.heads)
+				? SyncConfigReviewReason::NewerSchema
+				: SyncConfigReviewReason::HeadsUnclear);
 	}
 	result.heads = heads.heads;
 	result.ownHead = ownHead.head;
@@ -1209,6 +1245,73 @@ SyncConfigPostPlan PlanSyncConfigStagedPost(
 	result.step = SyncConfigPostStep::Post;
 	result.record = stagedRecord;
 	result.own = own;
+	return result;
+}
+
+QString SyncConfigReviewReasonCode(SyncConfigReviewReason reason) {
+	switch (reason) {
+	case SyncConfigReviewReason::None: return QString();
+	case SyncConfigReviewReason::SpaceMismatch: return u"space_mismatch"_q;
+	case SyncConfigReviewReason::Unreadable: return u"unreadable"_q;
+	case SyncConfigReviewReason::Ambiguous: return u"ambiguous"_q;
+	case SyncConfigReviewReason::NewerSchema: return u"newer_schema"_q;
+	case SyncConfigReviewReason::HeadsUnclear: return u"heads_unclear"_q;
+	case SyncConfigReviewReason::OwnRecords: return u"own_records"_q;
+	}
+	return QString();
+}
+
+bool IsDefaultSyncSettings(const SyncSettingsFile &file) {
+	const auto meaning = SettingsMeaning(file);
+	return meaning && *meaning == *SettingsMeaning(MakeSyncSettingsFile(SyncSettingsFileStatus::Absent));
+}
+
+bool SameSyncSettingsMeaning(const SyncSettingsFile &a, const SyncSettingsFile &b) {
+	const auto first = SettingsMeaning(a);
+	const auto second = SettingsMeaning(b);
+	return first && second && *first == *second;
+}
+
+SyncFirstUseAction PlanSyncFirstUse(const SyncFirstUseInput &input) {
+	if (input.local.status == SyncSettingsFileStatus::Invalid || input.local.usingLastGood) {
+		return SyncFirstUseAction::Wait;
+	}
+	const auto defaults = IsDefaultSyncSettings(input.local);
+	if (input.groupEmpty) {
+		// WHY: a fresh login must never seed the group with defaults that a customised device would then be asked
+		// to adopt.
+		return defaults ? SyncFirstUseAction::Wait : SyncFirstUseAction::Publish;
+	} else if (defaults) {
+		return SyncFirstUseAction::Join;
+	} else if (input.head && SameSyncSettingsMeaning(input.local, *input.head)) {
+		return SyncFirstUseAction::JoinSilently;
+	}
+	switch (input.choice) {
+	case SyncFirstUseChoice::Synced: return SyncFirstUseAction::Join;
+	case SyncFirstUseChoice::ThisDevice: return SyncFirstUseAction::Publish;
+	case SyncFirstUseChoice::None: break;
+	}
+	return SyncFirstUseAction::Ask;
+}
+
+std::optional<SyncFirstUseInput> SyncFirstUseInputOf(
+		const SyncAccountInventoryResult &inventory,
+		const SyncSettingsFile &local) {
+	if (InventoryStatus(inventory) != SyncConfigReviewStatus::Ready) {
+		return std::nullopt;
+	}
+	auto result = SyncFirstUseInput();
+	result.local = local;
+	const auto &selected = inventory.directory.selectedSpace;
+	result.groupEmpty = !selected;
+	if (selected) {
+		const auto heads = ExtractSyncConfigHeads(inventory, *selected, QString());
+		if (heads.status != SyncConfigHeadsStatus::Complete || AnyNewerSchema(heads.heads)) {
+			return std::nullopt;
+		} else if (heads.heads.size() == 1) {
+			result.head = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, heads.heads.front().text);
+		}
+	}
 	return result;
 }
 

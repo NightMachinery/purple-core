@@ -86,8 +86,22 @@ enum class SyncConfigReviewStatus {
 	UsingLastGood,
 };
 
+// Why a review came back NeedsReview, for the screen and the diag line.
+enum class SyncConfigReviewReason {
+	None,
+	SpaceMismatch,
+	Unreadable,
+	Ambiguous,
+	NewerSchema,
+	HeadsUnclear,
+	OwnRecords,
+};
+
+[[nodiscard]] QString SyncConfigReviewReasonCode(SyncConfigReviewReason reason);
+
 struct SyncConfigReview {
 	SyncConfigReviewStatus status = SyncConfigReviewStatus::Incomplete;
+	SyncConfigReviewReason reason = SyncConfigReviewReason::None;
 	uint64_t accountUserId = 0;
 	bool bound = false;
 	QString space;
@@ -468,5 +482,41 @@ enum class SyncConfigRestoreStatus {
 	HistoryError,
 	WriteError,
 };
+
+// Whether a settings file holds nothing beyond the shipped defaults: no file, or one that parses cleanly (no
+// warnings) to the same settings as an empty file, ignoring the version marker and the file-local [sync] table.
+[[nodiscard]] bool IsDefaultSyncSettings(const SyncSettingsFile &file);
+// Whether two settings files mean the same settings under that normalisation.
+[[nodiscard]] bool SameSyncSettingsMeaning(const SyncSettingsFile &a, const SyncSettingsFile &b);
+
+// First use of a sync chat by a device with no state in its space.
+enum class SyncFirstUseAction {
+	Wait,
+	Publish,
+	Join,
+	JoinSilently,
+	Ask,
+};
+
+enum class SyncFirstUseChoice {
+	None,
+	Synced,
+	ThisDevice,
+};
+
+struct SyncFirstUseInput {
+	SyncSettingsFile local;
+	// The sync chat holds no settings record at all.
+	bool groupEmpty = true;
+	// The chat's one current head, when there is exactly one.
+	std::optional<SyncSettingsFile> head;
+	SyncFirstUseChoice choice = SyncFirstUseChoice::None;
+};
+
+[[nodiscard]] SyncFirstUseAction PlanSyncFirstUse(const SyncFirstUseInput &input);
+// The input for a complete, unambiguous inventory, whatever space this device was in before; nullopt otherwise.
+[[nodiscard]] std::optional<SyncFirstUseInput> SyncFirstUseInputOf(
+	const SyncAccountInventoryResult &inventory,
+	const SyncSettingsFile &local);
 
 } // namespace Purple

@@ -2678,6 +2678,8 @@ void TestFlowReviewStatuses() {
 	auto broken = cloud;
 	broken.add(QByteArray("{\"not\":\"a record\"}"));
 	CHECK(Review(device, broken).status == SyncConfigReviewStatus::NeedsReview);
+	CHECK(Review(device, broken).reason != SyncConfigReviewReason::None);
+	CHECK(Review(device, incomplete).reason == SyncConfigReviewReason::None);
 
 	const auto newerText = QByteArray("version = 3\n");
 	const auto newerVersion = *MakeConfigVersion(newerText, {});
@@ -2723,6 +2725,9 @@ void TestFlowReviewStatuses() {
 	elsewhere.state->space = *FormatSyncSpaceId(QByteArray(16, 'w'));
 	CHECK(Review(elsewhere, cloud).status
 		== SyncConfigReviewStatus::NeedsReview);
+	CHECK(Review(elsewhere, cloud).reason == SyncConfigReviewReason::SpaceMismatch);
+	CHECK(SyncConfigReviewReasonCode(SyncConfigReviewReason::SpaceMismatch) == u"space_mismatch"_q);
+	CHECK(SyncConfigReviewReasonCode(SyncConfigReviewReason::None).isEmpty());
 	CHECK(Review(device, incomplete).status
 		== SyncConfigReviewStatus::Incomplete);
 	const auto invalidState = [&] {
@@ -2731,6 +2736,82 @@ void TestFlowReviewStatuses() {
 		return Review(copy, cloud);
 	}();
 	CHECK(invalidState.status == SyncConfigReviewStatus::NeedsReview);
+}
+
+void TestFirstUse() {
+	Begin("first use: defaults and the one-time choice");
+	const auto absent = MakeSyncSettingsFile(SyncSettingsFileStatus::Absent);
+	const auto empty = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, QByteArray());
+	const auto spaced = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, QByteArray("# mine\n\nversion = 1\n"));
+	const auto explicitDefaults = MakeSyncSettingsFile(SyncSettingsFileStatus::Present,
+		QByteArray("[premium]\nenabled_p = true\n\n[sync]\nsend_after_save_p = true\n"));
+	const auto custom = MakeSyncSettingsFile(SyncSettingsFileStatus::Present,
+		QByteArray("[recent]\nstay_visible_after_close = \"2m\"\n"));
+	const auto customSpaced = MakeSyncSettingsFile(SyncSettingsFileStatus::Present,
+		QByteArray("# same\nversion = 1\n\n[recent]\n  stay_visible_after_close   = \"2m\"  # two\n"));
+	const auto other = MakeSyncSettingsFile(SyncSettingsFileStatus::Present,
+		QByteArray("[recent]\nstay_visible_after_close = \"5m\"\n"));
+	const auto invalid = MakeSyncSettingsFile(SyncSettingsFileStatus::Invalid);
+	const auto broken = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, QByteArray("[lists.a\nmembers = ["));
+	const auto unknown = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, QByteArray("no_such_key = 1\n"));
+	CHECK(IsDefaultSyncSettings(absent) && IsDefaultSyncSettings(empty) && IsDefaultSyncSettings(spaced));
+	CHECK(IsDefaultSyncSettings(explicitDefaults));
+	CHECK(IsDefaultSyncSettings(MakeSyncSettingsFile(SyncSettingsFileStatus::Present, TB)));
+	CHECK(!IsDefaultSyncSettings(custom) && !IsDefaultSyncSettings(invalid) && !IsDefaultSyncSettings(broken));
+	// Keys the parser ignores change nothing the app applies.
+	CHECK(IsDefaultSyncSettings(unknown));
+	CHECK(SameSyncSettingsMeaning(custom, customSpaced) && !SameSyncSettingsMeaning(custom, other));
+	CHECK(!SameSyncSettingsMeaning(broken, broken));
+
+	auto input = SyncFirstUseInput();
+	input.local = custom;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Publish);
+	input.local = absent;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Wait);
+	input.local = spaced;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Wait);
+	input.groupEmpty = false;
+	input.head = other;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Join);
+	input.local = customSpaced;
+	input.head = custom;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::JoinSilently);
+	input.head = other;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Ask);
+	input.head.reset();
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Ask);
+	input.head = other;
+	input.choice = SyncFirstUseChoice::Synced;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Join);
+	input.choice = SyncFirstUseChoice::ThisDevice;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Publish);
+	input.local = invalid;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Wait);
+	input.local = custom;
+	input.local.usingLastGood = true;
+	CHECK(PlanSyncFirstUse(input) == SyncFirstUseAction::Wait);
+
+	const auto space = *FormatSyncSpaceId(QByteArray(16, 'f'));
+	auto cloud = Cloud();
+	const auto fresh = SyncFirstUseInputOf(cloud.inventory(), custom);
+	CHECK(fresh && fresh->groupEmpty && !fresh->head);
+	CHECK(fresh && PlanSyncFirstUse(*fresh) == SyncFirstUseAction::Publish);
+	auto b = MakeRemote('b', u"Android"_q);
+	Post(cloud, b, space, other.text);
+	const auto one = SyncFirstUseInputOf(cloud.inventory(), customSpaced);
+	CHECK(one && !one->groupEmpty && one->head && one->head->text == other.text);
+	CHECK(one && PlanSyncFirstUse(*one) == SyncFirstUseAction::Ask);
+	const auto same = SyncFirstUseInputOf(cloud.inventory(),
+		MakeSyncSettingsFile(SyncSettingsFileStatus::Present, other.text + "\n# here\n"));
+	CHECK(same && PlanSyncFirstUse(*same) == SyncFirstUseAction::JoinSilently);
+	const auto fresher = SyncFirstUseInputOf(cloud.inventory(), absent);
+	CHECK(fresher && PlanSyncFirstUse(*fresher) == SyncFirstUseAction::Join);
+	auto incomplete = cloud;
+	incomplete.scanComplete = false;
+	CHECK(!SyncFirstUseInputOf(incomplete.inventory(), custom));
+	auto garbled = cloud;
+	garbled.add(QByteArray("{\"not\":\"a record\"}"));
+	CHECK(!SyncFirstUseInputOf(garbled.inventory(), custom));
 }
 
 void TestRootStoreRelinkProof() {
@@ -3208,6 +3289,7 @@ int main() {
 	TestFlowCommitCheck();
 	TestFlowDescribe();
 	TestFlowReviewStatuses();
+	TestFirstUse();
 	TestRootStoreRelinkProof();
 	TestAccountRecovery();
 	TestStartAgainAndSetupBinding();

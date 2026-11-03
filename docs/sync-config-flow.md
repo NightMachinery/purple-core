@@ -50,6 +50,39 @@ state's, the own records must reconcile (Absent, Present or PendingFound; see
 `ReconcileOwnConfigInventory`), the own head must parse, and the heads of every
 other install are extracted and planned with `PlanConfigSync`.
 
+A NeedsReview review names its reason (`SyncConfigReviewReason`, code from
+`SyncConfigReviewReasonCode` for the clients' diag lines and screens):
+`space_mismatch` when the chat's space is not the state's, `unreadable` for
+unreadable candidates, `ambiguous` for colliding or unpublishable spaces,
+`newer_schema`, `heads_unclear` when a head cannot be extracted, and
+`own_records` when this device's own records do not reconcile. Other statuses
+carry no reason.
+
+## First use
+
+A device with no state in the chat's space (a fresh login, a new install, or a
+device whose state is in another space) decides with
+`PlanSyncFirstUse(SyncFirstUseInputOf(inventory, local))`:
+
+- the chat holds no record and the local settings are the defaults: Wait, so a
+  fresh login never seeds the chat with defaults a customised device would then
+  be asked to adopt;
+- no record, settings not the defaults: Publish the first record;
+- records, settings the defaults: Join and apply the chat's settings;
+- records, settings meaning the same as the chat's one head: JoinSilently;
+- otherwise Ask once: "Use the synced settings" (Join; History keeps the old
+  file) or "Use this device's settings" (Publish as the successor). The answer
+  comes back as `SyncFirstUseChoice`.
+
+`IsDefaultSyncSettings` defines the defaults: no file, or one that parses with
+no error or warning to the same `Settings` as an empty file. The comparison
+ignores `version` and the file-local `[sync]` table; keys the parser ignores
+change nothing. `SameSyncSettingsMeaning` uses the same normalisation, so
+comments, spacing and spelled-out defaults never prompt. An Invalid or
+last-good local file waits. `SyncFirstUseInputOf` returns nullopt unless the
+inventory is complete and its selected space has extractable heads of a
+supported schema.
+
 `ExtractSyncConfigHeads(inventory, space, ownInstall)` takes, for each config
 group in the space other than `ownInstall`, the lowest message id among its
 head candidates. It returns NeedsReview when a group is ambiguous or has no

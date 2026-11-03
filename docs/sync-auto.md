@@ -7,6 +7,11 @@ store. Modern automatic settings sync defaults off. Only the explicit Enable
 event turns it on; legacy `send_after_save` and library/playlist publishing
 are separate and do not enable this policy.
 
+An account with no state in the sync chat's space holds AccountUnbound here.
+The clients then run first use (`PlanSyncFirstUse`, see
+[sync-config-flow.md](sync-config-flow.md#first-use)) instead of asking for a
+manual Check: it publishes, joins, waits or asks once.
+
 ## Triggers and ownership
 
 Feed SessionReady, Foreground, Unlock and an actual LocalSaved event for this

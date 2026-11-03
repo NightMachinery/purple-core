@@ -87,6 +87,7 @@ struct Notifications {
 	bool magicBots = true;
 	bool magicChannels = true;
 	std::vector<PreviewPeer> previewAlways;
+	friend bool operator==(const Notifications &, const Notifications &) = default;
 };
 
 // How much of a folder a preset pulls into its own view, whatever the lists
@@ -376,6 +377,7 @@ struct Preset {
 	std::vector<PresetFolder> folders;
 
 	std::vector<PresetView> views;
+	friend bool operator==(const Preset &, const Preset &) = default;
 };
 
 struct ScheduleRule {
@@ -397,6 +399,7 @@ struct ScheduleRule {
 	// The line its [[schedule.rules]] header is on, 1-based, for a screen that
 	// wants to point at it. Zero when there is no file behind the rule.
 	int sourceLine = 0;
+	friend bool operator==(const ScheduleRule &, const ScheduleRule &) = default;
 };
 
 // What a ruleset does on a device it applies to. Three states rather than a
@@ -463,6 +466,7 @@ struct ScheduleRuleset {
 	[[nodiscard]] bool implicit() const {
 		return sourceIndex < 0;
 	}
+	friend bool operator==(const ScheduleRuleset &, const ScheduleRuleset &) = default;
 };
 
 struct Schedule {
@@ -493,12 +497,14 @@ struct Schedule {
 	// written down twice; nothing mutates a parsed Schedule, so the two cannot
 	// drift.
 	std::vector<ScheduleRuleset> rulesets;
+	friend bool operator==(const Schedule &, const Schedule &) = default;
 };
 
 struct FocusSync {
 	bool enabled = false;
 	QString enterPreset;
 	QString exitPreset;
+	friend bool operator==(const FocusSync &, const FocusSync &) = default;
 };
 
 // The `[peek]' table: the temporary look past the running preset, and how long
@@ -571,6 +577,7 @@ struct Peek {
 	bool exitHiddenChats = true;
 	std::optional<int> startDelaySeconds;
 	std::optional<int> readyTimeoutSeconds;
+	friend bool operator==(const Peek &, const Peek &) = default;
 };
 
 // Declared here so the two readers below can sit with the keys they read,
@@ -667,6 +674,7 @@ struct Recent {
 	int staySecondsAfterClose = 0; // Zero disables it entirely.
 	RecentScope scope = RecentScope::AlreadyInView;
 	RecentStyle style = RecentStyle::None;
+	friend bool operator==(const Recent &, const Recent &) = default;
 };
 
 // How far a "hide until" reaches. It always takes the chat out of the preset's
@@ -700,6 +708,7 @@ enum class HideScope : uchar {
 // and the overrides themselves live in state.toml rather than here.
 struct Overrides {
 	HideScope hideScope = HideScope::KeepInFolderUncounted;
+	friend bool operator==(const Overrides &, const Overrides &) = default;
 };
 
 // The `[suggestions]' table: what the strips of chats the app suggests for you
@@ -721,6 +730,7 @@ struct Suggestions {
 	// Asked under every preset, Normal included, because it is a claim about
 	// the strip itself rather than about what a preset lets through.
 	bool recommendedChannels = false;
+	friend bool operator==(const Suggestions &, const Suggestions &) = default;
 };
 
 // The `[sync]' table: what settings.toml does on its way to your other
@@ -732,6 +742,7 @@ struct Sync {
 	// something you asked for once, in words, and not something an upgrade
 	// started doing on your behalf.
 	bool sendAfterSave = false;
+	friend bool operator==(const Sync &, const Sync &) = default;
 };
 
 // The `[last_seen]' table: what the fork says about a last seen it cannot
@@ -772,6 +783,7 @@ struct LastSeen {
 	// trade is a moment of exposure you chose; a trade every time you open
 	// their chat is a standing subscription you did not.
 	int tradeCooldownSeconds = 5 * 60;
+	friend bool operator==(const LastSeen &, const LastSeen &) = default;
 };
 
 // What a last seen the server coarsened is coarse BECAUSE of. Three answers
@@ -922,6 +934,7 @@ struct ScreenTimeBudget {
 	//
 	// -1 for a budget that did not come from a file at all.
 	int sourceIndex = -1;
+	friend bool operator==(const ScreenTimeBudget &, const ScreenTimeBudget &) = default;
 };
 
 // The `[screen_time]' table. Off until switched on: it is a log of what you
@@ -948,10 +961,12 @@ struct ScreenTime {
 	int retentionDays = 90;
 
 	std::vector<ScreenTimeBudget> budgets;
+	friend bool operator==(const ScreenTime &, const ScreenTime &) = default;
 };
 
 struct Premium {
 	bool enabled = true;
+	friend bool operator==(const Premium &, const Premium &) = default;
 };
 
 // A friendly name for a device id, out of [devices]. The id is what a ruleset
@@ -961,6 +976,7 @@ struct Premium {
 struct DeviceLabel {
 	QString id;
 	QString label;
+	friend bool operator==(const DeviceLabel &, const DeviceLabel &) = default;
 };
 
 struct Settings {
@@ -996,6 +1012,7 @@ struct Settings {
 	// The label written for this device id, or null. Ignores case, the same as
 	// a ruleset matching one.
 	[[nodiscard]] const DeviceLabel *device(const QString &id) const;
+	friend bool operator==(const Settings &, const Settings &) = default;
 };
 
 // Everything recoverable is a warning and leaves usable settings behind; only
