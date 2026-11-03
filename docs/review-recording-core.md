@@ -212,3 +212,100 @@ since today it exits early anywhere but macOS.
   60:00, ...), once per poll however late the poll, never on a poll that goes backwards, and never when off. Bin
   expiry is inclusive at exactly `bin_keep`, never with "off", and never for an item stamped in the future. Seek
   clamps at 0 and one second before the end and never moves a forward seek backwards.
+
+## Re-check 1
+
+Scoped re-check of `fb1ceba..a0a7d40` on `recording` (3 Nov 2026): `3fc50b9` "Harden the recording parsers
+against hostile input" and `a0a7d40` "Fuzz the recording parsers in the core suite". Read-only for `recording`.
+
+**Verdict: CHANGES**, for one new P2 that the P3-2 fix introduced. P1-1 and P2-1 are fixed, as are all the
+requested P3s (1, 2, 3, 4, 5, 7). I found no new memory-safety issue.
+
+### How this was checked
+
+- `tests/run.sh` now falls back to pkg-config's `Qt6Core`, and it ran unmodified here (Linux, clang, Qt 6.4). All
+  sixteen programs pass with 0 failures: `test_ogg_repair` 97 checks, `test_mp4_repair` 166, `test_recording` 70,
+  `test_recording_fuzz` 5, and the twelve older programs with the same counts as before. The fuzz program's 5
+  checks are each one invariant accumulated over all 3000 iterations, not 5 inputs.
+- Under ASan and UBSan with `-fno-sanitize-recover=all` (GCC, C++17 for the Qt-free parsers, C++20 with Qt for
+  `test_recording`): `test_ogg_repair`, `test_mp4_repair`, `test_recording` and the in-tree
+  `test_recording_fuzz` are all clean.
+- My fuzz loop from the first round ran 100,000 iterations over each parser, clean. Its extreme-value variant (offsets in
+  `[2^64 - 64, 2^64)` and timestamps within 1000 of `INT64_MAX` or `INT64_MIN`, every CRC recomputed) ran
+  50,000 iterations, clean: before the fix it hit the overflow at once, and UBSan reported the four overflow sites.
+- The P1-1 repro from the first round now returns Unrecoverable with no read. The same wrapping sample passed straight to the
+  public `RepairRound`, which skips the journal reader, is dropped (`journalDropped = 1`) with no read.
+
+### Original findings
+
+- **P1-1, fixed.** The bounds check no longer adds: `sample.offset > mediaSize || sample.size > mediaSize -
+  sample.offset` (`UsableExact`). The check lives in `RepairRound`, so the public entry point is protected
+  too, not only `RecoverRound`. `ReadRoundJournal` also rejects any sample with `offset > UINT64_MAX - size` as
+  damage. A sample starting inside `ftyp`, an empty one and one naming an unknown track are dropped as well.
+- **P2-1, fixed.** Journaled times outside `[0, 2^40)` µs, or going back more than one frame within a track,
+  end the exact part. `AudioTime` is split into whole seconds and remainder, so even a hostile 32-bit sample rate
+  stays below about `4.4 * 10^18` in the intermediate product. With every base below `2^40`, the remaining sums
+  in `RepairRound` cannot overflow.
+- **P3-1, fixed.** `ReadAll` refuses files above 512 MB, checks the size against `size_t` before the cast, and
+  catches every exception, as do `WriteAt` and `Truncate`. `FinaliseOggFile` reports a file it refuses as
+  `ioError` and leaves it alone.
+- **P3-2, fixed, but see N1.** Inside `boundary()` a short tail no longer counts; only a torn video sample does.
+- **P3-3, fixed.** The walk ends at a page with another serial number or a sequence that is not the previous one plus one.
+- **P3-4, fixed.** Trailing pages with granule -1 are cut before the flag is set. `hasAudio()` guarantees a page with a granule remains,
+  so the loop cannot empty the vector.
+- **P3-5, fixed.** `NextNudgeAt` returns nothing when no later multiple fits. `BinItemExpiresAt` and forward
+  `SeekTarget` saturate.
+- **P3-6, documented, not changed.** `docs/recording-formats.md` now describes the unwritten split `mdat`
+  header case and its Partial result. That is acceptable until the device corpus check settles it.
+- **P3-7, fixed.** `tests/test_recording_fuzz.cpp` is in `run.sh`. It is seeded, includes hostile CRC-valid journals with
+  the extreme values that found P1-1 and P2-1, and checks bounds, timing range, counts and Ogg idempotence.
+
+### New findings
+
+#### N1 (P2). A crash that tears the audio frame after the last video frame drops that frame, and a large one makes the result Partial
+
+`purple/purple_mp4_repair.cpp`, `Scanner::boundary` and the status at the end of `RepairRound`.
+
+With the P3-2 change, a whole video sample followed only by a torn audio frame has no valid boundary after
+it. It is dropped, and the scan stops at its start. The author accepted that trade-off and documented it. The
+status was not adjusted, though: it is decided by `tornTail(position)`, and `position` is now the start of the
+whole video sample. When that sample plus the torn bytes come to more than 8 KB, the status becomes **Partial**,
+so the bin shows "Partly recovered" for an ordinary crash. A P-frame at round bitrates is around 4 KB and a
+keyframe is larger, so the over-8 KB case is mainly keyframes.
+
+Concrete input (stub measure from the suite: `0x21`, then half the frame size). The layout is `ftyp`, `mdat`, IDR 5000 B,
+two audio frames of 300 B, a P-frame of N bytes, then 50 bytes of a 300 B audio frame:
+
+    N = 4000:   before a0a7d40: Repaired, 4 samples, 50 B unparsed
+                now:            Repaired, 3 samples, 4050 B unparsed (last frame lost)
+    N = 12000:  before a0a7d40: Repaired, 4 samples, 50 B unparsed
+                now:            Partial,  3 samples, 12050 B unparsed (last frame lost, wrong label)
+
+A crash lands in an audio frame roughly in proportion to the audio share of the bytes (about 6% at 1 Mbit/s video
+and 64 kbit/s audio), and only the frame just after a video sample counts, so this affects a few percent of
+crashes, not most. When it happens, the user loses about 33 ms of video and sees "Partly recovered".
+
+Fix, smallest first:
+
+1. Status only: when the scan stops at a position where `video(position).size` is non-zero and
+   `tornTail(position + video.size)` holds, treat the stop as a torn tail, not Partial. That restores the label;
+   the frame stays dropped as documented.
+2. To keep the frame too: accept a video candidate followed by a short tail when the tail starts with a
+   plausible audio frame start that the measure rejects only for lack of bytes. This needs the measure to tell
+   "too short" apart from "not AAC", which the callback contract does not express today, so (1) is the
+   proportionate change.
+
+Add the N = 12000 case to `TestStops`.
+
+#### Notes (no severity)
+
+- `UsableExact` ends the exact part at a video time that goes back more than 16.7 ms. An encoder that emits
+  B-frames writes samples in decode order, so its times go back routinely, and such a journal would then be used
+  only up to its first B-frame, with repair doing the rest. Android's MediaCodec emits no B-frames unless asked to,
+  and Desktop rounds use the fragmented copy rather than this journal, so this is a note for the corpus check,
+  not a defect.
+- `test_recording_fuzz` reports one aggregated check per invariant, so a failure does not say which iteration
+  failed. Printing the iteration number and the mutation mode on the first failure would make a seeded failure
+  quicker to reproduce.
+- The GCC segfault in `SettingsTablePath` noted in the first round is unchanged and predates this branch. `run.sh`
+  uses clang, where it does not occur.
