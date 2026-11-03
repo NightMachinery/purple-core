@@ -508,8 +508,12 @@ struct SyncFirstUseInput {
 	SyncSettingsFile local;
 	// The sync chat holds no settings record at all.
 	bool groupEmpty = true;
-	// The chat's one current head, when there is exactly one.
+	// The chat's current settings, when its current heads (the ones no other head supersedes) all carry the same
+	// settings; headKey is then the version key of the head a join review offers first for them. A client passes
+	// headKey as the chosen key when it applies the join, and { headKey } as the expected parents when it
+	// publishes this device's settings as their successor.
 	std::optional<SyncSettingsFile> head;
+	std::optional<QString> headKey;
 	SyncFirstUseChoice choice = SyncFirstUseChoice::None;
 };
 

@@ -176,6 +176,14 @@ constexpr auto kLineageLimit = 64;
 	return result;
 }
 
+// WHY: a head is stale when another install's head already holds it in its lineage; first use and Classify must
+// agree on which heads are current, or a join offers a head first use never saw.
+[[nodiscard]] bool HeldByAnother(
+		const ConfigHead &head,
+		const ConfigHead &other) {
+	return other.install != head.install && Has(other.lineage, head.key);
+}
+
 [[nodiscard]] ConfigClassification Classify(
 		const QString &localFp,
 		const ConfigSyncState &state,
@@ -225,7 +233,7 @@ constexpr auto kLineageLimit = 64;
 		const auto behind = std::any_of(selected.begin(), selected.end(),
 			[&](const auto &other) {
 				return other.first != install
-					&& Has(other.second.lineage, head.key);
+					&& HeldByAnother(head, other.second);
 			});
 		if (behind) {
 			result.heads.push_back({ head, ConfigHeadKind::Stale });
@@ -507,6 +515,22 @@ std::optional<ConfigVersion> MakeConfigVersion(
 	result.lineage = std::move(ancestors);
 	result.key = QString::number(generation + 1)
 		+ u"."_q + SettingsFingerprint(text);
+	return result;
+}
+
+std::vector<ConfigHead> MaximalConfigHeads(
+		const std::vector<ConfigHead> &heads) {
+	auto result = std::vector<ConfigHead>();
+	for (const auto &head : heads) {
+		const auto behind = std::any_of(heads.begin(), heads.end(),
+			[&](const ConfigHead &other) {
+				return HeldByAnother(head, other);
+			});
+		if (!behind) {
+			result.push_back(head);
+		}
+	}
+	std::sort(result.begin(), result.end(), Precedes);
 	return result;
 }
 

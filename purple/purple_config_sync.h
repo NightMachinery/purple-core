@@ -76,6 +76,11 @@ struct ConfigClassification {
 	bool inputValid = true;
 };
 
+// The heads that no other install's head holds in its lineage (the ones Classify does not mark Stale), in the
+// order a plan offers them: highest generation, then sequence, then install, then key.
+[[nodiscard]] std::vector<ConfigHead> MaximalConfigHeads(
+	const std::vector<ConfigHead> &heads);
+
 [[nodiscard]] ConfigClassification ClassifyConfig(
 	const QString &localFp,
 	const ConfigSyncState &state,

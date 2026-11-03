@@ -1308,8 +1308,18 @@ std::optional<SyncFirstUseInput> SyncFirstUseInputOf(
 		const auto heads = ExtractSyncConfigHeads(inventory, *selected, QString());
 		if (heads.status != SyncConfigHeadsStatus::Complete || AnyNewerSchema(heads.heads)) {
 			return std::nullopt;
-		} else if (heads.heads.size() == 1) {
-			result.head = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, heads.heads.front().text);
+		}
+		const auto maximal = MaximalConfigHeads(SyncConfigHeadsOf(heads.heads));
+		const auto fingerprint = maximal.empty() ? QString() : SyncConfigKeyFingerprint(maximal.front().key);
+		const auto agree = !maximal.empty() && std::all_of(maximal.begin(), maximal.end(), [&](const auto &head) {
+			return SyncConfigKeyFingerprint(head.key) == fingerprint;
+		});
+		const auto record = std::find_if(heads.heads.begin(), heads.heads.end(), [&](const auto &head) {
+			return agree && head.head.install == maximal.front().install && head.head.key == maximal.front().key;
+		});
+		if (record != heads.heads.end()) {
+			result.head = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, record->text);
+			result.headKey = record->head.key;
 		}
 	}
 	return result;

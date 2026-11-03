@@ -2814,6 +2814,102 @@ void TestFirstUse() {
 	CHECK(!SyncFirstUseInputOf(garbled.inventory(), custom));
 }
 
+void TestFirstUseSupersededHead() {
+	Begin("first use: a head another install's head supersedes is not current");
+	const auto space = *FormatSyncSpaceId(QByteArray(16, 'f'));
+	const auto r1Text = QByteArray("[recent]\nstay_visible_after_close = \"2m\"\n");
+	const auto r2Text = QByteArray("[recent]\nstay_visible_after_close = \"5m\"\n");
+	const auto mine = QByteArray("[recent]\nstay_visible_after_close = \"9m\"\n");
+	auto cloud = Cloud();
+	// Desktop D publishes R1; Android A joins, applies it and later publishes R2 with R1 as its parent.
+	auto d = MakeRemote('d', u"macOS"_q);
+	auto a = MakeRemote('a', u"Android"_q);
+	const auto r1 = Post(cloud, d, space, r1Text);
+	const auto r2 = Post(cloud, a, space, r2Text, { r1 });
+	CHECK(ExtractSyncConfigHeads(cloud.inventory(), space, QString()).heads.size() == 2);
+
+	// A join applies the head first use names: the join review offers exactly that key.
+	const auto joinWith = [&](char seed, const QByteArray *text, const SyncFirstUseInput &input) {
+		auto device = Device(seed);
+		if (text) {
+			device.setLocal(*text);
+		}
+		CHECK(Join(device, cloud.inventory()));
+		const auto shown = Review(device, cloud);
+		CHECK(shown.plan.verdict == ConfigSyncVerdict::Choose);
+		CHECK(Keys(shown.plan.offered) == std::vector<QString>{ r2.key });
+		const auto run = Apply(device, cloud, shown, input.headKey);
+		CHECK(run.status == SyncConfigApplyStatus::Applied && run.wroteFile);
+		CHECK(device.local.text == r2Text);
+	};
+
+	// Case 3: a fresh login with defaults joins without a prompt and applies R2.
+	const auto fresh = SyncFirstUseInputOf(cloud.inventory(), MakeSyncSettingsFile(SyncSettingsFileStatus::Absent));
+	CHECK(fresh && !fresh->groupEmpty && fresh->head && fresh->head->text == r2Text);
+	CHECK(fresh && fresh->headKey == r2.key);
+	CHECK(fresh && PlanSyncFirstUse(*fresh) == SyncFirstUseAction::Join);
+	if (fresh) {
+		joinWith('e', nullptr, *fresh);
+	}
+
+	// Case 4: settings meaning the same as R2 join silently; meaning the same as the superseded R1 still asks.
+	const auto sameText = QByteArray("# here\n") + r2Text;
+	const auto same = SyncFirstUseInputOf(cloud.inventory(),
+		MakeSyncSettingsFile(SyncSettingsFileStatus::Present, sameText));
+	CHECK(same && same->headKey == r2.key);
+	CHECK(same && PlanSyncFirstUse(*same) == SyncFirstUseAction::JoinSilently);
+	if (same) {
+		joinWith('g', &sameText, *same);
+	}
+	const auto old = SyncFirstUseInputOf(cloud.inventory(),
+		MakeSyncSettingsFile(SyncSettingsFileStatus::Present, QByteArray("# old\n") + r1Text));
+	CHECK(old && PlanSyncFirstUse(*old) == SyncFirstUseAction::Ask);
+
+	// Case 4, other settings: Ask, then either answer works.
+	auto ask = SyncFirstUseInputOf(cloud.inventory(), MakeSyncSettingsFile(SyncSettingsFileStatus::Present, mine));
+	CHECK(ask && ask->headKey == r2.key && PlanSyncFirstUse(*ask) == SyncFirstUseAction::Ask);
+	if (ask && ask->headKey) {
+		ask->choice = SyncFirstUseChoice::Synced;
+		CHECK(PlanSyncFirstUse(*ask) == SyncFirstUseAction::Join);
+		joinWith('h', &mine, *ask);
+		// "Use this device's settings" publishes the successor of { headKey }.
+		ask->choice = SyncFirstUseChoice::ThisDevice;
+		CHECK(PlanSyncFirstUse(*ask) == SyncFirstUseAction::Publish);
+		auto device = Device('i');
+		device.setLocal(mine);
+		CHECK(Join(device, cloud.inventory()));
+		CHECK(Gate(device, cloud, SyncConfigPublishRequest{
+			.expectedFingerprint = device.local.fingerprint,
+			.expectedParents = std::vector<QString>{ *ask->headKey },
+		}) == SyncConfigPublishGateStatus::Proceed);
+	}
+
+	// Current heads that carry the same settings count as one head; the key is the one the join review offers.
+	auto twins = Cloud();
+	auto p = MakeRemote('p', u"macOS"_q);
+	auto q = MakeRemote('q', u"Android"_q);
+	Post(twins, p, space, r1Text);
+	Post(twins, q, space, r1Text);
+	const auto twin = SyncFirstUseInputOf(twins.inventory(), MakeSyncSettingsFile(SyncSettingsFileStatus::Absent));
+	CHECK(twin && twin->head && twin->head->text == r1Text && twin->headKey);
+	CHECK(twin && PlanSyncFirstUse(*twin) == SyncFirstUseAction::Join);
+	if (twin && twin->headKey) {
+		auto device = Device('j');
+		CHECK(Join(device, twins.inventory()));
+		const auto shown = Review(device, twins);
+		CHECK(Keys(shown.plan.offered) == std::vector<QString>{ *twin->headKey });
+		CHECK(Apply(device, twins, shown, twin->headKey).status == SyncConfigApplyStatus::Applied);
+		CHECK(device.local.text == r1Text);
+	}
+
+	// Two current heads with different settings: no single head, so a customised device is asked.
+	auto r = MakeRemote('r', u"Windows"_q);
+	Post(cloud, r, space, mine);
+	const auto split = SyncFirstUseInputOf(cloud.inventory(), MakeSyncSettingsFile(SyncSettingsFileStatus::Present, sameText));
+	CHECK(split && !split->head && !split->headKey);
+	CHECK(split && PlanSyncFirstUse(*split) == SyncFirstUseAction::Ask);
+}
+
 void TestRootStoreRelinkProof() {
 	Begin("root store relink proof");
 	auto cloud = Cloud();
@@ -3290,6 +3386,7 @@ int main() {
 	TestFlowDescribe();
 	TestFlowReviewStatuses();
 	TestFirstUse();
+	TestFirstUseSupersededHead();
 	TestRootStoreRelinkProof();
 	TestAccountRecovery();
 	TestStartAgainAndSetupBinding();

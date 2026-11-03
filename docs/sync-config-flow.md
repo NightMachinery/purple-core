@@ -69,7 +69,7 @@ device whose state is in another space) decides with
   be asked to adopt;
 - no record, settings not the defaults: Publish the first record;
 - records, settings the defaults: Join and apply the chat's settings;
-- records, settings meaning the same as the chat's one head: JoinSilently;
+- records, settings meaning the same as the chat's current head: JoinSilently;
 - otherwise Ask once: "Use the synced settings" (Join; History keeps the old
   file) or "Use this device's settings" (Publish as the successor). The answer
   comes back as `SyncFirstUseChoice`.
@@ -82,6 +82,18 @@ comments, spacing and spelled-out defaults never prompt. An Invalid or
 last-good local file waits. `SyncFirstUseInputOf` returns nullopt unless the
 inventory is complete and its selected space has extractable heads of a
 supported schema.
+
+The chat's current heads are its maximal ones (`MaximalConfigHeads`): every
+head another install's head holds in its lineage is dropped, the same rule by
+which `Classify` marks a head Stale. When one current head remains, or all of
+them carry the same fingerprint, `head` holds its text and `headKey` the
+version key of the one a join review offers first for them. A client uses
+`headKey` and never re-derives it from `ExtractSyncConfigHeads`: it is the
+chosen key for `CheckSyncConfigApplyChoice` and `PlanSyncConfigApply` after a
+Join, JoinSilently or "Use the synced settings", and `{ headKey }` is the
+`expectedParents` of the publish behind "Use this device's settings". When
+current heads disagree, both are nullopt and a device whose settings are not
+the defaults is asked.
 
 `ExtractSyncConfigHeads(inventory, space, ownInstall)` takes, for each config
 group in the space other than `ownInstall`, the lowest message id among its
