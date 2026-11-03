@@ -158,4 +158,11 @@ struct SyncAutoDecodeResult {
 [[nodiscard]] SyncAutoDecodeResult ParseSyncAutoRecord(const QByteArray &bytes);
 [[nodiscard]] SyncAutoPlan PlanSyncAuto(const SyncAutoInput &input);
 
+// After MoveSyncStateToChat: a step in flight belonged to the old chat and is
+// dropped, and the local settings on disk count as saved, so the next run checks
+// the new chat and publishes them there. Nullopt for an invalid record or fingerprint.
+[[nodiscard]] std::optional<SyncAutoRecord> MoveSyncAutoRecord(
+	const SyncAutoRecord &record,
+	const QString &localFingerprint);
+
 }

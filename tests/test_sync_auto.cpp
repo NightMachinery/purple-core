@@ -1027,6 +1027,34 @@ void TestMovedChatPublishes() {
 	CHECK(staged.facts.state->config.confirmedSeq == 3 && staged.facts.state->config.abandonedSeq == 0);
 	CHECK(staged.facts.state->ownMessages.size() == 1);
 
+	Section = "a moved record drops the old chat's step and publishes the file on disk";
+	auto inflight = Harness();
+	inflight.seedOwn(T0);
+	inflight.setLocal(T1);
+	const auto post = Stage(inflight);
+	CHECK(post.action == SyncAutoAction::Post && inflight.record.active);
+	const auto oldTicket = inflight.record.ticket;
+	const auto movedState = MoveSyncStateToChat(*inflight.facts.state, { PeerTokenKind::Channel, 123 });
+	CHECK(movedState.move && movedState.abandonedSeq != 0);
+	inflight.facts.state = movedState.move.state;
+	inflight.facts.chat = movedState.move.state.chat;
+	inflight.facts.stagedRecord.clear();
+	inflight.cloud.clear();
+	inflight.setLocal(T1, false);
+	const auto movedRecord = MoveSyncAutoRecord(inflight.record, inflight.facts.local.fingerprint);
+	CHECK(movedRecord && movedRecord->enabled && !movedRecord->active);
+	CHECK(movedRecord && movedRecord->pending == SyncAutoAction::NoOp && movedRecord->record.isEmpty());
+	CHECK(movedRecord && movedRecord->expectedState.isEmpty() && movedRecord->ticket == oldTicket);
+	CHECK(!MoveSyncAutoRecord(inflight.record, QString()));
+	if (movedRecord) { inflight.record = *movedRecord; }
+	auto stale = inflight.input(SyncAutoEvent::Completed, SyncAutoOutcome::Sent);
+	stale.completedTicket = oldTicket;
+	CHECK(PlanSyncAuto(stale).action == SyncAutoAction::NoOp);
+	CHECK(inflight.event(SyncAutoEvent::Foreground).action == SyncAutoAction::Check);
+	const auto republish = inflight.inventory();
+	CHECK(republish.action == SyncAutoAction::Publish);
+	CHECK(InspectConfigPayload(ParseSyncEnvelope(republish.bytes)).text == T1);
+
 	Section = "an unmoved state missing its record still needs review";
 	auto unmoved = Harness();
 	unmoved.seedOwn(T0);

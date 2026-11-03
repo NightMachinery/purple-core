@@ -82,6 +82,13 @@ absent there. `SyncConfigAwaitsMovedPublish` names that case: a v2 state with a
 confirmed head and an empty ledger. A confirmed head is never removed from the
 ledger, so the ledger is empty only between the move and the first publish.
 
+The automatic record moves with it: `MoveSyncAutoRecord` drops a step that
+was in flight in the old chat (its late callbacks no longer match) and marks the
+settings file on disk as saved, so the next run checks the new chat and can
+publish without waiting for another save. Write the moved record before the
+moved state: a crash in between leaves a fresh record beside the old chat, and
+repeating the move is harmless.
+
 In that case the config review reports LocalChanges instead of UpToDate,
 `PlanSyncPublish` lets the absent head through, and automatic sync publishes
 the local settings as a new version whose parent is the old base. Later
@@ -96,6 +103,6 @@ pick, the codec round trip and refusals, the persisted waits, show-once
 problems, the unbound, magic and manual plans, and verification.
 It also covers moves that abandon a stage, keep the same chat or are refused.
 `tests/test_sync_auto.cpp` covers the first publish after a move, a move that
-abandoned a stage, a later
+abandoned a stage, a moved record with a step in flight, a later
 missing head, an unmoved missing head, a move without saved bytes and a move
 into a chat with a newer version.

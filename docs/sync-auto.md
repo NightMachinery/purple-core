@@ -118,6 +118,11 @@ limits is held before any effect is authorized.
   dialog. RetryAt uses 30 seconds, 2 minutes, then 10 minutes. Another failure
   stops until a subsequent trigger. Retry events before the deadline do nothing.
 
+## Moving to another chat
+
+`MoveSyncAutoRecord` resets the record when its state moves to another sync
+chat; see sync-chat-magic.md.
+
 ## Restart and client integration
 
 Persisting an emitted step does not make its side effect atomic. A restarted

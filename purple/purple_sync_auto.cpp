@@ -594,4 +594,26 @@ SyncAutoPlan PlanSyncAuto(const SyncAutoInput &input) {
 	return held;
 }
 
+std::optional<SyncAutoRecord> MoveSyncAutoRecord(
+		const SyncAutoRecord &record,
+		const QString &localFingerprint) {
+	if (!IsSyncAutoRecord(record) || localFingerprint.isEmpty()) {
+		return std::nullopt;
+	}
+	auto result = SyncAutoRecord();
+	result.account = record.account;
+	result.enabled = record.enabled;
+	result.event = record.event;
+	result.ticket = record.ticket;
+	result.run = record.run;
+	result.noticed = record.noticed;
+	result.preserved = record.preserved;
+	result.savedFingerprint = localFingerprint;
+	result.queuedCheck = true;
+	if (!IsSyncAutoRecord(result)) {
+		return std::nullopt;
+	}
+	return result;
+}
+
 }
