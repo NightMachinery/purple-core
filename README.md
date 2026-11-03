@@ -60,6 +60,11 @@ schema and lifecycle are independent of settings sync.
   migration, account discovery or sync binding.
 - `purple/purple_settings.{h,cpp}` - parses `settings.toml` into presets, lists,
   folders and rules, collecting warnings as it goes.
+- `purple/purple_playback.{h,cpp}` - the private-chat voice queue rule.
+  `AnchorForManualPlay` decides, from `Settings::playback`, the chat kind and
+  the direction of the started message, whether a manually started queue is
+  confined; `QueueKeeps` says whether a confined queue may play a candidate.
+  It is pure: clients track manual plays and walk their own playlists.
 - `purple/purple_splice.{h,cpp}` - the only writes the apps ever make to
   `settings.toml`. It does not re-serialise the document: it locates the array
   it must touch through toml++'s source regions and edits the raw lines, so
@@ -435,7 +440,8 @@ identity and codec compatibility; `tests/test_archive_source.cpp` covers copy-so
 provenance. `tests/test_archive_storage.cpp` covers SQL plans, envelopes, key loss
 and logout barriers. `tests/test_archive_staging.cpp` covers streaming-media
 staging. `tests/test_sync_auto.cpp` covers automatic settings policy.
-`run.sh` compiles the core once and runs all ten. Set
+`tests/test_playback.cpp` covers the private-chat voice queue rule.
+`run.sh` compiles the core once and runs all twelve. Set
 `ARCHIVE_SQLITE_TESTS=1` to also execute the SQL against system SQLite.
 
 ```sh
@@ -485,7 +491,17 @@ when qualifying this change.
 voice queue switch: in a one-to-one chat, a queue you start manually on the
 other person's voice or round message plays only their messages next. A value
 that is not a boolean, or a `playback` that is not a table, is a warning and
-keeps the default. The sync review labels the table Playback. See
+keeps the default. The sync review labels the table Playback.
+
+`purple/purple_playback.h` holds the rule both clients ask. A manual play makes
+a `VoiceQueueAnchor` with `AnchorForManualPlay(settings.playback, chat,
+startOutgoing)`: it is confined only when the setting is on, the chat is
+`PlaybackChat::OneToOne` and the started message is incoming. Automatic
+advances keep the anchor, so a toggle applies from the next manual play.
+`QueueKeeps(anchor, candidateOutgoing)` drops only outgoing candidates of a
+confined anchor. Direction is Telegram's sender, so forwarded messages count
+for whoever forwarded them. Saved Messages (`Self`), groups, channels and
+service chats (`Other`) never confine. See
 [the media playback design](docs/media-design.md), F3.
 
 ## Settings scope and Reset (source candidate)
