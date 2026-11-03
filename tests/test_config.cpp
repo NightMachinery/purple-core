@@ -948,6 +948,17 @@ void TestScalarParsers() {
 	CHECK_EQ(Purple::ParseDuration(u"off"_q).value_or(-1), 0);
 	CHECK(!Purple::ParseDuration(u"soon"_q).has_value());
 	CHECK(!Purple::ParseDuration(u"-5m"_q).has_value());
+	// Days, for bin_keep = "7d"; every duration key gains the suffix.
+	CHECK_EQ(Purple::ParseDuration(u"7d"_q).value_or(-1), 7 * 86400);
+	CHECK_EQ(Purple::ParseDuration(u"1D"_q).value_or(-1), 86400);
+	CHECK_EQ(Purple::ParseDuration(u"0d"_q).value_or(-1), 0);
+	CHECK(!Purple::ParseDuration(u"d"_q).has_value());
+	CHECK(!Purple::ParseDuration(u"-1d"_q).has_value());
+	CHECK(!Purple::ParseDuration(u"1.5d"_q).has_value());
+	// Seconds that do not fit an int are refused rather than wrapped.
+	CHECK(!Purple::ParseDuration(u"30000d"_q).has_value());
+	CHECK(!Purple::ParseDuration(u"600000h"_q).has_value());
+	CHECK_EQ(Purple::ParseDuration(u"24855d"_q).value_or(-1), 24855 * 86400);
 
 	CHECK_EQ(Purple::ParseTimeOfDay(u"09:00"_q).value_or(-1), 540);
 	CHECK_EQ(Purple::ParseTimeOfDay(u"23:59"_q).value_or(-1), 1439);
@@ -5434,6 +5445,210 @@ void TestPlayback() {
 	if (change.entries.size() == 1) {
 		CHECK_EQ(change.entries[0].table, u"playback"_q);
 		CHECK_EQ(change.entries[0].label, u"Playback"_q);
+	}
+}
+
+// [playback] seek_step: one of four steps, 10 s unless the file says
+// otherwise.
+void TestPlaybackSeekStep() {
+	Begin("playback seek step");
+
+	CHECK_EQ(Parse(QString()).settings.playback.seekStepSeconds, 10);
+	CHECK_EQ(Parse(u"[playback]\n"_q).settings.playback.seekStepSeconds, 10);
+	for (const auto &[text, seconds] : std::vector<std::pair<QString, int>>{
+			{ u"5s"_q, 5 },
+			{ u"10s"_q, 10 },
+			{ u"15s"_q, 15 },
+			{ u"30s"_q, 30 },
+		}) {
+		const auto parsed = Parse(
+			u"[playback]\nseek_step = \"%1\"\n"_q.arg(text));
+		CHECK(parsed.ok());
+		CHECK(parsed.warnings.empty());
+		CHECK_EQ(parsed.settings.playback.seekStepSeconds, seconds);
+	}
+	for (const auto &text : { u"20s"_q, u"abc"_q, u"off"_q, u"1m"_q }) {
+		const auto parsed = Parse(
+			u"[playback]\nseek_step = \"%1\"\n"_q.arg(text));
+		CHECK(parsed.ok());
+		CHECK_EQ(parsed.settings.playback.seekStepSeconds, 10);
+		CHECK(WarnsAbout(parsed, u"'seek_step' should be"_q));
+	}
+	const auto number = Parse(u"[playback]\nseek_step = 10\n"_q);
+	CHECK_EQ(number.settings.playback.seekStepSeconds, 10);
+	CHECK(WarnsAbout(number, u"'seek_step' should be a string"_q));
+
+	// The other key is untouched by a seek step.
+	const auto both = Parse(
+		u"[playback]\nprivate_chat_queue_p = false\nseek_step = \"30s\"\n"_q);
+	CHECK(both.warnings.empty());
+	CHECK(!both.settings.playback.privateChatQueue);
+	CHECK_EQ(both.settings.playback.seekStepSeconds, 30);
+	CHECK(Purple::SettingsScope(u"playback"_q, u"seek_step"_q)
+		== Purple::SettingScope::AppWide);
+}
+
+// [recording]: every key of the media recording design's Settings section,
+// with its default, its range and its warnings.
+void TestRecording() {
+	Begin("recording");
+
+	const auto defaults = [](const Purple::Recording &value) {
+		return value.keepAcrossChats
+			&& value.background
+			&& value.roundFloat
+			&& (value.roundJournalSeconds == 1)
+			&& (value.binKeepSeconds == 48 * 3600)
+			&& value.keepDiscarded
+			&& value.sendElsewhere
+			&& value.callPause
+			&& value.headset
+			&& !value.headsetHoldStart
+			&& (value.longNudgeSeconds == 30 * 60)
+			&& value.previewTrim;
+	};
+
+	const auto silent = Parse(QString());
+	CHECK(silent.ok());
+	CHECK(silent.warnings.empty());
+	CHECK(defaults(silent.settings.recording));
+
+	const auto empty = Parse(u"[recording]\n"_q);
+	CHECK(empty.ok());
+	CHECK(empty.warnings.empty());
+	CHECK(defaults(empty.settings.recording));
+
+	using Flag = bool Purple::Recording::*;
+	const auto flags = std::vector<std::pair<QString, Flag>>{
+		{ u"keep_across_chats_p"_q, &Purple::Recording::keepAcrossChats },
+		{ u"background_p"_q, &Purple::Recording::background },
+		{ u"round_float_p"_q, &Purple::Recording::roundFloat },
+		{ u"keep_discarded_p"_q, &Purple::Recording::keepDiscarded },
+		{ u"send_elsewhere_p"_q, &Purple::Recording::sendElsewhere },
+		{ u"call_pause_p"_q, &Purple::Recording::callPause },
+		{ u"headset_p"_q, &Purple::Recording::headset },
+		{ u"headset_hold_start_p"_q, &Purple::Recording::headsetHoldStart },
+		{ u"preview_trim_p"_q, &Purple::Recording::previewTrim },
+	};
+	for (const auto &[key, member] : flags) {
+		const auto fallback = Purple::Recording().*member;
+		for (const auto value : { true, false }) {
+			const auto parsed = Parse(u"[recording]\n%1 = %2\n"_q
+				.arg(key, value ? u"true"_q : u"false"_q));
+			CHECK(parsed.ok());
+			CHECK(parsed.warnings.empty());
+			CHECK_EQ(parsed.settings.recording.*member, value);
+			// Only that key moved.
+			auto expected = Purple::Recording();
+			expected.*member = value;
+			CHECK(defaults(expected) == defaults(parsed.settings.recording));
+		}
+		const auto wrong = Parse(u"[recording]\n%1 = \"yes\"\n"_q.arg(key));
+		CHECK(wrong.ok());
+		CHECK_EQ(wrong.settings.recording.*member, fallback);
+		CHECK(WarnsAbout(wrong, u"'%1' should be true or false"_q.arg(key)));
+		CHECK(Purple::SettingsScope(u"recording"_q, key)
+			== Purple::SettingScope::AppWide);
+	}
+
+	const auto journal = [](const QString &text) {
+		return Parse(u"[recording]\nround_journal = \"%1\"\n"_q.arg(text));
+	};
+	for (const auto &[text, seconds] : std::vector<std::pair<QString, int>>{
+			{ u"off"_q, 0 },
+			{ u"1s"_q, 1 },
+			{ u"2s"_q, 2 },
+			{ u"5s"_q, 5 },
+		}) {
+		const auto parsed = journal(text);
+		CHECK(parsed.ok());
+		CHECK(parsed.warnings.empty());
+		CHECK_EQ(parsed.settings.recording.roundJournalSeconds, seconds);
+	}
+	for (const auto &text : { u"3s"_q, u"abc"_q, u"10s"_q }) {
+		const auto parsed = journal(text);
+		CHECK(parsed.ok());
+		CHECK_EQ(parsed.settings.recording.roundJournalSeconds, 1);
+		CHECK(WarnsAbout(parsed, u"'round_journal' should be"_q));
+	}
+
+	const auto keep = [](const QString &text) {
+		return Parse(u"[recording]\nbin_keep = \"%1\"\n"_q.arg(text));
+	};
+	for (const auto &[text, seconds] : std::vector<std::pair<QString, int>>{
+			{ u"12h"_q, 12 * 3600 },
+			{ u"24h"_q, 24 * 3600 },
+			{ u"48h"_q, 48 * 3600 },
+			{ u"7d"_q, 7 * 86400 },
+			{ u"168h"_q, 7 * 86400 },
+			{ u"1h"_q, 3600 },
+			{ u"90m"_q, 90 * 60 },
+			{ u"off"_q, 0 },
+		}) {
+		const auto parsed = keep(text);
+		CHECK(parsed.ok());
+		CHECK(parsed.warnings.empty());
+		CHECK_EQ(parsed.settings.recording.binKeepSeconds, seconds);
+	}
+	for (const auto &text : { u"59m"_q, u"30s"_q, u"soon"_q }) {
+		const auto parsed = keep(text);
+		CHECK(parsed.ok());
+		CHECK_EQ(parsed.settings.recording.binKeepSeconds, 48 * 3600);
+		CHECK(WarnsAbout(parsed, u"'bin_keep' should be"_q));
+	}
+
+	const auto nudge = [](const QString &text) {
+		return Parse(u"[recording]\nlong_nudge = \"%1\"\n"_q.arg(text));
+	};
+	CHECK_EQ(nudge(u"off"_q).settings.recording.longNudgeSeconds, 0);
+	CHECK(nudge(u"off"_q).warnings.empty());
+	CHECK_EQ(nudge(u"10m"_q).settings.recording.longNudgeSeconds, 600);
+	CHECK_EQ(nudge(u"1h"_q).settings.recording.longNudgeSeconds, 3600);
+	CHECK_EQ(nudge(u"30s"_q).settings.recording.longNudgeSeconds, 1800);
+	CHECK(WarnsAbout(nudge(u"30s"_q), u"'long_nudge' should be"_q));
+	CHECK_EQ(nudge(u"later"_q).settings.recording.longNudgeSeconds, 1800);
+
+	// The design's sample table, verbatim, reads without a warning.
+	const auto sample = Parse(uR"([playback]
+private_chat_queue_p = true
+seek_step = "10s"
+
+[recording]
+keep_across_chats_p = true
+background_p = true
+round_float_p = true
+round_journal = "1s"
+bin_keep = "48h"
+keep_discarded_p = true
+send_elsewhere_p = true
+call_pause_p = true
+headset_p = true
+headset_hold_start_p = false
+long_nudge = "30m"
+preview_trim_p = true
+)"_q);
+	CHECK(sample.ok());
+	CHECK(sample.warnings.empty());
+	CHECK(defaults(sample.settings.recording));
+
+	const auto notATable = Parse(u"recording = true\n"_q);
+	CHECK(notATable.ok());
+	CHECK(defaults(notATable.settings.recording));
+	CHECK(WarnsAbout(notATable, u"'recording' should be a table"_q));
+
+	CHECK(Purple::SettingsScope(QString(), u"recording"_q)
+		== Purple::SettingScope::AppWide);
+	CHECK(Purple::SettingsScope(u"recording"_q, u"bin_keep"_q)
+		== Purple::SettingScope::AppWide);
+
+	const auto change = Purple::SummarizeConfigChange(
+		"[recording]\nbin_keep = \"48h\"\n",
+		"[recording]\nbin_keep = \"7d\"\n");
+	CHECK(change.parsed);
+	CHECK_EQ(int(change.entries.size()), 1);
+	if (change.entries.size() == 1) {
+		CHECK_EQ(change.entries[0].table, u"recording"_q);
+		CHECK_EQ(change.entries[0].label, u"Recording"_q);
 	}
 }
 
@@ -16362,6 +16577,8 @@ int main() {
 	TestAddStoryButton();
 	TestSyncAndRecommended();
 	TestPlayback();
+	TestPlaybackSeekStep();
+	TestRecording();
 	TestReservedHotkeys();
 	TestStories();
 	TestRecent();

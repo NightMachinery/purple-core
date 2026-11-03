@@ -11,6 +11,8 @@ option) any later version.
 
 #include <algorithm>
 #include <functional>
+#include <initializer_list>
+#include <limits>
 
 // Return parse errors instead of throwing, so a hand-edited file with a typo
 // degrades to "keep the last good settings and show a banner" rather than to an
@@ -1560,6 +1562,59 @@ void WarnUnknownLists(
 	return result;
 }
 
+// A duration key that takes one of a few listed values, in seconds ("off" is
+// 0, and is a choice only when 0 is listed). Anything else, including a valid
+// duration that is not listed, warns and keeps the fallback.
+[[nodiscard]] int ReadDurationChoice(
+		const toml::table &table,
+		std::string_view key,
+		const QString &context,
+		std::initializer_list<int> choices,
+		const QString &spelled,
+		int fallback,
+		std::vector<QString> &warnings) {
+	const auto text = ReadString(table, key, context, warnings);
+	if (!text) {
+		return fallback;
+	}
+	const auto seconds = ParseDuration(*text);
+	if (seconds
+		&& std::find(choices.begin(), choices.end(), *seconds)
+			!= choices.end()) {
+		return *seconds;
+	}
+	warnings.push_back(
+		u"%1: '%2' should be %3, not \"%4\", keeping %5 seconds."_q
+			.arg(context, Text(key), spelled, *text)
+			.arg(fallback));
+	return fallback;
+}
+
+// A duration key that is "off" (0) or at least `minimum' seconds. A shorter
+// or unparseable value warns and keeps the fallback.
+[[nodiscard]] int ReadDurationAtLeast(
+		const toml::table &table,
+		std::string_view key,
+		const QString &context,
+		int minimum,
+		const QString &spelled,
+		int fallback,
+		std::vector<QString> &warnings) {
+	const auto text = ReadString(table, key, context, warnings);
+	if (!text) {
+		return fallback;
+	}
+	const auto seconds = ParseDuration(*text);
+	if (seconds && (!*seconds || *seconds >= minimum)) {
+		return *seconds;
+	}
+	warnings.push_back(
+		u"%1: '%2' should be %3, not \"%4\", keeping %5 seconds."_q
+			.arg(context, Text(key), spelled, *text)
+			.arg(fallback));
+	return fallback;
+}
+
 // [playback]: how voice and round video messages play. Shaped exactly like
 // ReadSuggestions, down to the warning for a value that is not a table.
 [[nodiscard]] Playback ReadPlayback(
@@ -1581,6 +1636,71 @@ void WarnUnknownLists(
 		u"playback"_q,
 		warnings
 	).value_or(true);
+	result.seekStepSeconds = ReadDurationChoice(
+		table,
+		"seek_step",
+		u"playback"_q,
+		{ 5, 10, 15, 30 },
+		u"\"5s\", \"10s\", \"15s\" or \"30s\""_q,
+		result.seekStepSeconds,
+		warnings);
+	return result;
+}
+
+// [recording]: voice and round video recording, see
+// docs/media-recording-design.md. Shaped like ReadPlayback: every key
+// defaulted, a warning for a value of the wrong shape that keeps the default,
+// and a warning for a recording that is not a table.
+[[nodiscard]] Recording ReadRecording(
+		const SettingsRootReader &root,
+		std::vector<QString> &warnings) {
+	auto result = Recording();
+	const auto node = root.get("recording");
+	if (!node) {
+		return result;
+	} else if (!node->as_table()) {
+		warnings.push_back(
+			u"'recording' should be a table (%1)."_q.arg(At(*node)));
+		return result;
+	}
+	const auto &table = *node->as_table();
+	const auto context = u"recording"_q;
+	const auto flag = [&](std::string_view key, bool &value) {
+		value = ReadBool(table, key, context, warnings).value_or(value);
+	};
+	flag("keep_across_chats_p", result.keepAcrossChats);
+	flag("background_p", result.background);
+	flag("round_float_p", result.roundFloat);
+	flag("keep_discarded_p", result.keepDiscarded);
+	flag("send_elsewhere_p", result.sendElsewhere);
+	flag("call_pause_p", result.callPause);
+	flag("headset_p", result.headset);
+	flag("headset_hold_start_p", result.headsetHoldStart);
+	flag("preview_trim_p", result.previewTrim);
+	result.roundJournalSeconds = ReadDurationChoice(
+		table,
+		"round_journal",
+		context,
+		{ 0, 1, 2, 5 },
+		u"\"off\", \"1s\", \"2s\" or \"5s\""_q,
+		result.roundJournalSeconds,
+		warnings);
+	result.binKeepSeconds = ReadDurationAtLeast(
+		table,
+		"bin_keep",
+		context,
+		3600,
+		u"\"off\" or at least \"1h\", such as \"48h\" or \"7d\""_q,
+		result.binKeepSeconds,
+		warnings);
+	result.longNudgeSeconds = ReadDurationAtLeast(
+		table,
+		"long_nudge",
+		context,
+		60,
+		u"\"off\" or at least \"1m\", such as \"30m\""_q,
+		result.longNudgeSeconds,
+		warnings);
 	return result;
 }
 
@@ -1896,6 +2016,7 @@ const std::vector<SettingsScopeTable> &SettingsScopeRegistry() {
 		{ u"overrides"_q, SettingScope::AppWide },
 		{ u"suggestions"_q, SettingScope::AppWide },
 		{ u"playback"_q, SettingScope::AppWide },
+		{ u"recording"_q, SettingScope::AppWide },
 		{ u"screen_time"_q, SettingScope::AppWide },
 		{ u"devices"_q, SettingScope::AppWide },
 		{ u"sync"_q, SettingScope::FileLocal },
@@ -2421,11 +2542,17 @@ std::optional<int> ParseDuration(const QString &value) {
 		|| !trimmed.compare(u"none"_q, Qt::CaseInsensitive)) {
 		return 0;
 	}
-	auto multiplier = 1;
+	auto multiplier = qint64(1);
 	auto digits = trimmed;
 	const auto last = trimmed.back().toLower();
-	if (last == 's' || last == 'm' || last == 'h') {
-		multiplier = (last == 's') ? 1 : (last == 'm') ? 60 : 3600;
+	if (last == 's' || last == 'm' || last == 'h' || last == 'd') {
+		multiplier = (last == 's')
+			? 1
+			: (last == 'm')
+			? 60
+			: (last == 'h')
+			? 3600
+			: 86400;
 		digits = trimmed.left(trimmed.size() - 1).trimmed();
 	}
 	auto ok = false;
@@ -2433,7 +2560,12 @@ std::optional<int> ParseDuration(const QString &value) {
 	if (!ok || number < 0) {
 		return std::nullopt;
 	}
-	return number * multiplier;
+	// "30000d" is a number a person could type; its seconds are not an int.
+	const auto seconds = qint64(number) * multiplier;
+	if (seconds > std::numeric_limits<int>::max()) {
+		return std::nullopt;
+	}
+	return int(seconds);
 }
 
 std::optional<int> ParseTimeOfDay(const QString &value) {
@@ -2614,6 +2746,7 @@ namespace {
 	result.settings.lastSeen = ReadLastSeen(root, result.warnings);
 	result.settings.screenTime = ReadScreenTime(root, result.warnings);
 	result.settings.playback = ReadPlayback(root, result.warnings);
+	result.settings.recording = ReadRecording(root, result.warnings);
 	result.settings.devices = ReadDevices(root, result.warnings);
 
 	// Hotkeys last, because this is the one check that needs the presets and

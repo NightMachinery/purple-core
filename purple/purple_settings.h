@@ -735,6 +735,73 @@ struct Playback {
 	// skips yours. On by default. Read when a manual play starts, so a toggle
 	// takes effect from the next manual play, never in the middle of a queue.
 	bool privateChatQueue = true;
+
+	// `seek_step': how far the seek back and forward buttons, the headset
+	// rewind and fast-forward keys and the Desktop shortcut commands jump, in
+	// seconds. One of 5, 10, 15 or 30; anything else warns and keeps 10. The
+	// clamping rule that uses it is SeekTarget() in purple_recording.h.
+	int seekStepSeconds = 10;
+};
+
+// The `[recording]' table: voice and round video recording (the dock, the
+// background service, the round bubble, crash safety and the Recording bin).
+// See docs/media-recording-design.md.
+//
+// App-wide, like [playback], and not part of a preset. purple-core parses every
+// key; each client ignores the ones that do not apply to it (background_p and
+// headset_hold_start_p are Android only).
+struct Recording {
+	// `keep_across_chats_p' (F8): a recording survives switching chats.
+	bool keepAcrossChats = true;
+
+	// `background_p' (F7, Android): voice keeps recording in the background
+	// and with the phone locked.
+	bool background = true;
+
+	// `round_float_p' (F6): tapping around the camera shrinks a round into a
+	// bubble that keeps recording.
+	bool roundFloat = true;
+
+	// `round_journal' (F10): how often a round's sidecar journal appends a
+	// batch, in seconds. 0 is "off": no index batches, but the config header
+	// is still written once at the start so repair works. One of off, 1, 2 or
+	// 5 seconds; anything else warns and keeps 1.
+	int roundJournalSeconds = 1;
+
+	// `bin_keep' (F10): how long the Recording bin keeps an item, in seconds.
+	// 0 is "off": never clear. Any other value must be at least one hour;
+	// a shorter one warns and keeps 48 hours. BinItemExpired() in
+	// purple_recording.h is the rule that reads it.
+	int binKeepSeconds = 48 * 3600;
+
+	// `keep_discarded_p' (F10): Discard moves the recording to the bin as a
+	// "Discarded" item, cleared by the same bin_keep timer, instead of
+	// deleting it at once.
+	bool keepDiscarded = true;
+
+	// `send_elsewhere_p' (extra 1): "Send to another chat" in the dock and
+	// the bin.
+	bool sendElsewhere = true;
+
+	// `call_pause_p' (extra 3): a call pauses the recording and offers Resume.
+	bool callPause = true;
+
+	// `headset_p' (extra 4): the headset button controls a recording; on
+	// Desktop, the media keys do while a recording exists.
+	bool headset = true;
+
+	// `headset_hold_start_p' (extra 4, Android): holding the headset button
+	// starts a voice recording in the open chat.
+	bool headsetHoldStart = false;
+
+	// `long_nudge' (extra 5): the interval of the "Still recording" nudge, in
+	// seconds of recorded time. 0 is "off". Any other value must be at least
+	// one minute; a shorter one warns and keeps 30 minutes. NextNudgeAt() in
+	// purple_recording.h is the schedule.
+	int longNudgeSeconds = 30 * 60;
+
+	// `preview_trim_p' (extra 6): Preview and trim from the dock.
+	bool previewTrim = true;
 };
 
 // The `[sync]' table: what settings.toml does on its way to your other
@@ -1001,6 +1068,7 @@ struct Settings {
 	LastSeen lastSeen;
 	ScreenTime screenTime;
 	Playback playback;
+	Recording recording;
 
 	// [devices], in file order.
 	std::vector<DeviceLabel> devices;
@@ -1142,7 +1210,8 @@ struct LayerSettingsResult {
 // Whether this entry is that marker rather than a folder of the user's.
 [[nodiscard]] bool IsAllFolders(const PresetFolder &folder);
 
-// "90s", "2m", "1h", "0" / "off" for no timer. Nothing for unparseable input.
+// "90s", "2m", "1h", "7d", "0" / "off" for no timer. Nothing for unparseable
+// input or for a number of seconds that does not fit an int.
 [[nodiscard]] std::optional<int> ParseDuration(const QString &value);
 
 // "HH:MM" to minutes since midnight.

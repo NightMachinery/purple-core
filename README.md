@@ -493,6 +493,10 @@ other person's voice or round message plays only their messages next. A value
 that is not a boolean, or a `playback` that is not a table, is a warning and
 keeps the default. The sync review labels the table Playback.
 
+`[playback] seek_step` (default `"10s"`) is the step of the seek back and
+forward controls: `"5s"`, `"10s"`, `"15s"` or `"30s"`, read into
+`Playback::seekStepSeconds`. Any other value warns and keeps 10 s.
+
 `purple/purple_playback.h` holds the rule both clients ask. A manual play makes
 a `VoiceQueueAnchor` with `AnchorForManualPlay(settings.playback, chat,
 startOutgoing)`: it is confined only when the setting is on, the chat is
@@ -503,6 +507,22 @@ confined anchor. Direction is Telegram's sender, so forwarded messages count
 for whoever forwarded them. Saved Messages (`Self`), groups, channels and
 service chats (`Other`) never confine. See
 [the media playback design](docs/media-design.md), F3.
+
+## Media recording
+
+`[recording]` (app-wide, labelled Recording in the sync review) holds the
+media recording switches of [the media recording design](docs/media-recording-design.md),
+read into `Settings::recording`. Booleans, all on by default except
+`headset_hold_start_p`: `keep_across_chats_p` (F8), `background_p` (F7,
+Android), `round_float_p` (F6), `keep_discarded_p` (discarded recordings go to
+the bin), `send_elsewhere_p`, `call_pause_p`, `headset_p`,
+`headset_hold_start_p` (Android) and `preview_trim_p`. Durations, in seconds
+with 0 for `"off"`: `round_journal` (`"off"`, `"1s"`, `"2s"` or `"5s"`, default
+1 s; Off still writes the config header), `bin_keep` (`"off"` or at least 1 h,
+default 48 h) and `long_nudge` (`"off"` or at least 1 min, default 30 min). A
+value of the wrong shape or out of range warns and keeps the default.
+`ParseDuration` accepts a `d` (days) suffix, so `bin_keep = "7d"` reads as
+written; it refuses a number of seconds that does not fit an int.
 
 ## Settings scope and Reset (source candidate)
 
