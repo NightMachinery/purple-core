@@ -203,9 +203,15 @@ void TestUnbound() {
 	auto extra = Magic(4); extra.facts.otherMembers = 1;
 	input.visible = { extra };
 	plan = PlanSyncChatLookup(input);
-	CHECK(plan.action == SyncChatLookupAction::Problem && plan.problem == SyncChatProblem::MagicIneligible && plan.show);
+	CHECK(plan.action == SyncChatLookupAction::Wait && plan.retryAt == 0 && !plan.telegram);
+	input.binding.rejected[9] = Now;
+	input.visible = { Magic(9) };
+	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Wait);
+	input.binding.rejected.clear();
+	input.visible = { extra };
 	input.listsComplete = true;
-	CHECK(PlanSyncChatLookup(input).problem == SyncChatProblem::MagicIneligible);
+	plan = PlanSyncChatLookup(input);
+	CHECK(plan.action == SyncChatLookupAction::Problem && plan.problem == SyncChatProblem::MagicIneligible && plan.show);
 	input.visible.clear();
 	input.listsComplete = false;
 	CHECK(PlanSyncChatLookup(input).action == SyncChatLookupAction::Wait);
@@ -405,6 +411,8 @@ void TestRejected() {
 	plan = PlanSyncChatLookup(unbound);
 	CHECK(plan.action == SyncChatLookupAction::Verify && plan.chat == Channel(9));
 	CHECK(CompleteSyncChatVerify(unbound.binding, Magic(9, false), Now) == SyncChatProblem::MagicIneligible);
+	CHECK(PlanSyncChatLookup(unbound).action == SyncChatLookupAction::Wait);
+	unbound.listsComplete = true;
 	plan = PlanSyncChatLookup(unbound);
 	CHECK(plan.action == SyncChatLookupAction::Problem && plan.problem == SyncChatProblem::MagicIneligible);
 

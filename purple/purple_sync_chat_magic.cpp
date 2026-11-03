@@ -189,8 +189,9 @@ SyncChatLookupPlan Unbound(const SyncChatLookupInput &input) {
 	if (const auto pick = PickMagicChat(Admitted(binding, input.visible))) {
 		return Act(SyncChatLookupAction::Verify, Channel(*pick), true);
 	}
-	if (!input.visible.empty()) { return Problem(SyncChatProblem::MagicIneligible, true); }
+	// WHY: an unusable magic chat in view proves nothing while the owner's own may still be in an unloaded list.
 	if (!input.listsComplete) { return Act(SyncChatLookupAction::Wait); }
+	if (!input.visible.empty()) { return Problem(SyncChatProblem::MagicIneligible, true); }
 	if (binding.createStep != SyncChatCreateStep::None
 		&& binding.createAt <= input.now
 		&& input.now - binding.createAt < kSyncChatCreateUncertainSeconds) {

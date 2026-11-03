@@ -64,7 +64,8 @@ caller, after a restart too, whether a method may be sent.
   or the local counts are unknown, unless that read is under a wait.
 - No binding: the oldest usable magic chat in the local lists is verified.
   Magic chats that are all ineligible are a Problem (MagicIneligible), never a
-  reason to create another. The absence proof is `listsComplete`: the client
+  reason to create another, but only once the lists are complete: an unloaded
+  list may still hold the account's usable chat. The absence proof is `listsComplete`: the client
   reports that the account's main list and archive folder are both fully
   loaded by its own upstream dialog loaders, unfiltered by any Work Mode view.
   Until then the plan is Wait; with complete lists and no magic chat, Create.
