@@ -281,6 +281,11 @@ std::optional<QByteArray> SerializeSyncChatBinding(const SyncChatBinding &bindin
 	object.insert(u"problemShown"_q, binding.problemShown);
 	object.insert(u"migration"_q, Code(Migrations, binding.migration));
 	object.insert(u"login"_q, binding.login);
+	if (binding.listed) {
+		object.insert(u"listed"_q, true);
+	} else {
+		object.remove(u"listed"_q);
+	}
 	const auto json = CanonicalizeSyncJson(QJsonDocument(object).toJson(QJsonDocument::Compact));
 	return (json && json.canonical.size() <= kBindingLimit) ? std::make_optional(json.canonical) : std::nullopt;
 }
@@ -339,6 +344,11 @@ std::optional<SyncChatBinding> ParseSyncChatBinding(const QByteArray &bytes) {
 	if (!parsedMigration || !login.isString()) { return std::nullopt; }
 	result.migration = *parsedMigration;
 	result.login = login.toString();
+	if (object.contains(u"listed"_q)) {
+		const auto listed = object.take(u"listed"_q);
+		if (!listed.isBool() || !listed.toBool()) { return std::nullopt; }
+		result.listed = true;
+	}
 	result.preserved = object;
 	return SerializeSyncChatBinding(result) ? std::make_optional(result) : std::nullopt;
 }

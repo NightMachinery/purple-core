@@ -38,6 +38,8 @@ unknown fields) records this device's choice for one account:
 - the creation step and when it started;
 - a real problem and whether it has been shown;
 - the migration step;
+- whether the user chose to see the chat in Purple's chat lists (`listed`,
+  written only when set);
 - an opaque login authority supplied by the client.
 
 `RecordSyncChatWait` only extends a deadline. `SyncChatWaitUntil` tells every

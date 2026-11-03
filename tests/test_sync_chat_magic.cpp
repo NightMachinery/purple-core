@@ -137,6 +137,17 @@ void TestCodec() {
 		CHECK(!code.isEmpty() && ParseSyncChatProblemCode(code) == SyncChatProblem(problem));
 	}
 	CHECK(!ParseSyncChatProblemCode(u"Chat_Gone"_q));
+
+	// The list choice is written only when set, so older files read unchanged.
+	CHECK(!bytes->contains("listed"));
+	auto listed = binding;
+	listed.listed = true;
+	const auto listedBytes = SerializeSyncChatBinding(listed);
+	CHECK(listedBytes && listedBytes->contains("\"listed\":true"));
+	const auto listedParsed = listedBytes ? ParseSyncChatBinding(*listedBytes) : std::nullopt;
+	CHECK(listedParsed && listedParsed->listed && *listedParsed == listed);
+	CHECK(!ParseSyncChatBinding(QByteArray(*listedBytes).replace("\"listed\":true", "\"listed\":false")));
+	CHECK(!ParseSyncChatBinding(QByteArray(*listedBytes).replace("\"listed\":true", "\"listed\":1")));
 }
 
 void TestWaits() {

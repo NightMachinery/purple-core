@@ -129,6 +129,9 @@ struct SyncChatBinding {
 	SyncChatProblem problem = SyncChatProblem::None;
 	bool problemShown = false;
 	SyncChatMigrationStep migration = SyncChatMigrationStep::None;
+	// The user chose to see the bound chat in Purple's chat lists, which
+	// hide it otherwise. Written only when set.
+	bool listed = false;
 	// Opaque per-login authority supplied by the client, never logged.
 	QString login;
 	QJsonObject preserved;
