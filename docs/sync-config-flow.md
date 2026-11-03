@@ -76,8 +76,9 @@ device whose state is in another space) decides with
 
 `IsDefaultSyncSettings` defines the defaults: no file, or one that parses with
 no error or warning to the same `Settings` as an empty file. The comparison
-ignores `version` and the file-local `[sync]` table; keys the parser ignores
-change nothing. `SameSyncSettingsMeaning` uses the same normalisation, so
+ignores `version`, the file-local `[sync]` table and the file positions the
+parser records for schedule rules, rulesets and screen-time budgets (their order
+still counts); keys the parser ignores change nothing. `SameSyncSettingsMeaning` uses the same normalisation, so
 comments, spacing and spelled-out defaults never prompt. An Invalid or
 last-good local file waits. `SyncFirstUseInputOf` returns nullopt unless the
 inventory is complete and its selected space has extractable heads of a

@@ -93,6 +93,22 @@ namespace {
 	}
 	parsed.settings.version = kDefaultSettingsVersion;
 	parsed.settings.sync = Sync();
+	// WHY: the parser records where rules, rulesets and budgets sit in the file, so a comment or blank line above
+	// one would otherwise change the "meaning". Vector order keeps their order; only implicit() needs the index.
+	const auto forget = [](ScheduleRule &rule) {
+		rule.sourceIndex = -1;
+		rule.sourceLine = 0;
+	};
+	auto &schedule = parsed.settings.schedule;
+	std::for_each(schedule.rules.begin(), schedule.rules.end(), forget);
+	for (auto &ruleset : schedule.rulesets) {
+		std::for_each(ruleset.rules.begin(), ruleset.rules.end(), forget);
+		ruleset.sourceIndex = ruleset.implicit() ? -1 : 0;
+		ruleset.sourceLine = 0;
+	}
+	for (auto &budget : parsed.settings.screenTime.budgets) {
+		budget.sourceIndex = -1;
+	}
 	return std::move(parsed.settings);
 }
 

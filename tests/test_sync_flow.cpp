@@ -2814,6 +2814,51 @@ void TestFirstUse() {
 	CHECK(!SyncFirstUseInputOf(garbled.inventory(), custom));
 }
 
+void TestFirstUseMeaningIgnoresPositions() {
+	Begin("first use: a comment above schedule rules does not change their meaning");
+	const auto rules = [](const char *above) {
+		return MakeSyncSettingsFile(SyncSettingsFileStatus::Present, QByteArray(R"([lists.bots]
+kinds = ["bots"]
+
+[presets.work]
+list_order = [ { list = "bots" } ]
+)") + above + R"([[schedule.rules]]
+days   = ["mon", "tue"]
+from   = "09:00"
+to     = "17:00"
+preset = "work"
+)" + above + R"([[schedule.rulesets]]
+name   = "phone"
+device = "mobile"
+
+[[schedule.rulesets.rules]]
+days   = ["mon"]
+from   = "10:00"
+to     = "11:00"
+preset = "work"
+)" + above + R"([[screen_time.budgets]]
+target  = "chat:7"
+per_day = "30m"
+)");
+	};
+	const auto plain = rules("\n");
+	const auto commented = rules("\n# work hours\n\n");
+	const auto later = MakeSyncSettingsFile(SyncSettingsFileStatus::Present,
+		QString::fromUtf8(plain.text).replace(u"\"17:00\""_q, u"\"18:00\""_q).toUtf8());
+	CHECK(SameSyncSettingsMeaning(plain, plain) && !IsDefaultSyncSettings(plain));
+	CHECK(SameSyncSettingsMeaning(plain, commented) && SameSyncSettingsMeaning(commented, plain));
+	CHECK(!SameSyncSettingsMeaning(plain, later));
+
+	const auto space = *FormatSyncSpaceId(QByteArray(16, 'f'));
+	auto cloud = Cloud();
+	auto b = MakeRemote('b', u"Android"_q);
+	Post(cloud, b, space, plain.text);
+	const auto input = SyncFirstUseInputOf(cloud.inventory(), commented);
+	CHECK(input && PlanSyncFirstUse(*input) == SyncFirstUseAction::JoinSilently);
+	const auto changed = SyncFirstUseInputOf(cloud.inventory(), later);
+	CHECK(changed && PlanSyncFirstUse(*changed) == SyncFirstUseAction::Ask);
+}
+
 void TestFirstUseSupersededHead() {
 	Begin("first use: a head another install's head supersedes is not current");
 	const auto space = *FormatSyncSpaceId(QByteArray(16, 'f'));
@@ -3387,6 +3432,7 @@ int main() {
 	TestFlowReviewStatuses();
 	TestFirstUse();
 	TestFirstUseSupersededHead();
+	TestFirstUseMeaningIgnoresPositions();
 	TestRootStoreRelinkProof();
 	TestAccountRecovery();
 	TestStartAgainAndSetupBinding();
