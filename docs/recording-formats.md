@@ -164,7 +164,8 @@ At about 77 samples a second a batch costs 16 + 24 × 77 bytes, about 1.9 KB per
      is accepted only if a valid boundary follows it: the end of the data, a box, another video sample, a
      measurable AAC frame, or a torn video sample (a plausible length and NAL header running past the end).
      A short tail alone is not a boundary, so the lookahead holds in the last 8 KB too; the price is that a
-     last video sample followed only by a torn audio frame or a torn `mdat` header is dropped with it;
+     last video sample followed only by a torn audio frame or a torn `mdat` header is dropped with it (and the
+     stop still counts as a torn tail, so the status is Repaired, not Partial);
    - an AAC frame: `measure(audioTrack, data, available)` returns the bytes one 1024-sample frame takes,
      decoding with the track's AudioSpecificConfig; `available` is at most 8 KB and the callback must not read
      past it.
@@ -178,8 +179,8 @@ At about 77 samples a second a batch costs 16 + 24 × 77 bytes, about 1.9 KB per
    samples are all sync samples.
 5. **Status.** `Unrecoverable` (`NoVideoTrack`, `NoSamples`) when there is nothing to rebuild. `Partial` when
    the scan stopped before the end and what is left is more than a torn last sample: a torn tail is at most
-   8 KB (the largest AAC frame, which also covers a torn `mdat` header) or a video length that runs past the end
-   of the data. Otherwise `Exact` when every sample came from the journal, `Repaired` when some came from the
+   8 KB (the largest AAC frame, which also covers a torn `mdat` header), a video length that runs past the end
+   of the data, or a whole video sample followed by such a tail (the dropped last sample above). Otherwise `Exact` when every sample came from the journal, `Repaired` when some came from the
    scan.
 
 The client rebuilds the file from `samples` with its own muxer, reading each sample's bytes at its `offset`:

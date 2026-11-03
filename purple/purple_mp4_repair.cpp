@@ -473,9 +473,19 @@ RoundRecovery RepairRound(
 	}
 	result.scanEnd = position;
 	result.unparsedBytes = mediaSize - position;
+	// A whole video sample followed only by a torn frame is dropped (the
+	// lookahead cannot vouch for it), so the scan stops at its start; that is
+	// still a torn tail, not a partial recovery.
+	const auto stoppedAtTornTail = [&] {
+		if (scanner.tornTail(position)) {
+			return true;
+		}
+		const auto video = scanner.video(position);
+		return video.size && scanner.tornTail(position + video.size);
+	};
 	const auto partial = !finished
 		&& position < mediaSize
-		&& !scanner.tornTail(position);
+		&& !stoppedAtTornTail();
 	if (result.samples.empty()) {
 		result.reason = RoundUnrecoverable::NoSamples;
 		result.status = RoundRecoveryStatus::Unrecoverable;

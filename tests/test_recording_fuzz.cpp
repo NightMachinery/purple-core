@@ -21,6 +21,7 @@ option) any later version.
 #include <cstring>
 #include <limits>
 #include <random>
+#include <string>
 
 using namespace Purple;
 
@@ -38,6 +39,24 @@ using Bytes = std::vector<std::uint8_t>;
 using Engine = std::mt19937_64;
 
 constexpr auto kIterations = 3000;
+constexpr auto kSeed = std::uint64_t(0x5EED5EEDULL);
+
+// Each invariant is one check over every iteration; the first iteration that
+// breaks it is named, with its mutation, so a failure reproduces from the
+// seed alone.
+void Note(bool &invariant, bool now, const char *name, int iteration, const char *mutation) {
+	if (invariant && !now) {
+		std::printf(
+			"FUZZ %s: invariant '%s' first fails at iteration %d (seed 0x%llX, mutation %s)\n",
+			Section,
+			name,
+			iteration,
+			static_cast<unsigned long long>(kSeed),
+			mutation);
+		std::fflush(stdout);
+	}
+	invariant = invariant && now;
+}
 
 [[nodiscard]] std::uint64_t Below(Engine &engine, std::uint64_t bound) {
 	return bound ? (engine() % bound) : 0;
@@ -93,9 +112,11 @@ void OggPageOut(Bytes &out, std::uint8_t flags, std::int64_t granule, std::uint3
 	return out;
 }
 
-// Truncation, flips, junk or noise, chosen at random.
-void Mutate(Engine &engine, Bytes &bytes) {
-	switch (Below(engine, 5)) {
+// Truncation, flips, junk or noise, chosen at random. Returns its name.
+const char *Mutate(Engine &engine, Bytes &bytes) {
+	const auto kind = Below(engine, 5);
+	static constexpr const char *kNames[] = { "truncate", "flip", "junk", "noise", "none" };
+	switch (kind) {
 	case 0:
 		bytes.resize(std::size_t(Below(engine, bytes.size() + 1)));
 		break;
@@ -117,6 +138,7 @@ void Mutate(Engine &engine, Bytes &bytes) {
 	default:
 		break;
 	}
+	return kNames[kind];
 }
 
 void FuzzOgg(Engine &engine) {
@@ -124,27 +146,28 @@ void FuzzOgg(Engine &engine) {
 	auto ok = true;
 	for (auto i = 0; i != kIterations; ++i) {
 		auto bytes = OggStream(engine);
-		Mutate(engine, bytes);
+		const auto mutation = Mutate(engine, bytes);
 		const auto original = bytes;
 		const auto scan = ScanOgg(bytes.data(), bytes.size());
-		ok = ok && scan.goodBytes <= bytes.size();
+		auto now = scan.goodBytes <= bytes.size();
 		const auto finish = FinaliseOgg(bytes);
 		switch (finish.status) {
 		case OggFinishStatus::Unrecoverable:
 		case OggFinishStatus::Clean:
-			ok = ok && (bytes == original);
+			now = now && (bytes == original);
 			break;
 		case OggFinishStatus::Finalised: {
-			ok = ok && bytes.size() <= original.size()
+			now = now && bytes.size() <= original.size()
 				&& finish.scan.clean()
 				&& finish.scan.pages.back().granule >= 0;
 			auto again = bytes;
 			const auto second = FinaliseOgg(again);
-			ok = ok && second.status == OggFinishStatus::Clean
+			now = now && second.status == OggFinishStatus::Clean
 				&& again == bytes
 				&& second.scan.durationMs == finish.scan.durationMs;
 		} break;
 		}
+		Note(ok, now, "ogg unchanged or idempotent", i, mutation);
 	}
 	CHECK(ok);
 }
@@ -276,6 +299,7 @@ void FuzzRound(Engine &engine) {
 			round.samples.begin(),
 			round.samples.begin() + std::ptrdiff_t(Below(engine, round.samples.size() + 1)));
 		const auto mode = Below(engine, 4);
+		auto mutation = std::string("journal hostile");
 		if (mode == 0) {
 			Hostile(engine, journaled);
 			Hostile(engine, journaled);
@@ -284,35 +308,44 @@ void FuzzRound(Engine &engine) {
 		const auto batch = EncodeRoundJournalBatch(journaled);
 		journal.insert(journal.end(), batch.begin(), batch.end());
 		if (mode == 1) {
-			Mutate(engine, journal);
+			mutation = std::string("journal ") + Mutate(engine, journal);
 		} else if (mode == 2) {
-			Mutate(engine, round.media);
+			mutation = std::string("media ") + Mutate(engine, round.media);
+		} else if (mode == 3) {
+			mutation = "none";
 		}
+		const auto name = mutation.c_str();
 
 		const auto read = ReadRoundJournal(journal.data(), journal.size());
-		counted = counted && read.goodBytes <= journal.size();
+		Note(counted, read.goodBytes <= journal.size(), "journal goodBytes in range", i, name);
+		auto wraps = false;
 		for (const auto &sample : read.samples) {
-			bounded = bounded
-				&& sample.track < read.config.tracks.size()
-				&& sample.offset <= std::numeric_limits<std::uint64_t>::max() - sample.size;
+			wraps = wraps
+				|| sample.track >= read.config.tracks.size()
+				|| sample.offset > std::numeric_limits<std::uint64_t>::max() - sample.size;
 		}
+		Note(bounded, !wraps, "journal samples never wrap", i, name);
 
 		const auto got = RecoverRound(round.media.data(), round.media.size(), journal.data(), journal.size(), StubMeasure);
-		bounded = bounded
-			&& got.scanEnd <= round.media.size()
+		Note(bounded, got.scanEnd <= round.media.size()
 			&& got.unparsedBytes <= round.media.size()
 			&& got.exactSamples + got.repairedSamples == got.samples.size()
 			&& got.exactSamples + got.journalDropped <= read.samples.size()
-			&& (got.status == RoundRecoveryStatus::Unrecoverable || !got.samples.empty());
+			&& (got.status == RoundRecoveryStatus::Unrecoverable || !got.samples.empty()),
+			"recovery counts add up", i, name);
+		auto within = true;
+		auto sane = true;
 		for (const auto &sample : got.samples) {
-			inside = inside
+			within = within
 				&& sample.offset <= round.media.size()
 				&& sample.size <= round.media.size() - sample.offset
 				&& sample.size > 0;
-			timed = timed
+			sane = sane
 				&& sample.ptsUs >= 0
 				&& sample.ptsUs < 2 * kRoundMaxPtsUs;
 		}
+		Note(inside, within, "samples inside the media", i, name);
+		Note(timed, sane, "times in range", i, name);
 	}
 	CHECK(inside);
 	CHECK(bounded);
@@ -323,7 +356,7 @@ void FuzzRound(Engine &engine) {
 } // namespace
 
 int main() {
-	auto engine = Engine(0x5EED5EEDULL);
+	auto engine = Engine(kSeed);
 	FuzzOgg(engine);
 	FuzzRound(engine);
 	std::printf("%d checks, %d failures\n", Checks, Failures);

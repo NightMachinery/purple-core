@@ -803,6 +803,26 @@ void TestStops() {
 	CHECK(done.samples.size() == stream.truth.size());
 	CHECK(done.scanEnd == stream.bytes.size());
 
+	// Re-check N1: a crash tearing the audio frame after the last whole video
+	// sample drops that sample (the lookahead's documented price) but is a
+	// torn tail, so Repaired, also when sample plus tail pass 8 KB.
+	for (const auto n : { 4000, 12000 }) {
+		auto torn = BuilderStream(false);
+		auto random = Random{ 21 };
+		torn.write(0, VideoSample(true, 5000, random), 0, true);
+		torn.write(1, AudioFrame(300, random), AudioPts(0), true);
+		torn.write(1, AudioFrame(300, random), AudioPts(1), true);
+		torn.write(0, VideoSample(false, std::size_t(n), random), 33333, false);
+		torn.write(1, AudioFrame(300, random), AudioPts(2), true);
+		const auto cut = std::size_t(torn.truth.back().offset + 50);
+		const auto copy = Bytes(torn.bytes.begin(), torn.bytes.begin() + cut);
+		const auto local = MeasureFor(torn, copy);
+		const auto got = RecoverRound(copy.data(), copy.size(), header.data(), header.size(), local.bind());
+		CHECK(got.status == RoundRecoveryStatus::Repaired);
+		CHECK(SameLayout(got.samples, torn.truth, 3));
+		CHECK(got.unparsedBytes == std::uint64_t(n) + 50);
+	}
+
 	// No config header: unrecoverable, whatever the media holds.
 	const auto good = MeasureFor(stream, stream.bytes);
 	const auto none = RecoverRound(stream.bytes.data(), stream.bytes.size(), nullptr, 0, good.bind());
