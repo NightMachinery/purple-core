@@ -12,7 +12,6 @@ option) any later version.
 
 #include <cstdint>
 #include <optional>
-#include <vector>
 
 namespace Purple {
 
@@ -21,22 +20,6 @@ enum class SyncChatMessageOwnership {
 	Own,
 	Other,
 };
-
-enum class SyncChatMarkStatus {
-	NotMark,
-	Supported,
-	NewerVersion,
-};
-
-struct SyncChatMarkParseResult {
-	SyncChatMarkStatus status = SyncChatMarkStatus::NotMark;
-	QString version;
-};
-
-[[nodiscard]] SyncChatMarkParseResult ParseSyncChatMark(
-	const QString &text,
-	bool hasMedia,
-	SyncChatMessageOwnership ownership);
 
 enum class SyncChatKind {
 	Unknown,
@@ -116,20 +99,8 @@ enum class SyncChatRefusal {
 	BroadcastNeedsCreatorAndSoleAdmin,
 };
 
-struct SyncChatReaderFacts {
-	bool warningRequired = false;
-	bool privateRecipient = false;
-	bool botOwner = false;
-	bool populationUnknown = false;
-	std::optional<uint64_t> otherMembers;
-	std::optional<uint64_t> otherAdmins;
-
-	[[nodiscard]] bool operator==(const SyncChatReaderFacts &) const = default;
-};
-
 struct SyncChatEligibilityResult {
 	SyncChatRefusal refusal = SyncChatRefusal::UnknownKind;
-	SyncChatReaderFacts readers;
 
 	[[nodiscard]] explicit operator bool() const {
 		return refusal == SyncChatRefusal::None;
@@ -139,90 +110,6 @@ struct SyncChatEligibilityResult {
 [[nodiscard]] SyncChatEligibilityResult SyncChatEligibility(
 	const SyncChatFacts &facts,
 	SyncChatBroadcastOwnership broadcastOwnership);
-
-struct SyncChatCache {
-	PeerToken chat;
-	int32_t markId = 0;
-	int64_t markDate = 0;
-
-	[[nodiscard]] bool operator==(const SyncChatCache &) const = default;
-};
-
-[[nodiscard]] bool SyncChatMarkOutranks(
-	const SyncChatCache &a,
-	const SyncChatCache &b);
-
-enum class SyncChatRecordPresence {
-	Unknown,
-	Empty,
-	Present,
-};
-
-struct SyncChatMark {
-	SyncChatCache location;
-	SyncChatMarkStatus status = SyncChatMarkStatus::NotMark;
-	SyncChatEligibilityResult eligibility;
-	SyncChatRecordPresence records = SyncChatRecordPresence::Unknown;
-	bool readable = false;
-	bool freshlyRead = false;
-};
-
-enum class SyncChatDirectRead {
-	Unknown,
-	Valid,
-	MarkGone,
-	ChatGone,
-	Migrated,
-};
-
-enum class SyncChatSettingsHint {
-	NotRun,
-	Unknown,
-	Absent,
-	Found,
-};
-
-struct SyncChatResolveInput {
-	std::vector<SyncChatMark> marks;
-	std::optional<SyncChatCache> cache;
-	bool settingsBound = false;
-	PeerToken settingsChat;
-	SyncChatDirectRead cacheRead = SyncChatDirectRead::Unknown;
-	SyncChatSettingsHint settingsHint = SyncChatSettingsHint::NotRun;
-	SyncChatEligibilityResult cachedEligibility;
-	bool readerWarningAccepted = false;
-	int searchRetriesCompleted = 0;
-	uint64_t selfUserId = 0;
-};
-
-enum class SyncChatAction {
-	Invalid,
-	Unset,
-	Use,
-	VerifyMark,
-	Follow,
-	Fill,
-	Searching,
-	Lost,
-	NewerMark,
-	ReadWinnerInventory,
-};
-
-struct SyncChatResolution {
-	SyncChatAction action = SyncChatAction::Invalid;
-	std::optional<SyncChatCache> cache;
-	std::optional<PeerToken> readChat;
-	std::optional<SyncChatCache> winner;
-	std::optional<PeerToken> source;
-	std::optional<PeerToken> olderAlternative;
-	SyncChatReaderFacts readers;
-	bool needsReaderWarning = false;
-	bool postingHeld = true;
-	int retryAfterSeconds = 0;
-};
-
-[[nodiscard]] SyncChatResolution ResolveSyncChat(
-	const SyncChatResolveInput &input);
 
 enum class SyncChatMoveError {
 	None,

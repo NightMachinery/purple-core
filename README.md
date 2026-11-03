@@ -22,15 +22,9 @@ Mode choice edits are documented in [list member writes](docs/list-member-writes
 ## Sync chat contracts
 
 The shared [sync chat core](docs/sync-chat-core.md) provides typed peer tokens,
-mark grammar, conservative eligibility, deterministic resolution from supplied
-facts, and chat-scoped state v2 with a pending-safe move transition. The
-[carry journal](docs/sync-chat-carry.md) plans settings transfer, readback,
-state/cache commit and crash recovery, including protected pending records,
-same-chat mark repair, explicit cleanup skipping, stale-mark checks,
-interrupted-login abandonment with retained effects, and finishing a held mark
-attempt without cleanup so the account can follow the current winner. Version-2
-journals freeze reader consent before the first write. Client execution and server probes
-remain separate work.
+message ownership, conservative eligibility refusals and chat-scoped state v2
+with a pending-safe move transition. Marks, mark resolution and carries are
+gone; older clients that still use them must be updated alongside.
 
 The [Magic Purple Sync chat](docs/sync-chat-magic.md) replaces search-based
 discovery: each device finds a private supergroup with that exact title in its
@@ -426,10 +420,9 @@ notification mute decisions.
 harness and drives them against several hundred fixture documents - far too
 slow to iterate on through a full app build, which is the point.
 `tests/test_sync_flow.cpp` runs the settings sync flow end to end on in-memory
-devices; `tests/test_sync_chat.cpp` covers peer tokens, marks, eligibility and
-chat resolution; `tests/test_sync_chat_magic.cpp` covers the Magic Purple Sync
-lookup and binding. `tests/test_sync_chat_carry.cpp` covers carry, scoped readback,
-ordered commits and crash recovery. `tests/test_archive.cpp` covers archive
+devices; `tests/test_sync_chat.cpp` covers peer tokens, message ownership, eligibility
+and chat moves; `tests/test_sync_chat_magic.cpp` covers the Magic Purple Sync
+lookup and binding. `tests/test_archive.cpp` covers archive
 events, transactions, media and purges; `tests/test_archive_codec.cpp` covers
 identity and codec compatibility; `tests/test_archive_source.cpp` covers copy-source
 provenance. `tests/test_archive_storage.cpp` covers SQL plans, envelopes, key loss

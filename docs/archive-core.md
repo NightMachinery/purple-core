@@ -485,7 +485,7 @@ performed by this batch.
 
 `tests/run.sh` compiles all production archive modules and runs
 `test_archive`, `test_archive_codec` and `test_archive_source`, alongside the
-existing config, flow, sync-chat and carry-recovery suites. Regressions cover
+existing config, flow and sync-chat suites. Regressions cover
 causal replay/order, same-second edits,
 A to B to A, observation noise, exact-version hydration, unseen events,
 account/chat/secret/topic/migration/representation identities, full-width ids,

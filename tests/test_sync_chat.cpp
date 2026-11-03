@@ -8,13 +8,11 @@ option) any later version.
 #include "purple/purple_config_payload.h"
 #include "purple/purple_peer_token.h"
 #include "purple/purple_sync_chat.h"
-#include "purple/purple_sync_chat_carry.h"
 #include "purple/purple_types.h"
 
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 
-#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <limits>
@@ -41,27 +39,6 @@ PeerToken Peer(const QString &text) {
 	const auto result = ParsePeerToken(text);
 	CHECK(result.has_value());
 	return result.value_or(PeerToken());
-}
-
-SyncChatEligibilityResult Eligible(SyncChatKind kind = SyncChatKind::Self) {
-	auto facts = SyncChatFacts();
-	facts.kind = kind;
-	facts.canSendFiles = true;
-	facts.otherMembers = 0;
-	facts.otherAdmins = 0;
-	return SyncChatEligibility(facts, SyncChatBroadcastOwnership::Unselected);
-}
-
-SyncChatMark Mark(
-		const QString &chat,
-		int64_t date,
-		int32_t id = 1) {
-	auto result = SyncChatMark();
-	result.location = { Peer(chat), id, date };
-	result.status = SyncChatMarkStatus::Supported;
-	result.eligibility = Eligible();
-	result.freshlyRead = true;
-	return result;
 }
 
 void PeerTokens() {
@@ -108,64 +85,6 @@ void PeerTokens() {
 	}
 }
 
-void MarkGrammar() {
-	struct Case {
-		QString text;
-		SyncChatMarkStatus status;
-		QString version;
-	};
-	for (const auto &test : std::vector<Case>{
-		{ u"#purplechatsync"_q, SyncChatMarkStatus::Supported, u"1"_q },
-		{ u" #PURPLECHATSYNC V1 \r\n\t\n"_q,
-			SyncChatMarkStatus::Supported, u"1"_q },
-		{ u"arbitrary preface\n\n#purplechatsync v0001"_q,
-			SyncChatMarkStatus::Supported, u"1"_q },
-		{ u"#purplechatsync v2"_q, SyncChatMarkStatus::NewerVersion, u"2"_q },
-		{ u"#purplechatsync v999999999999999999999999999999"_q,
-			SyncChatMarkStatus::NewerVersion, u"999999999999999999999999999999"_q },
-		{ u"#purplechatsync v00020"_q, SyncChatMarkStatus::NewerVersion, u"20"_q },
-		{ u""_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"\n \t"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"mention #purplechatsync"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync\nother line"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v0"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v000"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v-1"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v+1"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v1.0"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v١"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync  v1"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync\tv1"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v1 more"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync channel:123"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsync v1 channel:123"_q, SyncChatMarkStatus::NotMark, {} },
-		{ u"#purplechatsyncer"_q, SyncChatMarkStatus::NotMark, {} },
-	}) {
-		const auto result = ParseSyncChatMark(
-			test.text, false, SyncChatMessageOwnership::Own);
-		CHECK(result.status == test.status);
-		CHECK(result.version == test.version);
-		CHECK(ParseSyncChatMark(test.text, true, SyncChatMessageOwnership::Own)
-			.status == SyncChatMarkStatus::NotMark);
-		for (const auto owner : {
-			SyncChatMessageOwnership::Unknown,
-			SyncChatMessageOwnership::Other,
-		}) {
-			CHECK(ParseSyncChatMark(test.text, false, owner).status
-				== SyncChatMarkStatus::NotMark);
-		}
-	}
-	for (auto version = 1; version != 1001; ++version) {
-		const auto result = ParseSyncChatMark(
-			u"#PurpleChatSync V%1"_q.arg(version), false,
-			SyncChatMessageOwnership::Own);
-		CHECK(result.status == (version == 1
-			? SyncChatMarkStatus::Supported : SyncChatMarkStatus::NewerVersion));
-		CHECK(result.version == QString::number(version));
-	}
-}
-
 SyncChatMessageFacts OwnMessage(SyncChatKind kind) {
 	auto facts = SyncChatMessageFacts();
 	facts.kind = kind;
@@ -190,11 +109,6 @@ void CheckOwnership(
 	const auto ownership = GetSyncChatMessageOwnership(facts);
 	CHECK(ownership == expected);
 	CHECK(IsOwnSyncChatMessage(facts) == (expected == SyncChatMessageOwnership::Own));
-	CHECK(ParseSyncChatMark(u"#purplechatsync v1"_q, false, ownership).status
-		== ((expected == SyncChatMessageOwnership::Own)
-			? SyncChatMarkStatus::Supported : SyncChatMarkStatus::NotMark));
-	CHECK(ParseSyncChatMark(u"#purplechatsync v1"_q, true, ownership).status
-		== SyncChatMarkStatus::NotMark);
 }
 
 void MessageOwnershipGuards() {
@@ -378,39 +292,6 @@ void MessageOwnershipBroadcast() {
 	CHECK(!IsOwnSyncChatMessage(facts));
 }
 
-void MessageOwnershipConsumers() {
-	using Ownership = SyncChatMessageOwnership;
-	const auto bytes = QByteArray("{\"purple_sync\":2}");
-	CHECK(ClassifySyncCandidate(1, bytes).status == SyncCandidateStatus::NewerMajor);
-	for (const auto kind : {
-		SyncChatKind::Self, SyncChatKind::Private, SyncChatKind::Bot,
-		SyncChatKind::BasicGroup, SyncChatKind::Supergroup, SyncChatKind::Broadcast,
-	}) {
-		for (const auto ownership : { Ownership::Own, Ownership::Other, Ownership::Unknown }) {
-			auto facts = OwnMessage(kind);
-			if (ownership == Ownership::Other) {
-				facts.forwarded = true;
-			} else if (ownership == Ownership::Unknown) {
-				facts.forwarded.reset();
-			}
-			const auto verdict = GetSyncChatMessageOwnership(facts);
-			CheckOwnership(facts, ownership);
-			for (const auto family : { SyncCarryFamily::Settings, SyncCarryFamily::Playlists }) {
-				const auto message = MakeSyncCarryMessage({ 0, 42 }, PeerToken(),
-					1, 100, bytes, verdict, family);
-				CHECK(message);
-				const auto selected = SelectSyncCarryHeads({ { 0, 42 }, PeerToken(), true, { *message } });
-				CHECK(selected.status == (ownership == Ownership::Unknown
-					? SyncCarryStatus::NeedsReview : SyncCarryStatus::Ready));
-				CHECK(selected.heads.size() == size_t(ownership == Ownership::Own
-					&& family == SyncCarryFamily::Settings));
-				CHECK(selected.playlists == (ownership == Ownership::Own
-					&& family == SyncCarryFamily::Playlists));
-			}
-		}
-	}
-}
-
 void Eligibility() {
 	const auto unselected = SyncChatBroadcastOwnership::Unselected;
 	auto facts = SyncChatFacts();
@@ -482,367 +363,13 @@ void Eligibility() {
 	facts.kind = SyncChatKind::ChannelDirectMessages;
 	CHECK(SyncChatEligibility(facts, unselected).refusal
 		== SyncChatRefusal::TopicRouting);
-	CHECK(Eligible(SyncChatKind::Private).readers.privateRecipient);
-	CHECK(Eligible(SyncChatKind::Bot).readers.botOwner);
-	CHECK(!Eligible().readers.warningRequired);
-	CHECK(!Eligible(SyncChatKind::Supergroup).readers.warningRequired);
+	// Who else can read the chat is the magic policy's call, not a refusal.
 	facts.kind = SyncChatKind::Supergroup;
 	facts.otherMembers.reset();
-	CHECK(SyncChatEligibility(facts, unselected).readers.populationUnknown);
-	CHECK(SyncChatEligibility(facts, unselected).readers.warningRequired);
+	CHECK(SyncChatEligibility(facts, unselected));
 	facts.otherMembers = 2;
-	CHECK(SyncChatEligibility(facts, unselected).readers.otherMembers == 2);
-	CHECK(SyncChatEligibility(facts, unselected).readers.warningRequired);
-	facts.otherMembers = 0;
 	facts.otherAdmins = 1;
-	CHECK(SyncChatEligibility(facts, unselected).readers.warningRequired);
-}
-
-bool SameResolution(const SyncChatResolution &a, const SyncChatResolution &b) {
-	return a.action == b.action && a.cache == b.cache && a.readChat == b.readChat
-		&& a.winner == b.winner && a.source == b.source
-		&& a.olderAlternative == b.olderAlternative && a.readers == b.readers
-		&& a.needsReaderWarning == b.needsReaderWarning
-		&& a.postingHeld == b.postingHeld && a.retryAfterSeconds == b.retryAfterSeconds;
-}
-
-void Resolution() {
-	auto input = SyncChatResolveInput();
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Unset);
-	for (const auto hint : {
-		SyncChatSettingsHint::NotRun, SyncChatSettingsHint::Unknown,
-		SyncChatSettingsHint::Absent,
-	}) {
-		input.settingsHint = hint;
-		CHECK(ResolveSyncChat(input).action == SyncChatAction::Unset);
-		CHECK(!ResolveSyncChat(input).readChat);
-	}
-	input.settingsHint = SyncChatSettingsHint::Found;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Use);
-	CHECK(ResolveSyncChat(input).cache == SyncChatCache());
-	input.settingsHint = SyncChatSettingsHint::NotRun;
-	input.settingsBound = true;
-	input.cachedEligibility = Eligible();
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Use);
-	CHECK(ResolveSyncChat(input).cache == SyncChatCache());
-	input.marks = { Mark(u"channel:4"_q, 100) };
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Follow);
-	CHECK(ResolveSyncChat(input).postingHeld);
-	CHECK(ResolveSyncChat(input).readChat == PeerToken());
-	input.marks = { Mark(u"self"_q, 100) };
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Use);
-	CHECK(ResolveSyncChat(input).cache == input.marks.front().location);
-	input.settingsBound = false;
-	input.cache = Mark(u"channel:8"_q, 100).location;
-	input.marks = { Mark(u"user:3"_q, 99), Mark(u"channel:9"_q, 98) };
-	for (const auto read : { SyncChatDirectRead::Unknown, SyncChatDirectRead::Valid }) {
-		input.cacheRead = read;
-		CHECK(ResolveSyncChat(input).action == SyncChatAction::Use);
-		CHECK(ResolveSyncChat(input).winner == input.cache);
-		CHECK(ResolveSyncChat(input).postingHeld == (read == SyncChatDirectRead::Unknown));
-	}
-	for (const auto read : {
-		SyncChatDirectRead::MarkGone, SyncChatDirectRead::ChatGone,
-		SyncChatDirectRead::Migrated,
-	}) {
-		input.cacheRead = read;
-		for (auto retry = 0; retry != 4; ++retry) {
-			input.searchRetriesCompleted = retry;
-			const auto result = ResolveSyncChat(input);
-			CHECK(result.action == (retry == 3
-				? SyncChatAction::Lost : SyncChatAction::Searching));
-			CHECK(result.retryAfterSeconds == (std::array{ 30, 120, 600, 0 }[retry]));
-			CHECK(result.olderAlternative == Peer(u"user:3"_q));
-			CHECK(result.postingHeld);
-			CHECK(result.cache == input.cache);
-		}
-	}
-	input.searchRetriesCompleted = 0;
-	input.marks.clear();
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Searching);
-	input.marks = { Mark(u"channel:8"_q, 101) };
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Use);
-	input.marks = { Mark(u"channel:7"_q, 101) };
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Follow);
-	CHECK(ResolveSyncChat(input).postingHeld);
-	input.marks.front().freshlyRead = false;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::VerifyMark);
-	CHECK(ResolveSyncChat(input).cache == input.cache);
-	input.marks.front().freshlyRead = true;
-	input.marks.front().status = SyncChatMarkStatus::NewerVersion;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::NewerMark);
-	CHECK(ResolveSyncChat(input).postingHeld);
-	CHECK(ResolveSyncChat(input).readChat == input.cache->chat);
-	input.marks.front().eligibility.refusal = SyncChatRefusal::Public;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Searching);
-	input.cache.reset();
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Unset);
-	input.marks = { Mark(u"channel:10"_q, 101), Mark(u"chat:4"_q, 99) };
-	input.marks.front().records = SyncChatRecordPresence::Empty;
-	input.marks.back().records = SyncChatRecordPresence::Present;
-	input.marks.back().readable = true;
-	const auto fill = ResolveSyncChat(input);
-	CHECK(fill.action == SyncChatAction::Fill);
-	CHECK(fill.source == Peer(u"chat:4"_q));
-	CHECK(fill.postingHeld);
-	CHECK(!fill.cache);
-	CHECK(!fill.readChat);
-	for (const auto presence : {
-		SyncChatRecordPresence::Unknown, SyncChatRecordPresence::Empty,
-	}) {
-		input.marks.back().records = presence;
-		CHECK(ResolveSyncChat(input).action == SyncChatAction::Fill);
-	}
-	input.marks.back().readable = false;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Use);
-	input.settingsHint = SyncChatSettingsHint::Found;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Fill);
-	CHECK(ResolveSyncChat(input).source == PeerToken());
-	input.marks.front().location.chat = PeerToken();
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Use);
-	input.settingsHint = SyncChatSettingsHint::NotRun;
-	input.marks = { Mark(u"user:2"_q, 100), Mark(u"user:10"_q, 100) };
-	CHECK(ResolveSyncChat(input).winner == input.marks.front().location);
-	input.marks = { Mark(u"chat:4"_q, 100, 2), Mark(u"chat:4"_q, 100, 3) };
-	CHECK(ResolveSyncChat(input).winner == input.marks.back().location);
-	input.marks.front().eligibility = Eligible(SyncChatKind::Private);
-	input.marks.back().eligibility = Eligible(SyncChatKind::Private);
-	CHECK(ResolveSyncChat(input).needsReaderWarning);
-	CHECK(ResolveSyncChat(input).postingHeld);
-	input.readerWarningAccepted = true;
-	CHECK(!ResolveSyncChat(input).postingHeld);
-	input.selfUserId = 4;
-	input.marks = { Mark(u"user:4"_q, 100) };
-	CHECK(ResolveSyncChat(input).readChat == PeerToken());
-	input.marks.push_back(input.marks.front());
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Use);
-	input.marks.back().location.markDate = 200;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Invalid);
-	input.marks = { Mark(u"self"_q, 100) };
-	input.marks.front().location.markId = 0;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Invalid);
-	input.marks.clear();
-	input.searchRetriesCompleted = -1;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Invalid);
-	input = SyncChatResolveInput();
-	input.settingsChat = Peer(u"channel:999"_q);
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Unset);
-	input.settingsBound = true;
-	CHECK(ResolveSyncChat(input).cache == (SyncChatCache{ input.settingsChat, 0, 0 }));
-	CHECK(ResolveSyncChat(input).readChat == input.settingsChat);
-	input.cacheRead = SyncChatDirectRead::ChatGone;
-	input.settingsHint = SyncChatSettingsHint::Found;
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Searching);
-	CHECK(ResolveSyncChat(input).readChat == input.settingsChat);
-	input.cacheRead = SyncChatDirectRead::Valid;
-	input.cachedEligibility = Eligible(SyncChatKind::Private);
-	CHECK(ResolveSyncChat(input).needsReaderWarning);
-	CHECK(ResolveSyncChat(input).postingHeld);
-	input.readerWarningAccepted = true;
-	CHECK(!ResolveSyncChat(input).postingHeld);
-	input.cachedEligibility.refusal = SyncChatRefusal::Protected;
-	CHECK(ResolveSyncChat(input).postingHeld);
-	input.cache = SyncChatCache{ PeerToken(), 0, 1 };
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Invalid);
-	input.cache.reset();
-	input.cacheRead = SyncChatDirectRead(99);
-	CHECK(ResolveSyncChat(input).action == SyncChatAction::Invalid);
-}
-
-void WinnerInventoryReviewRegression() {
-	auto input = SyncChatResolveInput();
-	input.marks = { Mark(u"chat:20"_q, 200), Mark(u"chat:10"_q, 100) };
-	input.marks[0].eligibility = Eligible(SyncChatKind::BasicGroup);
-	input.marks[1].eligibility = Eligible(SyncChatKind::BasicGroup);
-	input.marks[0].records = SyncChatRecordPresence::Unknown;
-	input.marks[1].records = SyncChatRecordPresence::Present;
-	input.marks[1].readable = true;
-	const auto first = ResolveSyncChat(input);
-	CHECK(first.action == SyncChatAction::ReadWinnerInventory);
-	CHECK(first.postingHeld && !first.cache);
-	CHECK(first.winner == input.marks[0].location);
-	CHECK(first.source == input.marks[1].location.chat);
-	CHECK(!first.readChat);
-	input.cache = first.cache;
-	input.cacheRead = SyncChatDirectRead::Valid;
-	input.cachedEligibility = Eligible();
-	input.marks[0].records = SyncChatRecordPresence::Empty;
-	const auto second = ResolveSyncChat(input);
-	CHECK(second.action == SyncChatAction::Fill);
-	CHECK(second.postingHeld && !second.cache);
-	CHECK(second.source == input.marks[1].location.chat);
-	input.cache.reset();
-	const auto fresh = ResolveSyncChat(input);
-	CHECK(SameResolution(second, fresh));
-}
-
-void WinnerInventoryTransitions() {
-	struct SourceCase {
-		bool marked = false;
-		SyncChatSettingsHint hint = SyncChatSettingsHint::NotRun;
-	};
-	for (const auto source : std::vector<SourceCase>{
-		{ true, SyncChatSettingsHint::NotRun },
-		{ false, SyncChatSettingsHint::Found },
-		{ true, SyncChatSettingsHint::Found },
-	}) {
-		for (const auto sourceRecords : {
-			SyncChatRecordPresence::Unknown,
-			SyncChatRecordPresence::Empty,
-			SyncChatRecordPresence::Present,
-		}) {
-			auto input = SyncChatResolveInput();
-			input.marks = { Mark(u"chat:20"_q, 200) };
-			input.marks[0].eligibility = Eligible(SyncChatKind::BasicGroup);
-			if (source.marked) {
-				auto mark = Mark(u"chat:10"_q, 100);
-				mark.eligibility = Eligible(SyncChatKind::BasicGroup);
-				mark.records = sourceRecords;
-				mark.readable = true;
-				input.marks.push_back(mark);
-			}
-			input.settingsHint = source.hint;
-			input.readerWarningAccepted = true;
-			const auto expectedSource = source.marked
-				? Peer(u"chat:10"_q) : PeerToken();
-			const auto first = ResolveSyncChat(input);
-			CHECK(first.action == SyncChatAction::ReadWinnerInventory);
-			CHECK(first.winner == input.marks[0].location);
-			CHECK(first.source == expectedSource);
-			CHECK(first.postingHeld);
-			CHECK(!first.cache && !first.readChat);
-			input.cache = first.cache;
-			input.cacheRead = SyncChatDirectRead::Valid;
-			input.cachedEligibility = Eligible(SyncChatKind::BasicGroup);
-			CHECK(SameResolution(ResolveSyncChat(input), first));
-			std::reverse(input.marks.begin(), input.marks.end());
-			CHECK(SameResolution(ResolveSyncChat(input), first));
-			std::reverse(input.marks.begin(), input.marks.end());
-			for (const auto winnerRecords : {
-				SyncChatRecordPresence::Empty, SyncChatRecordPresence::Present,
-			}) {
-				auto complete = input;
-				complete.marks[0].records = winnerRecords;
-				const auto resolved = ResolveSyncChat(complete);
-				CHECK(resolved.winner == complete.marks[0].location);
-				if (winnerRecords == SyncChatRecordPresence::Empty) {
-					CHECK(resolved.action == SyncChatAction::Fill);
-					CHECK(resolved.postingHeld);
-					CHECK(!resolved.cache && !resolved.readChat);
-					CHECK(resolved.source == expectedSource);
-				} else {
-					CHECK(resolved.action == SyncChatAction::Use);
-					CHECK(!resolved.postingHeld);
-					CHECK(resolved.cache == complete.marks[0].location);
-					CHECK(resolved.readChat == complete.marks[0].location.chat);
-					CHECK(!resolved.source);
-					complete.cache = resolved.cache;
-					CHECK(SameResolution(ResolveSyncChat(complete), resolved));
-				}
-			}
-			input.marks[0].freshlyRead = false;
-			CHECK(ResolveSyncChat(input).action == SyncChatAction::VerifyMark);
-			CHECK(!ResolveSyncChat(input).cache);
-			CHECK(ResolveSyncChat(input).postingHeld);
-		}
-	}
-}
-
-void WinnerWithoutFillSource() {
-	for (const auto hint : {
-		SyncChatSettingsHint::NotRun,
-		SyncChatSettingsHint::Unknown,
-		SyncChatSettingsHint::Absent,
-	}) {
-		for (auto sourceKind = 0; sourceKind != 4; ++sourceKind) {
-			auto input = SyncChatResolveInput();
-			input.marks = { Mark(u"chat:20"_q, 200) };
-			input.marks[0].eligibility = Eligible(SyncChatKind::BasicGroup);
-			input.settingsHint = hint;
-			if (sourceKind) {
-				auto older = Mark(u"chat:10"_q, 100);
-				older.eligibility = Eligible(SyncChatKind::BasicGroup);
-				older.records = SyncChatRecordPresence::Present;
-				older.readable = true;
-				if (sourceKind == 1) {
-					older.location.chat = input.marks[0].location.chat;
-					older.location.markId = 2;
-				} else if (sourceKind == 2) {
-					older.eligibility.refusal = SyncChatRefusal::Public;
-				} else {
-					older.readable = false;
-				}
-				input.marks.push_back(older);
-			}
-			for (const auto presence : {
-				SyncChatRecordPresence::Unknown,
-				SyncChatRecordPresence::Empty,
-				SyncChatRecordPresence::Present,
-			}) {
-				input.marks[0].records = presence;
-				const auto resolved = ResolveSyncChat(input);
-				CHECK(resolved.action == SyncChatAction::Use);
-				CHECK(!resolved.postingHeld);
-				CHECK(resolved.cache == input.marks[0].location);
-				CHECK(resolved.readChat == input.marks[0].location.chat);
-				CHECK(!resolved.source);
-			}
-		}
-	}
-	auto self = SyncChatResolveInput();
-	self.marks = { Mark(u"self"_q, 200) };
-	self.settingsHint = SyncChatSettingsHint::Found;
-	CHECK(ResolveSyncChat(self).action == SyncChatAction::Use);
-	CHECK(!ResolveSyncChat(self).postingHeld);
-}
-
-void ResolutionProperties() {
-	auto random = std::mt19937_64(0x5b4);
-	for (auto trial = 0; trial != 1000; ++trial) {
-		auto input = SyncChatResolveInput();
-		for (auto i = 0; i != 8; ++i) {
-			auto mark = Mark(u"channel:%1"_q.arg(i + 1), 1 + random() % 100, i + 1);
-			mark.records = SyncChatRecordPresence(random() % 3);
-			mark.readable = random() % 2;
-			mark.freshlyRead = random() % 2;
-			if (random() % 5 == 0) {
-				mark.eligibility.refusal = SyncChatRefusal::Protected;
-			}
-			if (random() % 5 == 0) {
-				mark.status = SyncChatMarkStatus::NewerVersion;
-			}
-			input.marks.push_back(mark);
-		}
-		if (random() % 2) {
-			input.cache = Mark(u"channel:9"_q, 1 + random() % 100).location;
-		}
-		input.cacheRead = SyncChatDirectRead(random() % 5);
-		input.settingsHint = SyncChatSettingsHint(random() % 4);
-		input.searchRetriesCompleted = random() % 4;
-		const auto expected = ResolveSyncChat(input);
-		for (auto order = 0; order != 6; ++order) {
-			std::shuffle(input.marks.begin(), input.marks.end(), random);
-			CHECK(SameResolution(ResolveSyncChat(input), expected));
-		}
-		if (expected.action == SyncChatAction::Follow
-			|| expected.action == SyncChatAction::Fill
-			|| expected.action == SyncChatAction::NewerMark
-			|| expected.action == SyncChatAction::ReadWinnerInventory) {
-			CHECK(expected.postingHeld);
-		}
-		if (expected.action == SyncChatAction::Follow) {
-			CHECK(expected.winner->markDate >= input.cache->markDate);
-		}
-		input.cache = Mark(u"user:999"_q, 101).location;
-		input.cacheRead = SyncChatDirectRead::Unknown;
-		for (auto &mark : input.marks) {
-			mark.status = SyncChatMarkStatus::Supported;
-		}
-		const auto unknown = ResolveSyncChat(input);
-		CHECK(unknown.action == SyncChatAction::Use);
-		CHECK(unknown.winner == input.cache);
-		CHECK(unknown.postingHeld);
-	}
+	CHECK(SyncChatEligibility(facts, unselected));
 }
 
 SyncLocalState LocalState() {
@@ -1036,17 +563,10 @@ void StateAndMoves() {
 
 int main() {
 	PeerTokens();
-	MarkGrammar();
 	MessageOwnershipGuards();
 	MessageOwnershipNormalization();
 	MessageOwnershipBroadcast();
-	MessageOwnershipConsumers();
 	Eligibility();
-	Resolution();
-	WinnerInventoryReviewRegression();
-	WinnerInventoryTransitions();
-	WinnerWithoutFillSource();
-	ResolutionProperties();
 	StateAndMoves();
 	std::printf("%d checks, %d failures\n", Checks, Failures);
 	return Failures ? 1 : 0;
