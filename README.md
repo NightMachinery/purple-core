@@ -69,6 +69,12 @@ schema and lifecycle are independent of settings sync.
   recording (CRC walk, cut after the last good page, end-of-stream flag,
   duration). `purple/purple_recording_file.{h,cpp}` holds the UTF-8 path file
   operations the recording repairs share.
+- `purple/purple_round_journal.{h,cpp}` - the round video journal (`.pjr`):
+  the config header (track formats and codec configuration) and the sample
+  batches, encoders and a reader that stops at the first bad record.
+- `purple/purple_mp4_repair.{h,cpp}` - recovers a round video that has no
+  `moov`: the journal's exact samples, then a scan of the media data for the
+  rest, timed on the audio clock. The client rebuilds the file from the list.
 - `purple/purple_splice.{h,cpp}` - the only writes the apps ever make to
   `settings.toml`. It does not re-serialise the document: it locates the array
   it must touch through toml++'s source regions and edits the raw lines, so
@@ -446,7 +452,9 @@ and logout barriers. `tests/test_archive_staging.cpp` covers streaming-media
 staging. `tests/test_sync_auto.cpp` covers automatic settings policy.
 `tests/test_playback.cpp` covers the private-chat voice queue rule.
 `tests/test_ogg_repair.cpp` covers the Ogg finaliser on synthetic streams.
-`run.sh` compiles the core once and runs all thirteen. Set
+`tests/test_mp4_repair.cpp` covers the round video journal and the MP4 repair
+scanner on synthetic MP4Builder-shaped streams.
+`run.sh` compiles the core once and runs all fourteen. Set
 `ARCHIVE_SQLITE_TESTS=1` to also execute the SQL against system SQLite.
 
 ```sh
@@ -534,7 +542,17 @@ written; it refuses a number of seconds that does not fit an int.
 CRC, cuts after the last good page, sets the end-of-stream flag on it with a
 recomputed CRC and reports the duration from its granule position (Opus, minus
 the pre-skip). A file with no good audio page is left untouched and reported
-unrecoverable. `ScanOgg` is the page walker alone. See
+unrecoverable. `ScanOgg` is the page walker alone.
+
+`purple/purple_round_journal.h` is the round video journal both clients write
+next to a recording round: `EncodeRoundJournalStart(config)` (the config
+header, written even when `round_journal` is Off), `EncodeRoundJournalTrack`
+for a track learned later, and `EncodeRoundJournalBatch(samples)` every
+interval. `RecoverRound(media, journal, measure)` in
+`purple/purple_mp4_repair.h` reads it, drops journaled samples that are not on
+disk or no longer match, scans the rest (the client's `AacFrameMeasure`
+decodes AAC frame lengths) and returns the sample list to rebuild, with a
+status: Exact, Repaired, Partial or Unrecoverable. See
 [the recording formats](docs/recording-formats.md).
 
 ## Settings scope and Reset (source candidate)

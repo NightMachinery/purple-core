@@ -37,3 +37,141 @@ rare.
 `ScanOgg(data, size)` is the walker on its own. Its `pages` give each page's offset, size, flags, granule,
 serial and sequence; the orphan scan uses `endOfStream` to find unfinished files, and Desktop's preview trim cuts
 on these page boundaries.
+
+## The round video journal (`.pjr`)
+
+`purple/purple_round_journal.h`.
+
+The design describes the journal as a config header followed by CRC-checked batches. Here the header and each
+track are framed as records with their own CRC like the batches, so a track the muxer learns after the first
+samples can still be declared, and a damaged header is told apart from a missing one.
+
+The sidecar a client writes next to a recording round video, `<media file>.pjr`. The media file is unchanged: the
+recorder still writes upstream's `MP4Builder` layout (Desktop: its FFmpeg MP4). The journal is append-only and
+little-endian. Android writes it from Java, so every field is fixed size and every CRC is the standard CRC-32
+that `java.util.zip.CRC32` computes (zlib: reflected polynomial `0xEDB88320`, initial value and final xor
+`0xFFFFFFFF`); `RoundJournalCrc` is the same function in C++.
+
+### File header (8 bytes)
+
+    offset size field
+    0      4    magic "PJR1"
+    4      2    version, 1
+    6      2    reserved, 0
+
+A reader that finds another version reports `UnknownVersion` and reads nothing else; the bin then lists the
+recording as unrecoverable and keeps it raw.
+
+### Records
+
+Every record is framed the same way, so a torn append or a flipped byte is caught by the record it hits:
+
+    offset size field
+    0      1    type: 1 header, 2 track, 3 batch
+    1      3    reserved, 0
+    4      4    payload length N (at most 16 MB)
+    8      N    payload
+    8+N    4    CRC-32 of bytes 0 .. 8+N-1 (the 8-byte record head and the payload)
+
+The reader stops at the first record that is not whole, whose CRC fails, or whose payload is invalid, and keeps
+everything before it (`goodBytes`, `damaged`). A record of an unknown type with a good CRC is skipped, so later
+additions within version 1 stay readable.
+
+**Header record** (type 1, 16 bytes), always the first record:
+
+    0  2  flags: bit 0 split mdat, bit 1 AVCC video framing
+    2  2  rotation in degrees (0, 90, 180, 270)
+    4  4  video width
+    8  4  video height
+    12 4  reserved, 0
+
+AVCC framing is for Desktop's FFmpeg muxer (each NAL unit has its own 4-byte length). Without it, a video sample
+is MP4Builder's: one 4-byte big-endian length, `size - 4`, over the whole sample.
+
+**Track record** (type 2), one per track, in the muxer's track order (the index `Mp4Movie.addTrack` returns):
+
+    0  1  index: the number of tracks declared before this one
+    1  1  kind: 1 video, 2 audio
+    2  1  MIME type length M
+    3  1  codec configuration buffer count C (at most 4)
+    4  M  MIME type, ASCII ("video/avc", "audio/mp4a-latm")
+       4  timescale
+       4  video width, or audio sample rate
+       4  video height, or audio channel count
+    then C times:
+       4  buffer length L (at most 64 KB)
+       L  the buffer: csd-0, csd-1, ... as MediaFormat holds them (H.264 SPS and PPS, the AAC AudioSpecificConfig)
+
+**The config header** is the header record and the track records. It is written once at the start of every round
+recording, **also when the `round_journal` setting is Off**: repair needs it to decode audio, and it costs a few
+hundred bytes. A track may be declared after the header and after earlier batches (the muxer learns its tracks one
+by one), but always before the first sample that names it; a batch that names an undeclared track is damage.
+
+**Batch record** (type 3), appended every `round_journal` interval from the muxer's own thread:
+
+    0  4  sample count K (1 to 65536)
+    4  24 × K sample records:
+       0  1  track index
+       1  1  flags: bit 0 sync sample
+       2  2  reserved, 0
+       4  4  sample size in bytes
+       8  8  offset of the sample in the media file
+       16 8  presentation time in microseconds (signed)
+
+The payload length must be exactly `4 + 24 K`. A sample's offset and size are the ones `Mp4Movie.addSample`
+receives: the data offset MP4Builder had when it wrote the sample (after any new `mdat` header), and the buffer
+size including a video sample's 4-byte length. Samples are in the order they were written.
+
+At about 77 samples a second a batch costs 16 + 24 × 77 bytes, about 1.9 KB per second, or about 110 KB for a
+60 s round.
+
+## Recovering a round video
+
+`purple/purple_mp4_repair.h`. `RecoverRound(media, mediaSize, journal, journalSize, measure)` returns a
+`RoundRecovery`: the config, the sample list to rebuild, and a status.
+
+1. **Read the journal.** Without one, without a config header, or without tracks, the status is `Unrecoverable`
+   (`NoConfig`); a journal of an unknown version is `UnknownVersion`.
+2. **Check the exact part.** Journaled samples are used in order until the first one that ends past the media
+   file (not on disk yet), overlaps the previous one, or, for video, no longer matches the bytes at its offset
+   (the 4-byte length is not `size - 4`, or AVCC's first NAL does not fit, or the NAL header is not valid: the
+   file was rewritten). The rest are counted in `journalDropped`.
+3. **Scan the rest** (`RepairRound`), starting at the end of the last exact sample, or after `ftyp` (no `ftyp`
+   and no exact sample: `NotMp4`). At each sample boundary, in order:
+   - `moov`: the file was finished; the scan ends there;
+   - an `mdat` header is skipped: 16 bytes when its size field is 1 (64-bit size) or when its next 8 bytes are
+     zero (MP4Builder always writes 16 bytes), otherwise 8 bytes (FFmpeg); `free`, `skip` and `wide` boxes are
+     skipped by their size;
+   - a video sample: a 4-byte big-endian length L with `1 <= L`, `L + 4` within the data and below 1 MB, and a
+     NAL header with the forbidden bit clear and type 1, 5, 6, 7, 8 or 9, with H.264's nal_ref_idc
+     rules (never 0 for 5, 7 and 8; always 0 for 6 and 9), and for a slice (1 or 5) `first_mb_in_slice` equal
+     to 0 (the first bit of the slice header set). In AVCC framing an access unit is non-VCL units followed by
+     a picture's slices; further slices of the picture (`first_mb_in_slice` above 0) continue it. A video sample
+     is accepted only if a valid boundary follows it: the end of the data, a box, another video sample, a
+     measurable AAC frame, or a torn tail (below);
+   - an AAC frame: `measure(audioTrack, data, available)` returns the bytes one 1024-sample frame takes,
+     decoding with the track's AudioSpecificConfig; `available` is at most 8 KB and the callback must not read
+     past it.
+
+   The scan stops at the first position where nothing fits.
+4. **Timing.** Audio is exact: frame n is at `n × 1024 / sample rate` after the last journaled audio frame (or
+   from 0). A video sample is at the end of the audio written before it, plus the encoder offset, and at least
+   1/60 s after the previous video sample. The encoder offset is the median, over the journaled video samples,
+   of their time minus the end of the audio written before them, or 0 without a journal. A video sample is a
+   sync sample when its picture is IDR (type 5) or, in MP4Builder framing, when it starts with an SPS. Audio
+   samples are all sync samples.
+5. **Status.** `Unrecoverable` (`NoVideoTrack`, `NoSamples`) when there is nothing to rebuild. `Partial` when
+   the scan stopped before the end and what is left is more than a torn last sample: a torn tail is at most
+   8 KB (the largest AAC frame, which also covers a torn `mdat` header) or a video length that runs past the end
+   of the data. Otherwise `Exact` when every sample came from the journal, `Repaired` when some came from the
+   scan.
+
+The client rebuilds the file from `samples` with its own muxer, reading each sample's bytes at its `offset`:
+Android through `MP4Builder` (`createMovie` with the config's split flag, `addTrack` with a `MediaFormat` from
+the track record, `writeSampleData(track, bytes, info, false)` per sample, which reproduces a video sample's
+length prefix exactly, then `finishMovie`); Desktop through FFmpeg. The result has the layout upstream sends.
+
+How the two sources combine: journal on and fresh gives the exact part plus a repaired tail of at most one
+interval, timed with the learned encoder offset; a stale journal (a gap, a CRC failure, a rewritten file) gives
+its exact part plus repair from there; Off gives repair from the start; no config header is unrecoverable, and
+the bin keeps the raw file.
