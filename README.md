@@ -479,6 +479,15 @@ navigation. No pending activation or binary serialization fields are added.
 Focused regression cases live in TestPeekControls; run the existing core suite
 when qualifying this change.
 
+## Media playback
+
+`[playback] private_chat_queue_p` (default true, app-wide) is the private-chat
+voice queue switch: in a one-to-one chat, a queue you start manually on the
+other person's voice or round message plays only their messages next. A value
+that is not a boolean, or a `playback` that is not a table, is a warning and
+keeps the default. The sync review labels the table Playback. See
+[the media playback design](docs/media-design.md), F3.
+
 ## Settings scope and Reset (source candidate)
 
 The shared per-key scope registry and source-bound Reset/app-wide removal

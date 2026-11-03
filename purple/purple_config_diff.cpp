@@ -582,6 +582,8 @@ using ChangeUnits = std::map<QString, ChangeUnit>;
 		return u"Overrides"_q;
 	} else if (key == "suggestions") {
 		return u"Suggestions"_q;
+	} else if (key == "playback") {
+		return u"Playback"_q;
 	} else if (key == "sync") {
 		return u"Send on save"_q;
 	} else if (key == "last_seen") {

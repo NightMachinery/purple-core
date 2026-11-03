@@ -723,6 +723,20 @@ struct Suggestions {
 	bool recommendedChannels = false;
 };
 
+// The `[playback]' table: how the apps play voice and round video messages.
+//
+// Not part of a preset, for the same reason [suggestions] and [last_seen] are
+// not: it is a listening preference, not a decision about what any one preset
+// lets through. App-wide, so it travels with settings.toml to your other
+// devices. The rule that reads it lives in purple_playback.h.
+struct Playback {
+	// Whether a voice queue you start manually on the other person's voice or
+	// round message, in a one-to-one chat, plays only their messages next and
+	// skips yours. On by default. Read when a manual play starts, so a toggle
+	// takes effect from the next manual play, never in the middle of a queue.
+	bool privateChatQueue = true;
+};
+
 // The `[sync]' table: what settings.toml does on its way to your other
 // devices. See docs/purple/sync.md in the desktop fork.
 struct Sync {
@@ -986,6 +1000,7 @@ struct Settings {
 	Sync sync;
 	LastSeen lastSeen;
 	ScreenTime screenTime;
+	Playback playback;
 
 	// [devices], in file order.
 	std::vector<DeviceLabel> devices;

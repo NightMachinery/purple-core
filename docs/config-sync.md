@@ -293,9 +293,9 @@ The units compared are:
   `[premium]` Local Premium, `[schedule]` Schedule settings (its own keys,
   the flat `[[schedule.rules]]` array and the order of its rulesets),
   `[focus_sync]` Focus sync, `[peek]` Peek, `[recent]` Recent chats,
-  `[overrides]` Overrides, `[suggestions]` Suggestions, `[sync]` Send on save,
-  `[last_seen]` Last seen and `[screen_time]` Screen time. Any other table is
-  labelled with its dotted TOML name.
+  `[overrides]` Overrides, `[suggestions]` Suggestions, `[playback]` Playback,
+  `[sync]` Send on save, `[last_seen]` Last seen and `[screen_time]` Screen
+  time. Any other table is labelled with its dotted TOML name.
 - The top-level keys outside every table, such as `version`, together form one
   entry with an empty `table`, labelled Top-level settings.
 

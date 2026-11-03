@@ -1560,6 +1560,30 @@ void WarnUnknownLists(
 	return result;
 }
 
+// [playback]: how voice and round video messages play. Shaped exactly like
+// ReadSuggestions, down to the warning for a value that is not a table.
+[[nodiscard]] Playback ReadPlayback(
+		const SettingsRootReader &root,
+		std::vector<QString> &warnings) {
+	auto result = Playback();
+	const auto node = root.get("playback");
+	if (!node) {
+		return result;
+	} else if (!node->as_table()) {
+		warnings.push_back(
+			u"'playback' should be a table (%1)."_q.arg(At(*node)));
+		return result;
+	}
+	const auto &table = *node->as_table();
+	result.privateChatQueue = ReadBool(
+		table,
+		"private_chat_queue_p",
+		u"playback"_q,
+		warnings
+	).value_or(true);
+	return result;
+}
+
 // One duration key, read the way [peek] auto_off and [recent]
 // stay_visible_after_close already are - the same spellings, the same parser,
 // and a warning that keeps the default rather than guessing at a number.
@@ -1871,6 +1895,7 @@ const std::vector<SettingsScopeTable> &SettingsScopeRegistry() {
 		{ u"recent"_q, SettingScope::AppWide },
 		{ u"overrides"_q, SettingScope::AppWide },
 		{ u"suggestions"_q, SettingScope::AppWide },
+		{ u"playback"_q, SettingScope::AppWide },
 		{ u"screen_time"_q, SettingScope::AppWide },
 		{ u"devices"_q, SettingScope::AppWide },
 		{ u"sync"_q, SettingScope::FileLocal },
@@ -2588,6 +2613,7 @@ namespace {
 	result.settings.sync = ReadSync(root, result.warnings);
 	result.settings.lastSeen = ReadLastSeen(root, result.warnings);
 	result.settings.screenTime = ReadScreenTime(root, result.warnings);
+	result.settings.playback = ReadPlayback(root, result.warnings);
 	result.settings.devices = ReadDevices(root, result.warnings);
 
 	// Hotkeys last, because this is the one check that needs the presets and

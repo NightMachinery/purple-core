@@ -5382,6 +5382,61 @@ recommended_channels_p = "on"
 	CHECK(WarnsAbout(notATable, u"'sync' should be a table"_q));
 }
 
+// [playback]: the private-chat voice queue key. On unless the file says
+// otherwise, app-wide, and labelled for the sync review like the other tables
+// users edit.
+void TestPlayback() {
+	Begin("playback");
+
+	const auto silent = Parse(QString());
+	CHECK(silent.ok());
+	CHECK(silent.warnings.empty());
+	CHECK(silent.settings.playback.privateChatQueue);
+
+	const auto on = Parse(u"[playback]\nprivate_chat_queue_p = true\n"_q);
+	CHECK(on.ok());
+	CHECK(on.warnings.empty());
+	CHECK(on.settings.playback.privateChatQueue);
+
+	const auto off = Parse(u"[playback]\nprivate_chat_queue_p = false\n"_q);
+	CHECK(off.ok());
+	CHECK(off.warnings.empty());
+	CHECK(!off.settings.playback.privateChatQueue);
+
+	// An empty table says nothing, so the default stands in silence.
+	const auto empty = Parse(u"[playback]\n"_q);
+	CHECK(empty.ok());
+	CHECK(empty.warnings.empty());
+	CHECK(empty.settings.playback.privateChatQueue);
+
+	const auto wrong = Parse(u"[playback]\nprivate_chat_queue_p = \"no\"\n"_q);
+	CHECK(wrong.ok());
+	CHECK(wrong.settings.playback.privateChatQueue);
+	CHECK(WarnsAbout(
+		wrong,
+		u"'private_chat_queue_p' should be true or false"_q));
+
+	const auto notATable = Parse(u"playback = false\n"_q);
+	CHECK(notATable.ok());
+	CHECK(notATable.settings.playback.privateChatQueue);
+	CHECK(WarnsAbout(notATable, u"'playback' should be a table"_q));
+
+	CHECK(Purple::SettingsScope(u"playback"_q, u"private_chat_queue_p"_q)
+		== Purple::SettingScope::AppWide);
+	CHECK(Purple::SettingsScope(QString(), u"playback"_q)
+		== Purple::SettingScope::AppWide);
+
+	const auto change = Purple::SummarizeConfigChange(
+		"[playback]\nprivate_chat_queue_p = true\n",
+		"[playback]\nprivate_chat_queue_p = false\n");
+	CHECK(change.parsed);
+	CHECK_EQ(int(change.entries.size()), 1);
+	if (change.entries.size() == 1) {
+		CHECK_EQ(change.entries[0].table, u"playback"_q);
+		CHECK_EQ(change.entries[0].label, u"Playback"_q);
+	}
+}
+
 void TestReservedHotkeys() {
 	Begin("reserved hotkeys");
 
@@ -16306,6 +16361,7 @@ int main() {
 	TestSuggestionsAndArchive();
 	TestAddStoryButton();
 	TestSyncAndRecommended();
+	TestPlayback();
 	TestReservedHotkeys();
 	TestStories();
 	TestRecent();
