@@ -65,6 +65,10 @@ schema and lifecycle are independent of settings sync.
   the direction of the started message, whether a manually started queue is
   confined; `QueueKeeps` says whether a confined queue may play a candidate.
   It is pure: clients track manual plays and walk their own playlists.
+- `purple/purple_ogg_repair.{h,cpp}` - finalises an interrupted Ogg/Opus voice
+  recording (CRC walk, cut after the last good page, end-of-stream flag,
+  duration). `purple/purple_recording_file.{h,cpp}` holds the UTF-8 path file
+  operations the recording repairs share.
 - `purple/purple_splice.{h,cpp}` - the only writes the apps ever make to
   `settings.toml`. It does not re-serialise the document: it locates the array
   it must touch through toml++'s source regions and edits the raw lines, so
@@ -441,7 +445,8 @@ provenance. `tests/test_archive_storage.cpp` covers SQL plans, envelopes, key lo
 and logout barriers. `tests/test_archive_staging.cpp` covers streaming-media
 staging. `tests/test_sync_auto.cpp` covers automatic settings policy.
 `tests/test_playback.cpp` covers the private-chat voice queue rule.
-`run.sh` compiles the core once and runs all twelve. Set
+`tests/test_ogg_repair.cpp` covers the Ogg finaliser on synthetic streams.
+`run.sh` compiles the core once and runs all thirteen. Set
 `ARCHIVE_SQLITE_TESTS=1` to also execute the SQL against system SQLite.
 
 ```sh
@@ -523,6 +528,14 @@ default 48 h) and `long_nudge` (`"off"` or at least 1 min, default 30 min). A
 value of the wrong shape or out of range warns and keeps the default.
 `ParseDuration` accepts a `d` (days) suffix, so `bin_keep = "7d"` reads as
 written; it refuses a number of seconds that does not fit an int.
+
+`purple/purple_ogg_repair.h` finalises an interrupted Ogg/Opus voice recording:
+`FinaliseOgg(bytes)` or `FinaliseOggFile(path)` walks the pages and checks each
+CRC, cuts after the last good page, sets the end-of-stream flag on it with a
+recomputed CRC and reports the duration from its granule position (Opus, minus
+the pre-skip). A file with no good audio page is left untouched and reported
+unrecoverable. `ScanOgg` is the page walker alone. See
+[the recording formats](docs/recording-formats.md).
 
 ## Settings scope and Reset (source candidate)
 
