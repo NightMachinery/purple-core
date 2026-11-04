@@ -2859,6 +2859,29 @@ per_day = "30m"
 	CHECK(changed && PlanSyncFirstUse(*changed) == SyncFirstUseAction::Ask);
 }
 
+void TestMediaSettingsMeaning() {
+	Begin("media settings meaning");
+	const auto absent = MakeSyncSettingsFile(SyncSettingsFileStatus::Absent);
+	const auto defaults = MakeSyncSettingsFile(SyncSettingsFileStatus::Present,
+		"version=2\n[playback]\nprivate_chat_queue_p=true\nseek_step=\"10s\"\n"
+		"[recording]\npreview_trim_p=true\nround_journal=\"1s\"\n");
+	CHECK(IsDefaultSyncSettings(defaults));
+	CHECK(SameSyncSettingsMeaning(absent, defaults));
+	for (const auto &text : {
+		QByteArray("version=2\n[playback]\nprivate_chat_queue_p=false\n"),
+		QByteArray("version=2\n[playback]\nseek_step=\"15s\"\n"),
+		QByteArray("version=2\n[recording]\npreview_trim_p=false\n"),
+		QByteArray("version=2\n[recording]\nround_journal=\"2s\"\n"),
+	}) {
+		const auto file = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, text);
+		CHECK(!IsDefaultSyncSettings(file));
+		CHECK(!SameSyncSettingsMeaning(absent, file));
+		auto first = SyncFirstUseInput();
+		first.local = file;
+		CHECK(PlanSyncFirstUse(first) == SyncFirstUseAction::Publish);
+	}
+}
+
 void TestFirstUseSupersededHead() {
 	Begin("first use: a head another install's head supersedes is not current");
 	const auto space = *FormatSyncSpaceId(QByteArray(16, 'f'));
@@ -3472,6 +3495,7 @@ int main() {
 	TestFlowDescribe();
 	TestFlowReviewStatuses();
 	TestFirstUse();
+	TestMediaSettingsMeaning();
 	TestFirstUseSupersededHead();
 	TestFirstUseMeaningIgnoresPositions();
 	TestRootStoreRelinkProof();

@@ -751,6 +751,7 @@ struct Playback {
 	// seconds. One of 5, 10, 15 or 30; anything else warns and keeps 10. The
 	// clamping rule that uses it is SeekTarget() in purple_recording.h.
 	int seekStepSeconds = 10;
+	friend bool operator==(const Playback &, const Playback &) = default;
 };
 
 // The `[recording]' table: voice and round video recording (the dock, the
@@ -812,6 +813,7 @@ struct Recording {
 
 	// `preview_trim_p' (extra 6): Preview and trim from the dock.
 	bool previewTrim = true;
+	friend bool operator==(const Recording &, const Recording &) = default;
 };
 
 // The `[sync]' table: what settings.toml does on its way to your other
