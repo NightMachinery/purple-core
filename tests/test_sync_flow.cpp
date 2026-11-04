@@ -2953,6 +2953,25 @@ void TestFirstUseSupersededHead() {
 	const auto split = SyncFirstUseInputOf(cloud.inventory(), MakeSyncSettingsFile(SyncSettingsFileStatus::Present, sameText));
 	CHECK(split && !split->head && !split->headKey);
 	CHECK(split && PlanSyncFirstUse(*split) == SyncFirstUseAction::Ask);
+	auto exactCloud = cloud;
+	auto exactDevice = Device('e');
+	exactDevice.setLocal(mine);
+	auto exact = SyncFirstUseInputOf(exactCloud.inventory(), exactDevice.local);
+	CHECK(exact && !exact->head && SameSet(exact->expectedParents, { r2.key, r3.key }));
+	if (exact) {
+		exact->choice = SyncFirstUseChoice::ThisDevice;
+		CHECK(PlanSyncFirstUse(*exact) == SyncFirstUseAction::Publish);
+		const auto shown = Review(exactDevice, exactCloud);
+		const auto applied = Apply(exactDevice, exactCloud.inventory(), shown, std::nullopt);
+		CHECK(applied.status == SyncConfigApplyStatus::Applied && applied.publishNeeded && !applied.wroteFile);
+		CHECK(exactDevice.local.text == mine && SameSet(applied.expectedParents, { r2.key, r3.key }));
+		const auto sent = PublishOwn(exactDevice, exactCloud, applied.fingerprint, applied.expectedParents);
+		CHECK(sent.status == SyncConfigPublishStatus::Confirmed);
+		const auto after = MaximalConfigHeads(SyncConfigHeadsOf(
+			ExtractSyncConfigHeads(exactCloud.inventory(), space, QString()).heads));
+		CHECK(Keys(after) == std::vector<QString>{ sent.version.key });
+	}
+
 	auto splitDevice = Device('k');
 	splitDevice.setLocal(sameText);
 	CHECK(Join(splitDevice, cloud.inventory()));

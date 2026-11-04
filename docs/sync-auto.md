@@ -150,3 +150,5 @@ retry scheduling, fresh inventories, owned message reads, localized status and
 the opt-in control. `tests/test_sync_auto.cpp` exercises the shared pure policy
 alongside all existing suites in `tests/run.sh`. No client executor or UI is
 activated by adding these core modules.
+
+When first use keeps local bytes that match one of several conflicting heads, apply the local choice before publishing. Its completion supplies the successor request after adoption, with every conflicting head as a parent.

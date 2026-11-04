@@ -516,7 +516,7 @@ struct SyncFirstUseInput {
 	std::optional<QString> headKey;
 	// The expectedParents of the publish behind "Use this device's settings" (or Publish into a non-empty chat):
 	// the parents the publish gate's own choice names for this device's settings against the chat's current heads.
-	// Empty when that choice would not publish, for example when the local file is one of the heads.
+	// Apply the local choice before publishing when it also adopts a matching head.
 	std::vector<QString> expectedParents;
 	SyncFirstUseChoice choice = SyncFirstUseChoice::None;
 };

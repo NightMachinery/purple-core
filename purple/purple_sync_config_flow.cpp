@@ -1344,7 +1344,7 @@ std::optional<SyncFirstUseInput> SyncFirstUseInputOf(
 		joined.install = u"first-use"_q;
 		const auto plan = PlanConfigSync(local.fingerprint, joined, SyncConfigHeadsOf(heads.heads));
 		const auto choice = PlanConfigChoice(joined, plan, std::nullopt);
-		if (choice && choice->publish && choice->adopt.empty()) {
+		if (choice && choice->publish) {
 			result.expectedParents = SyncConfigVersionKeys(choice->parents);
 		}
 	}
