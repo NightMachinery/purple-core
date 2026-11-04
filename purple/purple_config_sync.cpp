@@ -334,6 +334,11 @@ constexpr auto kLineageLimit = 64;
 		return result;
 	}
 	result.ownStale = ownHead && OwnStale(state, *ownHead);
+	// WHY: a moved device has no own record in the new chat, but when another device's head is its base, every device
+	// can already read those settings and a publish would only post a copy.
+	const auto basePublished = std::any_of(remoteHeads.begin(), remoteHeads.end(), [&](const ConfigHead &head) {
+		return head.key == state.base;
+	});
 	result.same = HeadsOf(classification, { ConfigHeadKind::Same });
 	const auto candidates = Representatives(HeadsOf(classification, {
 		ConfigHeadKind::Ahead,
@@ -370,7 +375,7 @@ constexpr auto kLineageLimit = 64;
 		result.verdict = ConfigSyncVerdict::Empty;
 	} else if (!state.base.isEmpty()
 		&& (Fingerprint(state.base) != localFp || result.ownStale
-			|| (state.baseUnpublished && !ownHead))) {
+			|| (state.baseUnpublished && !ownHead && !basePublished))) {
 		result.verdict = ConfigSyncVerdict::LocalChanges;
 	} else {
 		result.verdict = ConfigSyncVerdict::UpToDate;

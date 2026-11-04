@@ -1089,6 +1089,21 @@ void TestMovedChatPublishes() {
 	CHECK(joined.event(SyncAutoEvent::Enable).action == SyncAutoAction::Check);
 	const auto apply = joined.inventory();
 	CHECK(apply.action == SyncAutoAction::AutoApply);
+
+	Section = "a moved state that applied another device's head has nothing to publish";
+	joined.commit(apply);
+	joined.setLocal(apply.bytes, false);
+	CHECK(joined.event(SyncAutoEvent::Completed, SyncAutoOutcome::Applied).action == SyncAutoAction::Check);
+	CHECK(SyncConfigAwaitsMovedPublish(*joined.facts.state));
+	const auto settled = joined.inventory();
+	CHECK(settled.action == SyncAutoAction::NoOp && settled.reason == SyncAutoReason::None);
+
+	Section = "a moved state that then saves an edit still publishes it";
+	joined.setLocal(T2);
+	CHECK(joined.event(SyncAutoEvent::LocalSaved).action == SyncAutoAction::Check);
+	const auto edited = joined.inventory();
+	CHECK(edited.action == SyncAutoAction::Publish);
+	CHECK(InspectConfigPayload(ParseSyncEnvelope(edited.bytes)).text == T2);
 }
 
 int main() {
