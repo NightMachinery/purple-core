@@ -1337,6 +1337,16 @@ std::optional<SyncFirstUseInput> SyncFirstUseInputOf(
 			result.head = MakeSyncSettingsFile(SyncSettingsFileStatus::Present, record->text);
 			result.headKey = record->head.key;
 		}
+		// WHY: the publish gate compares expectedParents with its own choice's parents, so name them the same way:
+		// a joined install with an empty base, against the same heads.
+		auto joined = ConfigSyncState();
+		joined.space = *selected;
+		joined.install = u"first-use"_q;
+		const auto plan = PlanConfigSync(local.fingerprint, joined, SyncConfigHeadsOf(heads.heads));
+		const auto choice = PlanConfigChoice(joined, plan, std::nullopt);
+		if (choice && choice->publish && choice->adopt.empty()) {
+			result.expectedParents = SyncConfigVersionKeys(choice->parents);
+		}
 	}
 	return result;
 }

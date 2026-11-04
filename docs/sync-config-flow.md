@@ -91,10 +91,15 @@ them carry the same fingerprint, `head` holds its text and `headKey` the
 version key of the one a join review offers first for them. A client uses
 `headKey` and never re-derives it from `ExtractSyncConfigHeads`: it is the
 chosen key for `CheckSyncConfigApplyChoice` and `PlanSyncConfigApply` after a
-Join, JoinSilently or "Use the synced settings", and `{ headKey }` is the
-`expectedParents` of the publish behind "Use this device's settings". When
-current heads disagree, both are nullopt and a device whose settings are not
-the defaults is asked.
+Join, JoinSilently or "Use the synced settings". When current heads disagree,
+both are nullopt and a device whose settings are not the defaults is asked.
+
+`expectedParents` is what the publish behind "Use this device's settings" (or
+Publish into a non-empty chat) passes as `SyncConfigPublishRequest::expectedParents`:
+the parents `PlanConfigChoice` names for a joined install with an empty base,
+which is what the publish gate checks. With one current head it is
+`{ headKey }`; with two disagreeing heads it is both. It is empty when that
+choice would not publish.
 
 `ExtractSyncConfigHeads(inventory, space, ownInstall)` takes, for each config
 group in the space other than `ownInstall`, the lowest message id among its

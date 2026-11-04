@@ -2949,10 +2949,32 @@ void TestFirstUseSupersededHead() {
 
 	// Two current heads with different settings: no single head, so a customised device is asked.
 	auto r = MakeRemote('r', u"Windows"_q);
-	Post(cloud, r, space, mine);
+	const auto r3 = Post(cloud, r, space, mine);
 	const auto split = SyncFirstUseInputOf(cloud.inventory(), MakeSyncSettingsFile(SyncSettingsFileStatus::Present, sameText));
 	CHECK(split && !split->head && !split->headKey);
 	CHECK(split && PlanSyncFirstUse(*split) == SyncFirstUseAction::Ask);
+	auto splitDevice = Device('k');
+	splitDevice.setLocal(sameText);
+	CHECK(Join(splitDevice, cloud.inventory()));
+	const auto gate = [&](std::vector<QString> parents) {
+		return Gate(splitDevice, cloud, SyncConfigPublishRequest{
+			.expectedFingerprint = splitDevice.local.fingerprint,
+			.expectedParents = std::move(parents),
+		});
+	};
+	// The client's old empty parents dead-end; the parents core names pass and supersede both current heads.
+	CHECK(gate({}) == SyncConfigPublishGateStatus::NeedsReview);
+	CHECK(split && SameSet(split->expectedParents, { r2.key, r3.key }));
+	if (split) {
+		CHECK(gate(split->expectedParents) == SyncConfigPublishGateStatus::Proceed);
+		const auto run = PublishOwn(splitDevice, cloud, splitDevice.local.fingerprint, split->expectedParents);
+		CHECK(run.status == SyncConfigPublishStatus::Confirmed);
+		const auto after = MaximalConfigHeads(
+			SyncConfigHeadsOf(ExtractSyncConfigHeads(cloud.inventory(), space, QString()).heads));
+		CHECK(Keys(after) == std::vector<QString>{ run.version.key });
+	}
+	// With one current head the parents are { headKey }.
+	CHECK(ask && ask->expectedParents == std::vector<QString>{ r2.key });
 }
 
 void TestRootStoreRelinkProof() {
