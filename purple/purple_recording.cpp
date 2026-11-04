@@ -22,6 +22,24 @@ constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
 
 } // namespace
 
+bool KeepRecordingOnPause(
+		const Recording &settings,
+		bool round,
+		bool background,
+		bool microphoneServiceReady) {
+	return !round && (background
+		? (settings.background && microphoneServiceReady)
+		: settings.keepAcrossChats);
+}
+
+bool CanDockVoice(
+		const Recording &settings,
+		bool round,
+		bool listening,
+		bool trimmedResume) {
+	return settings.keepAcrossChats && !round && !listening && !trimmedResume;
+}
+
 std::optional<std::int64_t> NextNudgeAt(
 		std::int64_t elapsedMs,
 		int intervalSeconds) {

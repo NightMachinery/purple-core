@@ -18,6 +18,18 @@ option) any later version.
 // the timers and the players. See docs/media-recording-design.md.
 namespace Purple {
 
+[[nodiscard]] bool KeepRecordingOnPause(
+	const Recording &settings,
+	bool round,
+	bool background,
+	bool microphoneServiceReady);
+
+[[nodiscard]] bool CanDockVoice(
+	const Recording &settings,
+	bool round,
+	bool listening,
+	bool trimmedResume);
+
 // --- The long-recording nudge ([recording] long_nudge) ---
 
 // The recorded time, in milliseconds, of the next nudge after `elapsedMs':

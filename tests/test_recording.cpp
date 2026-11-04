@@ -24,6 +24,31 @@ void Report(bool condition, const char *expression, int line) {
 
 constexpr auto kMinute = std::int64_t(60 * 1000);
 
+void TestDockPolicy() {
+	Section = "dock policy";
+	for (const auto keep : { false, true }) {
+		for (const auto background : { false, true }) {
+			auto settings = Recording();
+			settings.keepAcrossChats = keep;
+			settings.background = background;
+			for (const auto round : { false, true }) {
+				for (const auto ready : { false, true }) {
+					CHECK(KeepRecordingOnPause(settings, round, false, ready)
+						== (!round && keep));
+					CHECK(KeepRecordingOnPause(settings, round, true, ready)
+						== (!round && background && ready));
+				}
+				for (const auto listen : { false, true }) {
+					for (const auto trimmed : { false, true }) {
+						CHECK(CanDockVoice(settings, round, listen, trimmed)
+							== (keep && !round && !listen && !trimmed));
+					}
+				}
+			}
+		}
+	}
+}
+
 void TestNudge() {
 	Section = "nudge";
 	const auto interval = 30 * 60;
@@ -158,6 +183,7 @@ void TestSeek() {
 } // namespace
 
 int main() {
+	TestDockPolicy();
 	TestNudge();
 	TestBinExpiry();
 	TestSeek();

@@ -204,3 +204,12 @@ How the two sources combine: journal on and fresh gives the exact part plus a re
 interval, timed with the learned encoder offset; a stale journal (a gap, a CRC failure, a rewritten file) gives
 its exact part plus repair from there; Off gives repair from the start; no config header is unrecoverable, and
 the bin keeps the raw file.
+
+## Dock policy (F6-F8)
+
+`KeepRecordingOnPause` distinguishes a covered chat from an app background
+transition. A voice can leave its chat when `keep_across_chats_p` is on. In the
+background it needs `background_p` and an already promoted microphone service.
+Rounds always pause on background. `CanDockVoice` refuses rounds, preview state
+and a trimmed resume prefix, which must stay with the native recorder UI.
+Clients retain the original account and complete send context throughout adoption.
