@@ -54,6 +54,24 @@ schema and lifecycle are independent of settings sync.
   migration, account discovery or sync binding.
 - `purple/purple_settings.{h,cpp}` - parses `settings.toml` into presets, lists,
   folders and rules, collecting warnings as it goes.
+- `purple/purple_playback.{h,cpp}` - the private-chat voice queue rule.
+  `AnchorForManualPlay` decides, from `Settings::playback`, the chat kind and
+  the direction of the started message, whether a manually started queue is
+  confined; `QueueKeeps` says whether a confined queue may play a candidate.
+  It is pure: clients track manual plays and walk their own playlists.
+- `purple/purple_ogg_repair.{h,cpp}` - finalises an interrupted Ogg/Opus voice
+  recording (CRC walk, cut after the last good page, end-of-stream flag,
+  duration). `purple/purple_recording_file.{h,cpp}` holds the UTF-8 path file
+  operations the recording repairs share.
+- `purple/purple_recording.{h,cpp}` - the recording rules: `NextNudgeAt` and
+  `NudgeDue` (the long-recording nudge), `BinItemExpired` (Recording bin
+  expiry) and `SeekTarget` (where a seek step lands).
+- `purple/purple_round_journal.{h,cpp}` - the round video journal (`.pjr`):
+  the config header (track formats and codec configuration) and the sample
+  batches, encoders and a reader that stops at the first bad record.
+- `purple/purple_mp4_repair.{h,cpp}` - recovers a round video that has no
+  `moov`: the journal's exact samples, then a scan of the media data for the
+  rest, timed on the audio clock. The client rebuilds the file from the list.
 - `purple/purple_splice.{h,cpp}` - the only writes the apps ever make to
   `settings.toml`. It does not re-serialise the document: it locates the array
   it must touch through toml++'s source regions and edits the raw lines, so
@@ -428,7 +446,16 @@ identity and codec compatibility; `tests/test_archive_source.cpp` covers copy-so
 provenance. `tests/test_archive_storage.cpp` covers SQL plans, envelopes, key loss
 and logout barriers. `tests/test_archive_staging.cpp` covers streaming-media
 staging. `tests/test_sync_auto.cpp` covers automatic settings policy.
-`run.sh` compiles the core once and runs all ten. Set
+`tests/test_playback.cpp` covers the private-chat voice queue rule.
+`tests/test_ogg_repair.cpp` covers the Ogg finaliser on synthetic streams.
+`tests/test_mp4_repair.cpp` covers the round video journal and the MP4 repair
+scanner on synthetic MP4Builder-shaped streams. `tests/test_recording.cpp`
+covers the nudge schedule, bin expiry and seek clamping.
+`tests/test_recording_fuzz.cpp` is a seeded fuzz loop over the Ogg finaliser,
+the journal reader and the MP4 repair (truncation, flips, junk, and
+well-formed journals with hostile values), checking invariants such as every
+recovered sample lying inside the media file; it runs in a few seconds.
+`run.sh` compiles the core once and runs all sixteen. Set
 `ARCHIVE_SQLITE_TESTS=1` to also execute the SQL against system SQLite.
 
 ```sh
@@ -437,7 +464,9 @@ QT_PREFIX=/path/to/qt tests/run.sh
 
 `QT_PREFIX` must hold `frameworks/QtCore.framework`; it defaults to
 `$HOME/code/misc/tdesktop-libs/local/qt`, the prefix the desktop fork builds
-against. The build lands in the gitignored `tests/build/`. The script exits
+against. Without that framework (Linux, or a Qt that is not a framework
+build) the script takes Qt Core from pkg-config's `Qt6Core`, so plain
+`tests/run.sh` works once a Qt 6 Core development package is installed. The build lands in the gitignored `tests/build/`. The script exits
 nonzero if anything fails to compile or any check fails.
 
 ## History
@@ -471,6 +500,74 @@ The clients own ephemeral countdown/abort UI, delayed setting changes and chat
 navigation. No pending activation or binary serialization fields are added.
 Focused regression cases live in TestPeekControls; run the existing core suite
 when qualifying this change.
+
+## Media playback
+
+`[playback] private_chat_queue_p` (default true, app-wide) is the private-chat
+voice queue switch: in a one-to-one chat, a queue you start manually on the
+other person's voice or round message plays only their messages next. A value
+that is not a boolean, or a `playback` that is not a table, is a warning and
+keeps the default. The sync review labels the table Playback.
+
+`[playback] seek_step` (default `"10s"`) is the step of the seek back and
+forward controls: `"5s"`, `"10s"`, `"15s"` or `"30s"`, read into
+`Playback::seekStepSeconds`. Any other value warns and keeps 10 s.
+
+`purple/purple_playback.h` holds the rule both clients ask. A manual play makes
+a `VoiceQueueAnchor` with `AnchorForManualPlay(settings.playback, chat,
+startOutgoing)`: it is confined only when the setting is on, the chat is
+`PlaybackChat::OneToOne` and the started message is incoming. Automatic
+advances keep the anchor, so a toggle applies from the next manual play.
+`QueueKeeps(anchor, candidateOutgoing)` drops only outgoing candidates of a
+confined anchor. Direction is Telegram's sender, so forwarded messages count
+for whoever forwarded them. Saved Messages (`Self`), groups, channels and
+service chats (`Other`) never confine. See
+[the media playback design](docs/media-design.md), F3.
+
+## Media recording
+
+`[recording]` (app-wide, labelled Recording in the sync review) holds the
+media recording switches of [the media recording design](docs/media-recording-design.md),
+read into `Settings::recording`. Booleans, all on by default except
+`headset_hold_start_p`: `keep_across_chats_p` (F8), `background_p` (F7,
+Android), `round_float_p` (F6), `keep_discarded_p` (discarded recordings go to
+the bin), `send_elsewhere_p`, `call_pause_p`, `headset_p`,
+`headset_hold_start_p` (Android) and `preview_trim_p`. Durations, in seconds
+with 0 for `"off"`: `round_journal` (`"off"`, `"1s"`, `"2s"` or `"5s"`, default
+1 s; Off still writes the config header), `bin_keep` (`"off"` or at least 1 h,
+default 48 h) and `long_nudge` (`"off"` or at least 1 min, default 30 min). A
+value of the wrong shape or out of range warns and keeps the default.
+`ParseDuration` accepts a `d` (days) suffix, so `bin_keep = "7d"` reads as
+written; it refuses a number of seconds that does not fit an int.
+
+`purple/purple_ogg_repair.h` finalises an interrupted Ogg/Opus voice recording:
+`FinaliseOgg(bytes)` or `FinaliseOggFile(path)` walks the pages and checks each
+CRC, cuts after the last good page, sets the end-of-stream flag on it with a
+recomputed CRC and reports the duration from its granule position (Opus, minus
+the pre-skip). A file with no good audio page is left untouched and reported
+unrecoverable. `ScanOgg` is the page walker alone.
+
+`purple/purple_round_journal.h` is the round video journal both clients write
+next to a recording round: `EncodeRoundJournalStart(config)` (the config
+header, written even when `round_journal` is Off), `EncodeRoundJournalTrack`
+for a track learned later, and `EncodeRoundJournalBatch(samples)` every
+interval. `RecoverRound(media, journal, measure)` in
+`purple/purple_mp4_repair.h` reads it, drops journaled samples that are not on
+disk or no longer match, scans the rest (the client's `AacFrameMeasure`
+decodes AAC frame lengths) and returns the sample list to rebuild, with a
+status: Exact, Repaired, Partial or Unrecoverable. See
+[the recording formats](docs/recording-formats.md).
+
+`purple/purple_recording.h` holds the rules the clients time against.
+`NextNudgeAt(elapsedMs, longNudgeSeconds)` is the recorded time (pauses
+excluded) of the next "Still recording" nudge, at every whole multiple of the
+interval, and `NudgeDue(previousMs, elapsedMs, ...)` says whether a poll
+crossed one. `BinItemExpired(binnedAt, now, binKeepSeconds)` is true from
+exactly `bin_keep` after the item entered the bin, never with `"off"` and never
+for a time in the future; clients sweep at start and every
+`kBinSweepIntervalSeconds`. `SeekTarget(positionMs, durationMs, seekStep,
+direction)` stops at 0 going back and one second before the end going forward,
+and never moves a forward seek backwards.
 
 ## Settings scope and Reset (source candidate)
 

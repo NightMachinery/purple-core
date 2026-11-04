@@ -59,6 +59,10 @@ The current reader inventory is:
   through their corresponding real readers, all app-wide. Device labels are
   dynamic keys within the one devices table. Every Peek key, including delay
   and exit controls, remains app-wide; no per-account Peek state is introduced.
+- `playback`, through `ReadPlayback`, including `private_chat_queue_p` and
+  `seek_step`, app-wide.
+- `recording`, through `ReadRecording`, every key of the media recording
+  design's Settings section, app-wide.
 - `screen_time` and its `budgets` array of tables, through `ReadScreenTime`
   and `ReadBudgets`, all app-wide.
 - `sync`, through `ReadSync`, including `send_after_save_p`, file-local.
