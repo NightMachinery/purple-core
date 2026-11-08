@@ -433,7 +433,7 @@ SyncAutoPlan PlanSyncAutoStep(const SyncAutoInput &input) {
 	result.reason = input.record.held;
 	if (!SerializeSyncAutoRecord(input.record) || !SameAccount(input.record.account, input.facts.account)
 		|| input.now <= 0 || input.facts.session.isEmpty()
-		|| int(input.event) < 0 || int(input.event) > int(SyncAutoEvent::Completed)
+		|| int(input.event) < 0 || int(input.event) > int(SyncAutoEvent::ChatUpdated)
 		|| int(input.outcome) < 0 || int(input.outcome) > int(SyncAutoOutcome::DeletionRefused)) {
 		result.action = SyncAutoAction::Hold;
 		result.reason = SyncAutoReason::InvalidRecord;
@@ -563,7 +563,7 @@ SyncAutoPlan PlanSyncAutoStep(const SyncAutoInput &input) {
 		|| (input.facts.state && input.facts.state->config.pendingSeq))) {
 		return Emit(std::move(record), SyncAutoAction::Reconcile, input);
 	}
-	if (!record.queuedSave && record.checked
+	if (input.event != SyncAutoEvent::ChatUpdated && !record.queuedSave && record.checked
 		&& (input.now < record.lastCheck || input.now - record.lastCheck < kSyncAutoCheckSeconds)) {
 		result.record = std::move(record);
 		return result;
@@ -578,6 +578,24 @@ SyncAutoPlan PlanSyncAutoStep(const SyncAutoInput &input) {
 	return Emit(std::move(record), SyncAutoAction::Check, input);
 }
 
+}
+
+bool SyncAutoPickupNeeded(
+		PeerToken bound,
+		PeerToken observed,
+		const std::vector<int32_t> &messageIds,
+		const SyncLocalState *state) {
+	if (bound != observed) { return false; }
+	for (const auto id : messageIds) {
+		if (id <= 0) { continue; }
+		const auto own = state && state->chat == bound
+			&& std::any_of(state->ownMessages.begin(), state->ownMessages.end(), [&](const SyncOwnMessage &message) {
+				return message.messageId == id && message.space == state->space
+					&& message.install == state->install && message.device == state->createdDevice;
+			});
+		if (!own) { return true; }
+	}
+	return false;
 }
 
 SyncAutoPlan PlanSyncAuto(const SyncAutoInput &input) {

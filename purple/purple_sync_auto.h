@@ -30,8 +30,14 @@ enum class SyncAutoReason {
 };
 
 enum class SyncAutoEvent {
-	Enable, Disable, SessionReady, Foreground, Unlock, LocalSaved, Retry, Completed,
+	Enable, Disable, SessionReady, Foreground, Unlock, LocalSaved, Retry, Completed, ChatUpdated,
 };
+
+[[nodiscard]] bool SyncAutoPickupNeeded(
+	PeerToken bound,
+	PeerToken observed,
+	const std::vector<int32_t> &messageIds,
+	const SyncLocalState *state);
 
 enum class SyncAutoOutcome {
 	Inventory, Applied, Staged, Sent, Committed, Deleted,

@@ -1106,7 +1106,60 @@ void TestMovedChatPublishes() {
 	CHECK(InspectConfigPayload(ParseSyncEnvelope(edited.bytes)).text == T2);
 }
 
+void TestPickupIdentity() {
+	Section = "pickup matches typed chat and excludes only this install's records";
+	const auto chat = PeerToken{ PeerTokenKind::Channel, 123 };
+	const auto other = PeerToken{ PeerTokenKind::Chat, 123 };
+	auto state = SyncLocalState();
+	state.chat = chat;
+	state.space = u"space"_q;
+	state.install = u"install"_q;
+	state.createdDevice = u"device"_q;
+	auto own = SyncOwnMessage();
+	own.space = state.space;
+	own.install = state.install;
+	own.device = state.createdDevice;
+	own.messageId = 7;
+	state.ownMessages.push_back(own);
+	CHECK(!SyncAutoPickupNeeded(chat, other, { 8 }, &state));
+	CHECK(!SyncAutoPickupNeeded(chat, chat, { 0, -1, 7 }, &state));
+	CHECK(SyncAutoPickupNeeded(chat, chat, { 7, 8 }, &state));
+	CHECK(SyncAutoPickupNeeded(chat, chat, { 7 }, nullptr));
+	state.ownMessages.front().device = u"other-device"_q;
+	CHECK(SyncAutoPickupNeeded(chat, chat, { 7 }, &state));
+	state.ownMessages.front() = own;
+	state.chat = other;
+	CHECK(SyncAutoPickupNeeded(chat, chat, { 7 }, &state));
+}
+
+void TestChatUpdates() {
+	Section = "chat update bypasses interval but preserves admission and backoff";
+	auto h = Harness();
+	h.seedOwn(T0);
+	CHECK(h.event(SyncAutoEvent::Enable).action == SyncAutoAction::Check);
+	h.inventory();
+	CHECK(h.event(SyncAutoEvent::Foreground).action == SyncAutoAction::NoOp);
+	CHECK(h.event(SyncAutoEvent::ChatUpdated).action == SyncAutoAction::Check);
+	CHECK(h.event(SyncAutoEvent::ChatUpdated).action == SyncAutoAction::NoOp);
+	const auto wait = h.event(SyncAutoEvent::Completed, SyncAutoOutcome::NetworkFailure);
+	CHECK(wait.record.retryAt > h.now);
+	CHECK(h.event(SyncAutoEvent::ChatUpdated).action == SyncAutoAction::NoOp);
+	CHECK(h.record.retryAt == wait.record.retryAt);
+	h.event(SyncAutoEvent::Disable);
+	CHECK(h.event(SyncAutoEvent::ChatUpdated).action == SyncAutoAction::NoOp);
+	CHECK(!h.record.enabled);
+	auto paused = Harness();
+	paused.record.enabled = true;
+	paused.facts.chatProblem = true;
+	CHECK(paused.event(SyncAutoEvent::ChatUpdated).reason == SyncAutoReason::SyncChatProblem);
+	paused.facts.chatProblem = false;
+	paused.facts.signedIn = false;
+	CHECK(paused.event(SyncAutoEvent::ChatUpdated).reason == SyncAutoReason::AccountUnavailable);
+}
+
 int main() {
+	TestPickupIdentity();
+	TestChatUpdates();
 	TestPublishAndEdit();
 	TestEditRefusalAndRetire();
 	TestGateAndNotices();

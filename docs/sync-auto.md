@@ -152,3 +152,12 @@ alongside all existing suites in `tests/run.sh`. No client executor or UI is
 activated by adding these core modules.
 
 When first use keeps local bytes that match one of several conflicting heads, apply the local choice before publishing. Its completion supplies the successor request after adoption, with every conflicting head as a parent.
+
+## Chat update pickup
+
+`ChatUpdated` starts a check inside the normal fifteen-minute lifecycle interval.
+Clients admit only a new or edited message in the currently bound chat, debounce
+bursts and suppress their own issued records. This event retains the enabled,
+account, chat-problem, active-operation and retry-deadline gates. It starts no
+network polling of its own. The lifecycle timer remains the backstop when no
+update arrives. Event numbers preceding `ChatUpdated` remain unchanged.
