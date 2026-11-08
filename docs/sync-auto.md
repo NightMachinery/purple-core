@@ -159,8 +159,9 @@ When first use keeps local bytes that match one of several conflicting heads, ap
 Clients admit only a new or edited message in the currently bound chat, debounce
 bursts and suppress their own issued records. This event retains the enabled,
 account, chat-problem, active-operation and retry-deadline gates. It starts no
-network polling of its own. The lifecycle timer remains the backstop when no
-update arrives. Event numbers preceding `ChatUpdated` remain unchanged.
+network polling of its own. The next eligible lifecycle event after fifteen
+minutes may check when no update arrives; there is no periodic idle timer and
+therefore no guaranteed fifteen-minute idle backstop. Event numbers preceding `ChatUpdated` remain unchanged.
 
 A chat update received after an inventory started keeps `pickupPending` in the
 automatic record. Finishing that older inventory starts one more check even
