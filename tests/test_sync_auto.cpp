@@ -1106,6 +1106,36 @@ void TestMovedChatPublishes() {
 	CHECK(InspectConfigPayload(ParseSyncEnvelope(edited.bytes)).text == T2);
 }
 
+void TestPickupDuringInventory() {
+	Section = "a chat update after inventory started gets one fresh read";
+	auto h = Harness();
+	h.seedOwn(T0);
+	CHECK(h.event(SyncAutoEvent::Enable).action == SyncAutoAction::Check);
+	const auto older = h.snapshot();
+	++h.now;
+	CHECK(h.event(SyncAutoEvent::ChatUpdated).action == SyncAutoAction::NoOp);
+	CHECK(h.record.pickupPending);
+	auto complete = h.input(SyncAutoEvent::Completed);
+	complete.inventory = older;
+	const auto next = h.run(complete);
+	CHECK(next.action == SyncAutoAction::Check);
+	CHECK(!next.record.pickupPending);
+	CHECK(h.inventory().action == SyncAutoAction::NoOp);
+	auto lifecycle = Harness();
+	lifecycle.seedOwn(T0);
+	CHECK(lifecycle.event(SyncAutoEvent::Enable).action == SyncAutoAction::Check);
+	CHECK(lifecycle.event(SyncAutoEvent::Foreground).action == SyncAutoAction::NoOp);
+	CHECK(!lifecycle.record.pickupPending);
+	CHECK(lifecycle.inventory().action == SyncAutoAction::NoOp);
+
+	auto object = QJsonDocument::fromJson(*SerializeSyncAutoRecord(h.record)).object();
+	object.remove(u"pickupPending"_q);
+	const auto legacy = ParseSyncAutoRecord(QJsonDocument(object).toJson(QJsonDocument::Compact));
+	CHECK(legacy.record && !legacy.record->pickupPending);
+	object.insert(u"pickupPending"_q, u"true"_q);
+	CHECK(ParseSyncAutoRecord(QJsonDocument(object).toJson(QJsonDocument::Compact)).status == SyncAutoCodecStatus::Invalid);
+}
+
 void TestPickupIdentity() {
 	Section = "pickup matches typed chat and excludes only this install's records";
 	const auto chat = PeerToken{ PeerTokenKind::Channel, 123 };
@@ -1158,6 +1188,7 @@ void TestChatUpdates() {
 }
 
 int main() {
+	TestPickupDuringInventory();
 	TestPickupIdentity();
 	TestChatUpdates();
 	TestPublishAndEdit();

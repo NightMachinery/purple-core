@@ -65,6 +65,7 @@ SyncAutoPlan Emit(SyncAutoRecord record, SyncAutoAction action,
 	}
 	++record.ticket;
 	if (action == SyncAutoAction::Check || (action == SyncAutoAction::Reconcile && !commitOnly)) {
+		record.pickupPending = false;
 		record.lastCheck = input.now;
 		record.checked = true;
 	}
@@ -142,7 +143,7 @@ SyncAutoPlan Done(SyncAutoRecord record, const SyncAutoInput &input) {
 	record.retiring = false;
 	const auto checkDue = !record.checked || (input.now >= record.lastCheck
 		&& input.now - record.lastCheck >= kSyncAutoCheckSeconds);
-	if (record.queuedSave || (record.queuedCheck && checkDue)) {
+	if (record.pickupPending || record.queuedSave || (record.queuedCheck && checkDue)) {
 		record.queuedSave = false;
 		record.queuedCheck = false;
 		return Emit(std::move(record), SyncAutoAction::Check, input);
@@ -448,6 +449,7 @@ SyncAutoPlan PlanSyncAutoStep(const SyncAutoInput &input) {
 	record.event = input.sequence;
 	if (input.event == SyncAutoEvent::Disable) {
 		record.enabled = false;
+		record.pickupPending = false;
 		record.held = SyncAutoReason::None;
 		result.reason = SyncAutoReason::None;
 		record.active = false;
@@ -457,6 +459,7 @@ SyncAutoPlan PlanSyncAutoStep(const SyncAutoInput &input) {
 	if (input.event == SyncAutoEvent::Enable) { record.enabled = true; }
 	if (!record.enabled) { result.record = std::move(record); return result; }
 	if (record.retryAt && input.event != SyncAutoEvent::Completed) {
+		if (input.event == SyncAutoEvent::ChatUpdated) { record.pickupPending = true; }
 		if (input.event == SyncAutoEvent::LocalSaved && input.facts.saveDebounceFinished
 			&& Gate(input.facts) == SyncAutoReason::None) {
 			record.savedFingerprint = input.facts.local.fingerprint;
@@ -471,6 +474,7 @@ SyncAutoPlan PlanSyncAutoStep(const SyncAutoInput &input) {
 	}
 	const auto gate = Gate(input.facts);
 	if (gate != SyncAutoReason::None) { return Hold(std::move(record), gate); }
+	if (input.event == SyncAutoEvent::ChatUpdated) { record.pickupPending = true; }
 	if (input.event == SyncAutoEvent::LocalSaved) {
 		if (!input.facts.saveDebounceFinished) { result.record = std::move(record); return result; }
 		record.savedFingerprint = input.facts.local.fingerprint;

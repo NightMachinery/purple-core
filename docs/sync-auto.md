@@ -161,3 +161,10 @@ bursts and suppress their own issued records. This event retains the enabled,
 account, chat-problem, active-operation and retry-deadline gates. It starts no
 network polling of its own. The lifecycle timer remains the backstop when no
 update arrives. Event numbers preceding `ChatUpdated` remain unchanged.
+
+A chat update received after an inventory started keeps `pickupPending` in the
+automatic record. Finishing that older inventory starts one more check even
+inside the lifecycle interval. Starting a new full read consumes the flag, so a
+burst during a run produces one follow-up, and the next quiet result stops.
+The optional v1 field defaults to false in older records. Ordinary lifecycle
+events still coalesce into the current read; retry deadlines remain authoritative.

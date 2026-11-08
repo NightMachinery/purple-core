@@ -25,7 +25,7 @@ const auto Fields = std::vector<QString>{
 	u"checked"_q, u"queuedCheck"_q, u"queuedSave"_q, u"savedFingerprint"_q,
 	u"retries"_q, u"retryAt"_q, u"retired"_q, u"editRefused"_q, u"uncertain"_q,
 	u"retiring"_q, u"held"_q, u"expectedState"_q, u"expectedFile"_q, u"record"_q,
-	u"messageId"_q, u"noticed"_q,
+	u"messageId"_q, u"noticed"_q, u"pickupPending"_q,
 };
 
 bool Fingerprint(const QString &text) {
@@ -48,6 +48,7 @@ QJsonObject Object(const SyncAutoRecord &value) {
 	object.insert(u"lastCheck"_q, QString::number(value.lastCheck));
 	object.insert(u"checked"_q, value.checked);
 	object.insert(u"queuedCheck"_q, value.queuedCheck);
+	if (value.pickupPending) { object.insert(u"pickupPending"_q, true); }
 	object.insert(u"queuedSave"_q, value.queuedSave);
 	object.insert(u"savedFingerprint"_q, value.savedFingerprint);
 	object.insert(u"retries"_q, value.retries);
@@ -193,6 +194,7 @@ SyncAutoDecodeResult ParseSyncAutoRecord(const QByteArray &bytes) {
 	reader.read(u"lastCheck"_q, record.lastCheck);
 	reader.read(u"checked"_q, record.checked);
 	reader.read(u"queuedCheck"_q, record.queuedCheck);
+	if (object.contains(u"pickupPending"_q)) { reader.read(u"pickupPending"_q, record.pickupPending); }
 	reader.read(u"queuedSave"_q, record.queuedSave);
 	reader.read(u"savedFingerprint"_q, record.savedFingerprint);
 	reader.read(u"retries"_q, record.retries);

@@ -73,6 +73,7 @@ struct SyncAutoRecord {
 	QByteArray record;
 	int32_t messageId = 0;
 	std::vector<SyncAutoReason> noticed;
+	bool pickupPending = false;
 	QJsonObject preserved;
 	friend bool operator==(const SyncAutoRecord &, const SyncAutoRecord &) = default;
 };
