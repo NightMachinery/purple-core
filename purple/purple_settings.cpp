@@ -1636,6 +1636,20 @@ void WarnUnknownLists(
 		u"playback"_q,
 		warnings
 	).value_or(true);
+	if (const auto mode = ReadString(table, "after_voice", u"playback"_q, warnings)) {
+		if (*mode == u"resume_music"_q) {
+			result.afterVoice = VoiceContinuation::ResumeMusic;
+		} else if (*mode == u"unheard"_q) {
+			result.afterVoice = VoiceContinuation::Unheard;
+		} else if (*mode == u"all_following"_q) {
+			result.afterVoice = VoiceContinuation::AllFollowing;
+		} else {
+			warnings.push_back(u"playback: 'after_voice' should be \"resume_music\", \"unheard\" or \"all_following\"; keeping unheard."_q);
+		}
+	}
+	result.resumeMusicAfterVoice = ReadBool(
+		table, "resume_music_after_voice_p", u"playback"_q, warnings
+	).value_or(true);
 	result.seekStepSeconds = ReadDurationChoice(
 		table,
 		"seek_step",

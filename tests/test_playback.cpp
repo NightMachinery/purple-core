@@ -111,6 +111,20 @@ void TestNamedCases() {
 } // namespace
 
 int main() {
+	for (const auto mode : {VoiceContinuation::ResumeMusic, VoiceContinuation::Unheard, VoiceContinuation::AllFollowing}) {
+		for (const auto outgoing : {false, true}) {
+			for (const auto unheard : {false, true}) {
+				for (const auto kept : {false, true}) {
+					const auto expected = mode == VoiceContinuation::ResumeMusic ? VoiceQueueDecision::Stop
+						: mode == VoiceContinuation::Unheard ? (outgoing ? VoiceQueueDecision::Skip
+							: unheard ? VoiceQueueDecision::Play : VoiceQueueDecision::Stop)
+						: kept ? VoiceQueueDecision::Play : VoiceQueueDecision::Skip;
+					CHECK(ContinuationDecision(mode, outgoing, unheard, kept) == expected);
+				}
+			}
+		}
+	}
+
 	TestMatrix();
 	TestNamedCases();
 	std::printf("%d checks, %d failures\n", Checks, Failures);

@@ -5486,6 +5486,31 @@ void TestPlaybackSeekStep() {
 	CHECK_EQ(both.settings.playback.seekStepSeconds, 30);
 	CHECK(Purple::SettingsScope(u"playback"_q, u"seek_step"_q)
 		== Purple::SettingScope::AppWide);
+	for (const auto &[text, expected] : std::vector<std::pair<QString, Purple::VoiceContinuation>>{
+		{u"resume_music"_q, Purple::VoiceContinuation::ResumeMusic},
+		{u"unheard"_q, Purple::VoiceContinuation::Unheard},
+		{u"all_following"_q, Purple::VoiceContinuation::AllFollowing},
+	}) {
+		const auto parsed = Parse(u"[playback]\nafter_voice = \"%1\"\nresume_music_after_voice_p = false\n"_q.arg(text));
+		CHECK(parsed.ok());
+		CHECK(parsed.warnings.empty());
+		CHECK(parsed.settings.playback.afterVoice == expected);
+		CHECK(!parsed.settings.playback.resumeMusicAfterVoice);
+	}
+	const auto voiceDefaults = Parse(u""_q);
+	CHECK(voiceDefaults.settings.playback.afterVoice == Purple::VoiceContinuation::Unheard);
+	CHECK(voiceDefaults.settings.playback.resumeMusicAfterVoice);
+	for (const auto &text : {u"42"_q, u"\"bogus\""_q}) {
+		const auto parsed = Parse(u"[playback]\nafter_voice = %1\n"_q.arg(text));
+		CHECK(parsed.settings.playback.afterVoice == Purple::VoiceContinuation::Unheard);
+		CHECK(WarnsAbout(parsed, u"'after_voice' should be"_q));
+	}
+	const auto badResume = Parse(u"[playback]\nresume_music_after_voice_p = 42\n"_q);
+	CHECK(badResume.settings.playback.resumeMusicAfterVoice);
+	CHECK(WarnsAbout(badResume, u"'resume_music_after_voice_p' should be"_q));
+	CHECK(Purple::SettingsScope(u"playback"_q, u"after_voice"_q) == Purple::SettingScope::AppWide);
+	CHECK(Purple::SettingsScope(u"playback"_q, u"resume_music_after_voice_p"_q) == Purple::SettingScope::AppWide);
+
 }
 
 // [recording]: every key of the media recording design's Settings section,

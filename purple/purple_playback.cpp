@@ -24,4 +24,21 @@ bool QueueKeeps(VoiceQueueAnchor anchor, bool candidateOutgoing) {
 	return !anchor.confined || !candidateOutgoing;
 }
 
+VoiceQueueDecision ContinuationDecision(
+		VoiceContinuation mode,
+		bool outgoing,
+		bool unheard,
+		bool keptByOwnership) {
+	switch (mode) {
+	case VoiceContinuation::ResumeMusic:
+		return VoiceQueueDecision::Stop;
+	case VoiceContinuation::Unheard:
+		return outgoing ? VoiceQueueDecision::Skip
+			: unheard ? VoiceQueueDecision::Play : VoiceQueueDecision::Stop;
+	case VoiceContinuation::AllFollowing:
+		return keptByOwnership ? VoiceQueueDecision::Play : VoiceQueueDecision::Skip;
+	}
+	return VoiceQueueDecision::Stop;
+}
+
 } // namespace Purple

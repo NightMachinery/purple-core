@@ -589,3 +589,5 @@ remaining frontend/integration obligations.
 
 The pure account path and startup ownership model is documented in
 [Account files and startup ownership](docs/account-files-owner-recovery.md).
+
+Voice and round continuation settings are documented in [voice continuation](docs/voice-continuation.md).

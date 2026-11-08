@@ -739,12 +739,20 @@ struct Suggestions {
 // not: it is a listening preference, not a decision about what any one preset
 // lets through. App-wide, so it travels with settings.toml to your other
 // devices. The rule that reads it lives in purple_playback.h.
+enum class VoiceContinuation : uchar {
+	ResumeMusic,
+	Unheard,
+	AllFollowing,
+};
+
 struct Playback {
 	// Whether a voice queue you start manually on the other person's voice or
 	// round message, in a one-to-one chat, plays only their messages next and
 	// skips yours. On by default. Read when a manual play starts, so a toggle
 	// takes effect from the next manual play, never in the middle of a queue.
 	bool privateChatQueue = true;
+	VoiceContinuation afterVoice = VoiceContinuation::Unheard;
+	bool resumeMusicAfterVoice = true;
 
 	// `seek_step': how far the seek back and forward buttons, the headset
 	// rewind and fast-forward keys and the Desktop shortcut commands jump, in

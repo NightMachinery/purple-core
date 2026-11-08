@@ -57,4 +57,12 @@ struct VoiceQueueAnchor {
 	VoiceQueueAnchor anchor,
 	bool candidateOutgoing);
 
+enum class VoiceQueueDecision : uchar { Skip, Play, Stop };
+
+[[nodiscard]] VoiceQueueDecision ContinuationDecision(
+	VoiceContinuation mode,
+	bool outgoing,
+	bool unheard,
+	bool keptByOwnership);
+
 } // namespace Purple
