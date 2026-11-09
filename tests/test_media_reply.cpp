@@ -149,11 +149,20 @@ voice = "typo"
 		QJsonArray{u"channel:17"_q, u"chat:17"_q});
 	Check(named.ok() && ParseSettings(named.text, u"fixture"_q).settings.mediaReply.sets.size() == 2,
 		"typed set writes preserve equal IDs of different peer types");
-	Check(!SetMediaReplyValue(text, u"fixture"_q, u"sets.invalid.name"_q, u"voice"_q, u"both"_q).ok(),
-		"set names cannot inject a table path");
+	Check(!SetMediaReplyValue(text, u"fixture"_q, u"sets.invalid\nname"_q, u"voice"_q, u"both"_q).ok(),
+		"set names cannot inject a table header");
 	const auto types = ParseSettings(named.text, u"fixture"_q).settings;
 	Check(ResolveMediaReply(types, {PeerTokenKind::Chat, 17}, ChatKind::Group).set == u"second"_q,
 		"typed chat does not collide with user of equal bare ID");
+	const auto unicode = SetMediaReplyValue(text, u"fixture"_q, u"sets.دوستان و خانواده.1"_q,
+		u"voice"_q, u"both"_q);
+	const auto unicodeParsed = ParseSettings(unicode.text, u"fixture"_q);
+	Check(unicode.ok() && unicodeParsed.ok() && unicodeParsed.settings.mediaReply.sets.back().name
+		== u"دوستان و خانواده.1"_q, "human set names are safely quoted");
+	const auto unicodeAgain = SetMediaReplyValue(unicode.text, u"fixture"_q, u"sets.دوستان و خانواده.1"_q,
+		u"voice"_q, u"off"_q);
+	Check(unicodeAgain.ok() && ParseSettings(unicodeAgain.text, u"fixture"_q).settings.mediaReply.sets.back().row.voice
+		== MediaReplyMode::Off, "Unicode table edit uses source spans");
 	std::cout << "MEDIA_REPLY_CHECKS=" << checks << " failures=" << failures << '\n';
 	return failures ? 1 : 0;
 }

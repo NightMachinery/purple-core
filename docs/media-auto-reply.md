@@ -16,7 +16,8 @@ canonical `user:ID`, `chat:ID` and `channel:ID` strings. The first matching set
 claims a chat; omitted row values inherit its chat-type defaults. Bare Work Mode
 memberships cannot safely identify a peer type, so they never drive automatic
 sends. Media sets do not change those memberships or the active preset.
-Names created by the native editors use letters, numbers, underscores or hyphens.
+Native editors accept human names, including spaces and non-Latin text. The writer
+quotes names as one TOML key, so dots cannot become extra tables.
 Resetting an override removes its key without rebuilding the document.
 
 The clients supply a stable account key, typed original peer, final server

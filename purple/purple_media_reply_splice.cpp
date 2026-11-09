@@ -3,7 +3,7 @@
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
-#include <QtCore/QRegularExpression>
+#include <algorithm>
 #define TOML_EXCEPTIONS 0
 #include <toml.hpp>
 
@@ -42,14 +42,23 @@ SpliceResult SetMediaReplyValue(
 		const QJsonValue &value) {
 	const auto refuse = [&](const QString &why) { return SpliceResult{text, false, why}; };
 	auto tableName = u"media_reply"_q;
+	auto parts = QStringList{tableName};
 	if (!row.isEmpty()) {
-		static const auto identifier = QRegularExpression(u"^[A-Za-z0-9_-]{1,64}$"_q);
-		if (row != u"private"_q && row != u"groups"_q && row != u"channels"_q) {
-			if (!row.startsWith(u"sets."_q) || !identifier.match(row.mid(5)).hasMatch()) {
-				return refuse(u"A set name must use 1 to 64 letters, numbers, underscores or hyphens."_q);
+		if (row == u"private"_q || row == u"groups"_q || row == u"channels"_q) {
+			tableName += '.' + row;
+			parts.push_back(row);
+		} else if (row.startsWith(u"sets."_q)) {
+			const auto name = row.mid(5);
+			if (name.trimmed().isEmpty() || name.size() > 128
+				|| std::any_of(name.begin(), name.end(), [](QChar ch) { return ch.unicode() < 0x20 || ch.unicode() == 0x7f; })) {
+				return refuse(u"A chat set needs a name of at most 128 characters."_q);
 			}
+			tableName += u".sets."_q + Quote(name);
+			parts.push_back(u"sets"_q);
+			parts.push_back(name);
+		} else {
+			return refuse(u"Invalid media auto-reply row."_q);
 		}
-		tableName += '.' + row;
 	}
 	auto encoded = QString();
 	if (value.isNull() && !row.isEmpty()
@@ -77,9 +86,17 @@ SpliceResult SetMediaReplyValue(
 	const auto source = text.toUtf8();
 	auto parsed = toml::parse(std::string_view(source.constData(), source.size()), path.toStdString());
 	if (!parsed) return refuse(u"Settings could not be parsed."_q);
-	const auto address = tableName.toStdString();
+	const auto findTable = [&](toml::table &root) -> toml::table* {
+		auto table = &root;
+		for (const auto &part : parts) {
+			const auto node = table->get(part.toStdString());
+			table = node ? node->as_table() : nullptr;
+			if (!table) return nullptr;
+		}
+		return table;
+	};
 	const auto keyName = key.toStdString();
-	const auto table = parsed.table().at_path(address).as_table();
+	const auto table = findTable(parsed.table());
 	if (table && table->is_inline()) return refuse(u"Expand this inline table before editing it."_q);
 	const auto node = table ? table->get(keyName) : nullptr;
 	auto edited = source;
@@ -107,7 +124,8 @@ SpliceResult SetMediaReplyValue(
 			const auto header = till < 0 ? QByteArray() : source.mid(from, till - from);
 			const auto probe = header + "\n__purple_media_probe = true\n";
 			auto headerParse = toml::parse(std::string_view(probe.constData(), probe.size()));
-			if (headerParse && headerParse.table().at_path(address)["__purple_media_probe"].value<bool>().value_or(false)) {
+			const auto headerTable = headerParse ? findTable(headerParse.table()) : nullptr;
+			if (headerTable && (*headerTable)["__purple_media_probe"].value<bool>().value_or(false)) {
 				edited.insert(till + 1, assignment);
 				inserted = true;
 			}
@@ -119,7 +137,8 @@ SpliceResult SetMediaReplyValue(
 	}
 	auto verify = toml::parse(std::string_view(edited.constData(), edited.size()));
 	if (!verify) return refuse(u"The edit would not parse back."_q);
-	const auto back = verify.table().at_path(address)[keyName];
+	const auto backTable = findTable(verify.table());
+	const auto back = backTable ? backTable->get(keyName) : nullptr;
 	if (value.isNull() ? bool(back) : !back) return refuse(u"The edited setting did not match the requested change."_q);
 	return {QString::fromUtf8(edited), edited != source, {}};
 }
