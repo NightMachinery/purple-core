@@ -46,6 +46,9 @@ store. Optional provisional streaming staging authenticates out-of-order coverag
 and verifies/reseals bounded chunks before exact-version completion. Archive
 schema and lifecycle are independent of settings sync.
 
+The shared [media auto-reply policy](docs/media-auto-reply.md) provides account-only
+voice/round rules, typed chat sets, lossless editing and durable pre-send reservations.
+
 ## What is here
 
 - `purple/purple_local_choice.{h,cpp}` - validates stable production/test

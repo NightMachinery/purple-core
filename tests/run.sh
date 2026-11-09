@@ -54,6 +54,8 @@ fi
 Sources=(
     purple/purple_sync_auto.cpp
     purple/purple_sync_auto_state.cpp
+    purple/purple_media_reply_splice.cpp
+    purple/purple_media_reply.cpp
     purple/purple_peer_token.cpp
     purple/purple_sync_chat.cpp
     purple/purple_sync_chat_magic.cpp
@@ -124,7 +126,7 @@ if [ "$CompileStatus" != 0 ]; then
 fi
 
 Status=0
-for Test in test_config test_sync_flow test_sync_chat test_sync_chat_magic test_archive test_archive_codec test_archive_source test_sync_auto test_archive_storage test_archive_staging test_playback test_ogg_repair test_mp4_repair test_recording test_recording_fuzz; do
+for Test in test_media_reply test_config test_sync_flow test_sync_chat test_sync_chat_magic test_archive test_archive_codec test_archive_source test_sync_auto test_archive_storage test_archive_staging test_playback test_ogg_repair test_mp4_repair test_recording test_recording_fuzz; do
     clang++ "${Flags[@]}" -o "$BuildPath/$Test" \
         "$RepoPath/tests/$Test.cpp" \
         "${Objects[@]}" \

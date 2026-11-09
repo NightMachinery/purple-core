@@ -1665,6 +1665,65 @@ void WarnUnknownLists(
 // docs/media-recording-design.md. Shaped like ReadPlayback: every key
 // defaulted, a warning for a value of the wrong shape that keeps the default,
 // and a warning for a recording that is not a table.
+[[nodiscard]] MediaReplyRow ReadMediaReplyRow(
+		const toml::table &table,
+		const QString &context,
+		std::vector<QString> &warnings) {
+	auto result = MediaReplyRow();
+	const auto mode = [&](const char *key) -> std::optional<MediaReplyMode> {
+		if (!table.get(key)) return std::nullopt;
+		const auto text = ReadString(table, key, context, warnings);
+		const auto value = text ? ParseMediaReplyMode(*text) : std::nullopt;
+		if (!value) warnings.push_back(context + u": invalid media reply mode; using Off."_q);
+		return value.value_or(MediaReplyMode::Off);
+	};
+	result.voice = mode("voice");
+	result.round = mode("round");
+	result.roundFollow = ReadBool(table, "round_follow_voice", context, warnings);
+	return result;
+}
+
+[[nodiscard]] MediaReplySettings ReadMediaReply(
+		const SettingsRootReader &root,
+		std::vector<QString> &warnings) {
+	auto result = MediaReplySettings();
+	const auto node = root.get("media_reply");
+	if (!node) return result;
+	const auto table = node->as_table();
+	if (!table) {
+		warnings.push_back(u"media_reply should be a table."_q);
+		return result;
+	}
+	if (const auto text = ReadString(*table, "text", u"media_reply"_q, warnings)) {
+		result.text = *text;
+	}
+	const auto names = std::array{ "private", "groups", "channels" };
+	for (auto i = 0; i != int(names.size()); ++i) {
+		if (const auto row = table->get(names[i])) {
+			if (const auto data = row->as_table()) {
+				result.defaults[i] = ReadMediaReplyRow(*data, Text(names[i]), warnings);
+			} else warnings.push_back(u"media_reply: chat type should be a table."_q);
+		}
+	}
+	if (const auto sets = (*table)["sets"].as_table()) {
+		for (const auto &[name, data] : TablesInFileOrder(*sets, u"media_reply.sets"_q, warnings)) {
+			auto set = MediaReplySet{ name,
+				ReadString(*data, "list", name, warnings).value_or(name), {},
+				ReadMediaReplyRow(*data, name, warnings) };
+			if (const auto peers = (*data)["peers"].as_array()) {
+				for (const auto &node : *peers) {
+					const auto text = node.value<std::string_view>();
+					const auto peer = text ? ParsePeerToken(Text(*text)) : std::nullopt;
+					if (peer && peer->kind != PeerTokenKind::Self) set.peers.push_back(*peer);
+					else warnings.push_back(name + u": invalid typed media peer, ignoring it."_q);
+				}
+			}
+			result.sets.push_back(std::move(set));
+		}
+	}
+	return result;
+}
+
 [[nodiscard]] Recording ReadRecording(
 		const SettingsRootReader &root,
 		std::vector<QString> &warnings) {
@@ -2012,6 +2071,7 @@ const std::vector<SettingsScopeTable> &SettingsScopeRegistry() {
 		{ u"version"_q, SettingScope::FileLocal, {}, false, true },
 		{ u"list_order"_q, SettingScope::AppWide, {}, false, true },
 		{ u"notifications"_q, SettingScope::PerAccount },
+		{ u"media_reply"_q, SettingScope::PerAccount },
 		{ u"last_seen"_q, SettingScope::PerAccount, {
 			{ u"last_seen"_q, u"trade_remember"_q, SettingScope::AppWide },
 			{ u"last_seen"_q, u"trade_cooldown"_q, SettingScope::AppWide },
@@ -2127,7 +2187,8 @@ SettingScope SettingsScope(
 		} else if (table.empty()) {
 			return entry.scope;
 		}
-		return (table.size() > 1 && entry.scope == SettingScope::PerAccount)
+		return (table.size() > 1 && entry.scope == SettingScope::PerAccount
+			&& entry.name != u"media_reply"_q)
 			? SettingScope::Unknown
 			: entry.scope;
 	}
@@ -2761,6 +2822,7 @@ namespace {
 	result.settings.screenTime = ReadScreenTime(root, result.warnings);
 	result.settings.playback = ReadPlayback(root, result.warnings);
 	result.settings.recording = ReadRecording(root, result.warnings);
+	result.settings.mediaReply = ReadMediaReply(root, result.warnings);
 	result.settings.devices = ReadDevices(root, result.warnings);
 
 	// Hotkeys last, because this is the one check that needs the presets and
@@ -2997,7 +3059,7 @@ void LayerAccountTable(
 			&& !value.is_table()) {
 			continue;
 		}
-		if (!exception && (rootNamespace || (scope != SettingScope::PerAccount
+		if (!exception && (rootNamespace || (!path.empty() && path.front() == u"media_reply"_q) || (scope != SettingScope::PerAccount
 			&& scope != SettingScope::FileLocal))) {
 			if (const auto table = value.as_table()) {
 				auto nested = path;
@@ -3076,6 +3138,7 @@ LayerSettingsResult LayerSettings(
 		return result;
 	}
 	RemoveInheritedFileLocal(merged.table(), {});
+	if (globalPath != accountPath) merged.table().erase("media_reply");
 	const auto &globalSettings = result.global.usedGood
 		? result.global.good->parsed.settings
 		: result.global.current.parsed.settings;

@@ -8,6 +8,7 @@ option) any later version.
 #pragma once
 
 #include "purple/purple_types.h"
+#include "purple/purple_media_reply.h"
 
 #include <QtCore/QString>
 
@@ -1095,6 +1096,7 @@ struct Settings {
 	ScreenTime screenTime;
 	Playback playback;
 	Recording recording;
+	MediaReplySettings mediaReply;
 
 	// [devices], in file order.
 	std::vector<DeviceLabel> devices;
