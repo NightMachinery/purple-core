@@ -51,6 +51,7 @@ def main():
         "purple/purple_sync_json.cpp",
         "purple/purple_playlists.cpp",
         "purple/purple_playlists_ops.cpp",
+        "purple/purple_playlists_policy.cpp",
     ]
     shared_objects = []
     for source in sources:
@@ -60,6 +61,7 @@ def main():
     tests = [
         ("test_playlists", "tests/test_playlists.cpp"),
         ("test_playlists_ops", "tests/test_playlists_ops.cpp"),
+        ("test_playlists_policy", "tests/test_playlists_policy.cpp"),
     ]
     executables = []
     for name, test_source in tests:

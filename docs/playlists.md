@@ -1,12 +1,14 @@
-# Playlists core model and local operations (format 1)
+# Playlists core model, local operations, and policy decisions (format 1)
 
-This document specifies the first two A1 slices in `purple/purple_playlists.h`, `purple/purple_playlists.cpp`, `purple/purple_playlists_ops.h`, and `purple/purple_playlists_ops.cpp`, together with the opt-in JSON size-budget extension in `purple/purple_sync_json.h`.
+This document specifies the first three A1 slices in `purple/purple_playlists.h`, `purple/purple_playlists.cpp`, `purple/purple_playlists_ops.h`, `purple/purple_playlists_ops.cpp`, `purple/purple_playlists_policy.h`, and `purple/purple_playlists_policy.cpp`, together with the opt-in JSON size-budget extension in `purple/purple_sync_json.h`.
 
 ## Scope of these slices
 
 The model slice implements in-memory data structures, strict format 1 JSON parsing and validation, canonical JSON serialization, and pure register-level `JoinPlaylistLibraries` and `PlaylistLibraryContains` operations.
 
 The local operations slice builds on that model with deterministic playlist ID formatting, local create/rename/delete/restore/purge/add/relink/remove/reorder editing, structured undo records and undo application, per-playlist monotonic `2^52` stamp allocation, the 24 MiB local edit size guard, and playlist/song display ordering.
+
+The policy slice adds pure song qualification, shared metadata preparation, pinned-selection chat order sorting, and gated automatic-purge decisions over an already-merged library.
 
 These slices perform no file I/O, compression, network transport, clock reads, `AccountFiles` wiring, settings parsing, or UI integration.
 
@@ -53,11 +55,21 @@ A `PlaylistLibrary` holds `format` (exact integer `1`), `playlists` keyed by pla
 - **Undo records and conflicts:** `CreatePlaylist` returns a `Create` undo record; `UndoPlaylistOperation` permanently purges the playlist ID only if the playlist is still untouched since creation, and returns `UndoConflict` otherwise (so merged remote activity or subsequent edits are never silently purged). Register-level edits return prior `title`, `deleted`, `order`, and affected `priorSongs` (`std::nullopt` for newly added songs so undo writes a removal tombstone) and replay only those captured registers using fresh monotonic stamps. Undoing a reorder whose prior order register was absent writes a fresh empty order register, so the undo survives merging the old reorder. Reorder checks the effective visible sequence as well as the stored list before declaring a no-op, because a re-added song can move to the end while the stored list stays unchanged. Non-delete undo writes fail with `PlaylistDeleted` if the playlist is currently deleted. `DeleteForeverPlaylist` has no undo and can proceed at stamp `2^52`.
 - **Display ordering:** `PlaylistVisibleSongIds` emits active songs in `order` where `song.since <= order.stamp` (Group 1), followed by remaining active songs ordered by ascending `since` and numeric `documentId` (Group 2). `ListVisiblePlaylists` filters out deleted and incomplete playlists and sorts by descending caller-supplied `recentUseMs`, then case-insensitive title (`Qt::CaseInsensitive`), then ascending playlist ID.
 
+## Policy decisions and gated automatic purge
+
+`purple/purple_playlists_policy.h` and `purple/purple_playlists_policy.cpp` implement pure qualification, metadata normalization, chat-order sorting, and `AutoPurgePlaylists`:
+
+- **Song qualification (`QualifySong`):** Validates nonzero `documentId` and positive `messageId`, an audio attribute without the voice flag, a regular server message as main message media (never inferred from `hasAudioAttribute`), and explicit exclusions defaulting false for positive capabilities (`isRegularServerMessage`, `isMainMessageMedia`, `hasAudioAttribute`) and false for exclusions (`isScheduled`, `isLocalUnsent`, `isSponsored`, `isStory`, `isProfileMusic`, `isSecretChat`, `isRichMediaSubtrack`, `hasSelfDestructTimer`). Protected-chat or protected-message songs pass only when `protectedContentAllowed` is true; unprotected songs are unaffected, and existing playlist entries are never mutated when policy changes.
+- **Metadata preparation (`PrepareSongMeta`):** Falls back to `fileName` only when raw audio `title` is empty, validates all Unicode code points across `title` and `performer` against unpaired surrogates before truncating each to 96 code points without splitting surrogate pairs, enforces duration in `[0, 2^31 - 1]`, and checks the resulting fields with `IsValidPlaylistMetaText`.
+- **Pinned chat order (`SortPlaylistChatOrder`):** Validates nonzero `documentId` and positive `messageId`, places items from a migrated-from basic group before current-chat items, and orders within each group by ascending `messageId` then ascending `documentId`.
+- **Automatic purge (`AutoPurgePlaylists`):** Evaluates an already-merged library without touching disk, clock, or network, allocating no stamps, producing no undo entries, and imposing no 24 MiB edit size cap. Invalid or `NewerFormat` local libraries return all input state unchanged. Blocking facts default false and sync defaults enabled, so partial context fails closed and the sync-off exception requires an explicit choice. A playlist is due when `deleted` is `true` and `nowMs >= deletionStamp + 30 days` (computed overflow-safely), including valid partial playlists whose winning `deleted` register is present. Non-purged playlists, registers, and stamps stay bit-for-bit intact.
+- **Sync-state gating and `dueSeen` retention:** When `syncEnabled` is false, only `serverRequestSucceeded` in the current step is required, and due playlists purge immediately. When `syncEnabled` is true, purge requires `serverRequestSucceeded`, complete discovery (paged to end, missing memo items resolved, all candidates classified/read without transient read failure or unknown ownership, and any vanished memo record paired with at least one new valid record), `noPresentNewerFormatRecord`, and a matching `dueSeen` record (`deletionStamp` and `firstSeenAtMs`) observed at least 15 minutes earlier. That deletion must already have been 30 days old at `firstSeenAtMs`; impossible earlier observations are replaced with a fresh observation. Incomplete or unvalidated steps leave `dueSeen` unchanged so failed steps never start or shorten the wait, and clock rewinds (`nowMs < firstSeenAtMs`) keep the earlier `firstSeenAtMs` without wrapping or purging early. On an otherwise complete clock-validated step, no-longer-due, absent, restored, or changed-stamp deletions are cleared/reset. When a newer-format record is present during complete discovery, no purge runs and `dueSeen` is cleared conservatively so unreadable newer-format state cannot keep an earlier observation alive across format barriers; once no newer-format record remains, a fresh 15-minute observation starts.
+
 ## Remaining Phase A work
 
 These slices do not complete Phase A1 or Phase A. Still to be implemented:
 
-- Remaining A1: `QualifySong`, `CopyPlaylist`, `AutoPurge`, `ImportShare`, change diffs for notices, local sync file (`local.json`) serialization, `AccountFiles::playlists`, and `[playlists]` / `[playback] private_listening_p` settings readers.
+- Remaining A1: `CopyPlaylist`, `ImportShare`, change diffs for notices, local sync file (`local.json`) serialization, `AccountFiles::playlists`, and `[playlists]` / `[playback] private_listening_p` settings readers.
 - Later Phase A slices: A2 guarded gzip codec (`purple_playlists_codec`), A3 sync step and chat-move planner (`purple_playlists_sync`), A4 share file codec and import planner (`purple_playlists_share`), and A5 README overview.
 
 ## Verification
@@ -65,6 +77,8 @@ These slices do not complete Phase A1 or Phase A. Still to be implemented:
 `tests/test_playlists.cpp` exercises the 4 MiB legacy cap alongside uncapped >4 MiB local library parsing, section 7.2 golden canonical round-trips, lexicographical song key order, partial playlist absence preservation, `self` peer normalization, `NewerFormat` handling, strict validation boundaries (`2^52`, `2^64 - 1`, code-point limits, duplicate/invalid Unicode, `alt` distinctness, `purged` disjointness), equal-stamp tie-breaking, purged remove-wins `Contains`, and 200 seeded commutative/associative/idempotent join property checks.
 
 `tests/test_playlists_ops.cpp` exercises `FormatPlaylistId`, `CreatePlaylist` collision and untouched-vs-conflict `UndoCreate`, lifecycle transitions and no-op/deleted/incomplete refusals, batch `AddPlaylistSongs` order/dedup/no-op/relink/undo, `RemovePlaylistSongs`, `ReorderPlaylistSongs`, concurrent merge + undo cases, `2^52` stamp allocation and saturation, the 24 MiB local edit cap and oversized downward edits, and `PlaylistVisibleSongIds` / `ListVisiblePlaylists` ordering.
+
+`tests/test_playlists_policy.cpp` exercises `QualifySong` positive/negative gates and `protectedContentAllowed` behavior, `PrepareSongMeta` fallback, duration bounds, supplementary code-point truncation, and full-input surrogate rejection, `SortPlaylistChatOrder` migrated-first ordering, and `AutoPurgePlaylists` 30-day/15-minute boundaries, fail-closed gating facts, clock rewind, changed-stamp resets, newer-format `dueSeen` clearing, sync-off gating, partial/max-stamp/oversized libraries, and invalid/newer library immutability.
 
 Run only this slice with `python3 tests/run_playlists.py`. It uses Qt6Core from
 `pkg-config`, or a macOS framework selected with `--qt-prefix` (also `QT_PREFIX`).
