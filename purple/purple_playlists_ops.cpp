@@ -51,6 +51,55 @@ namespace {
 	return PlaylistEditError::InvalidLibrary;
 }
 
+[[nodiscard]] PlaylistEditError MapSourcePlaylistError(
+		PlaylistLibraryError error) {
+	switch (error) {
+	case PlaylistLibraryError::InvalidSelfUserId:
+		return PlaylistEditError::InvalidSelfUserId;
+	case PlaylistLibraryError::InvalidTitle:
+		return PlaylistEditError::InvalidTitle;
+	case PlaylistLibraryError::InvalidStamp:
+		return PlaylistEditError::InvalidStamp;
+	case PlaylistLibraryError::InvalidDocumentId:
+		return PlaylistEditError::InvalidDocumentId;
+	case PlaylistLibraryError::InvalidOrder:
+		return PlaylistEditError::InvalidOrder;
+	case PlaylistLibraryError::InvalidPeerToken:
+		return PlaylistEditError::InvalidPeerToken;
+	case PlaylistLibraryError::InvalidUsername:
+		return PlaylistEditError::InvalidUsername;
+	case PlaylistLibraryError::InvalidMeta:
+		return PlaylistEditError::InvalidMeta;
+	case PlaylistLibraryError::InvalidValue:
+	case PlaylistLibraryError::InvalidSince:
+	case PlaylistLibraryError::InvalidAlt:
+		return PlaylistEditError::InvalidValue;
+	default:
+		return PlaylistEditError::InvalidLibrary;
+	}
+}
+
+[[nodiscard]] QString MakeCopiedPlaylistTitle(const QString &sourceTitle) {
+	const auto suffix = u" (copy)"_q;
+	const auto maxBaseCodePoints = kMaximumPlaylistTitleCodePoints - suffix.size();
+	auto count = qsizetype(0);
+	auto cutIndex = qsizetype(0);
+	for (auto i = qsizetype(0); i < sourceTitle.size() && count < maxBaseCodePoints; ++i) {
+		const auto code = sourceTitle[i].unicode();
+		auto unitCount = qsizetype(1);
+		if (code >= 0xD800 && code <= 0xDBFF && (i + 1) < sourceTitle.size()) {
+			const auto second = sourceTitle[i + 1].unicode();
+			if (second >= 0xDC00 && second <= 0xDFFF) {
+				++i;
+				unitCount = 2;
+			}
+		}
+		++count;
+		cutIndex += unitCount;
+	}
+	return sourceTitle.left(cutIndex) + suffix;
+}
+
 [[nodiscard]] PeerToken NormalizePeer(PeerToken peer, uint64_t selfUserId) {
 	if (selfUserId > 0
 		&& peer.kind == PeerTokenKind::User
@@ -58,6 +107,23 @@ namespace {
 		return PeerToken();
 	}
 	return peer;
+}
+
+[[nodiscard]] Playlist NormalizePlaylistPeers(
+		Playlist playlist,
+		uint64_t selfUserId) {
+	if (playlist.songs) {
+		for (auto &[docId, reg] : *playlist.songs) {
+			if (!reg.value.source) {
+				continue;
+			}
+			reg.value.source->peer = NormalizePeer(reg.value.source->peer, selfUserId);
+			for (auto &alt : reg.value.source->alt) {
+				alt.peer = NormalizePeer(alt.peer, selfUserId);
+			}
+		}
+	}
+	return playlist;
 }
 
 [[nodiscard]] bool SamePeerMsg(
@@ -310,6 +376,84 @@ PlaylistEditResult CreatePlaylist(
 	undo.createdTitle = title;
 	undo.createdStamp = nowMs;
 	return FinalizeEdit(library, std::move(next), *id, std::move(undo), selfUserId);
+}
+
+PlaylistEditResult CopyPlaylist(
+		const PlaylistLibrary &library,
+		const Playlist &source,
+		const QByteArray &entropy,
+		uint64_t nowMs,
+		uint64_t selfUserId) {
+	const auto valid = ValidatePlaylistLibrary(library, selfUserId);
+	if (!valid) {
+		return Refuse(library, MapLibraryError(valid));
+	}
+	if (!IsValidPlaylistStamp(nowMs)) {
+		return Refuse(library, PlaylistEditError::InvalidStamp);
+	}
+	const auto id = FormatPlaylistId(entropy);
+	if (!id) {
+		return Refuse(library, PlaylistEditError::InvalidEntropy);
+	}
+	if (library.playlists.contains(*id) || library.purged.contains(*id)) {
+		return Refuse(library, PlaylistEditError::IdCollision, *id);
+	}
+	if (!source.title || !source.deleted) {
+		return Refuse(library, PlaylistEditError::PlaylistIncomplete, *id);
+	}
+	auto validationWrapper = PlaylistLibrary();
+	validationWrapper.playlists.emplace(u"pl-aaaaaaaaaaaaaaaa"_q, source);
+	const auto validSource = ValidatePlaylistLibrary(validationWrapper, selfUserId);
+	if (!validSource) {
+		return Refuse(library, MapSourcePlaylistError(validSource.error), *id);
+	}
+	const auto copiedTitle = MakeCopiedPlaylistTitle(source.title->value);
+	if (!IsValidPlaylistTitle(copiedTitle)) {
+		return Refuse(library, PlaylistEditError::InvalidTitle, *id);
+	}
+	const auto visibleIds = PlaylistVisibleSongIds(source);
+	if (uint64_t(visibleIds.size()) > (kMaximumPlaylistStamp - nowMs)) {
+		return Refuse(library, PlaylistEditError::StampOverflow, *id);
+	}
+
+	auto created = Playlist();
+	created.title = PlaylistTitleRegister{ copiedTitle, nowMs };
+	created.deleted = PlaylistDeletedRegister{ false, nowMs };
+	created.order = PlaylistOrderRegister{ {}, nowMs };
+	created.songs = std::map<uint64_t, PlaylistSongRegister>{};
+	for (std::size_t i = 0; i < visibleIds.size(); ++i) {
+		const auto docId = visibleIds[i];
+		const auto &srcReg = source.songs->at(docId);
+		const auto stamp = nowMs + uint64_t(i + 1);
+		auto nextSource = *srcReg.value.source;
+		nextSource.peer = NormalizePeer(nextSource.peer, selfUserId);
+		for (auto &alt : nextSource.alt) {
+			alt.peer = NormalizePeer(alt.peer, selfUserId);
+		}
+		nextSource.since = stamp;
+		created.songs->emplace(
+			docId,
+			PlaylistSongRegister{
+				PlaylistSongValue{ std::move(nextSource) },
+				stamp,
+			});
+	}
+
+	auto next = library;
+	next.playlists.emplace(*id, created);
+
+	// Capture the normalized copy snapshot so UndoCopy rejects any subsequent post-copy edit or merge.
+	auto undo = PlaylistUndoRecord();
+	undo.kind = PlaylistUndoKind::Copy;
+	undo.playlistId = *id;
+	undo.expectedCopiedPlaylist = std::move(created);
+	return FinalizeEdit(
+		library,
+		std::move(next),
+		*id,
+		std::move(undo),
+		selfUserId,
+		visibleIds.size());
 }
 
 PlaylistEditResult RenamePlaylist(
@@ -698,6 +842,17 @@ PlaylistEditResult UndoPlaylistOperation(
 	}
 	if (undo.kind == PlaylistUndoKind::Create) {
 		if (!IsUntouchedCreatedPlaylist(current, undo)) {
+			return Refuse(library, PlaylistEditError::UndoConflict, undo.playlistId);
+		}
+		auto next = library;
+		next.playlists.erase(undo.playlistId);
+		next.purged.insert(undo.playlistId);
+		return FinalizeEdit(library, std::move(next), undo.playlistId, {}, selfUserId);
+	}
+	if (undo.kind == PlaylistUndoKind::Copy) {
+		if (!undo.expectedCopiedPlaylist
+			|| NormalizePlaylistPeers(current, selfUserId)
+				!= NormalizePlaylistPeers(*undo.expectedCopiedPlaylist, selfUserId)) {
 			return Refuse(library, PlaylistEditError::UndoConflict, undo.playlistId);
 		}
 		auto next = library;

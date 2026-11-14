@@ -55,6 +55,7 @@ enum class PlaylistUndoKind {
 	None,
 	Create,
 	RegisterWrites,
+	Copy,
 };
 
 struct PlaylistUndoRecord {
@@ -69,6 +70,7 @@ struct PlaylistUndoRecord {
 	bool hasOrderWrite = false;
 	std::optional<PlaylistOrderRegister> priorOrder;
 	std::map<uint64_t, std::optional<PlaylistSongRegister>> priorSongs;
+	std::optional<Playlist> expectedCopiedPlaylist;
 
 	[[nodiscard]] bool hasUndo() const {
 		return kind != PlaylistUndoKind::None;
@@ -117,6 +119,13 @@ struct PlaylistListEntry {
 [[nodiscard]] PlaylistEditResult CreatePlaylist(
 	const PlaylistLibrary &library,
 	const QString &title,
+	const QByteArray &entropy,
+	uint64_t nowMs,
+	uint64_t selfUserId = 0);
+
+[[nodiscard]] PlaylistEditResult CopyPlaylist(
+	const PlaylistLibrary &library,
+	const Playlist &source,
 	const QByteArray &entropy,
 	uint64_t nowMs,
 	uint64_t selfUserId = 0);

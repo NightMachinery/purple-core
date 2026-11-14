@@ -62,6 +62,7 @@ def main():
         ("test_playlists", "tests/test_playlists.cpp"),
         ("test_playlists_ops", "tests/test_playlists_ops.cpp"),
         ("test_playlists_policy", "tests/test_playlists_policy.cpp"),
+        ("test_playlists_copy", "tests/test_playlists_copy.cpp"),
     ]
     executables = []
     for name, test_source in tests:
