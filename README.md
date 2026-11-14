@@ -596,6 +596,11 @@ The pure account path and startup ownership model is documented in
 
 Voice and round continuation settings are documented in [voice continuation](docs/voice-continuation.md).
 
-## Playlists (first A1 foundation)
+## Playlists core
 
-The format 1 playlist library model, strict validation, canonical JSON serialization, opt-in uncapped JSON canonicalizer overload, and register-level join/contains primitives live in `purple/purple_playlists.{h,cpp}` and `purple/purple_sync_json.{h,cpp}` (see [playlists](docs/playlists.md)). Local operations, undo, codecs, sync planning, and sharing remain pending.
+The [playlist library](docs/playlists.md) provides strict format 1 parsing,
+canonical merge/contains, local edits and undo, change notices, local-state and
+bounded gzip codecs, and pure sync-step planning. A step reconciles current
+records with its account/chat memo, merges new snapshots, applies guarded
+purges, and plans publication and verified-cover pruning. Clients still own
+storage, transport, UI and playback. Sharing is deferred.

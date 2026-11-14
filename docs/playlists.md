@@ -130,12 +130,85 @@ A record covers another only through `PlaylistLibraryContains`, with a larger me
 
 `tests/run_playlists_cover.py` builds the focused native suite. It checks identity, provenance, format, cache-hash and scheduling boundaries, direct surviving witnesses, partial/purged libraries, and 220 seeded three-device publish/merge/prune scenarios with listing misses and input permutations. The oracle compares actual canonical joins before and after pruning. These controls prove the pure algorithm, not transport mapping, real deletion or client integration.
 
+## Complete step plans
+
+`PlanPlaylistStep` in `purple/purple_playlists_step.h` composes the existing
+inventory, classifier, merge, automatic-purge policy, diff, codec and cover
+planner. It consumes typed local data and observed server facts, and performs
+no file, network, scheduler, publication or deletion operations.
+
+The caller supplies the account identity and explicit authorization. A failed
+local read, invalid or newer library, or invalid/newer local state blocks the
+whole plan, with no replacement data or action outputs. A genuinely missing
+library starts empty and makes existing memo entries ineligible for reuse.
+A successfully read empty remote library still requests a local checkpoint
+before its memo can be persisted. Missing local state uses the codec defaults.
+
+`Automatic` requires the local sync switch. `Manual` and `Logout` permit a
+remote step with that switch off. `LocalPurge` runs only with sync off, using an
+account-bound successful server-clock observation and no chat or remote work.
+Remote purge clock observations must also name the currently resolved chat.
+All branches use the real `AutoPurgePlaylists` policy after merging; the planner
+does not introduce another purge rule.
+
+The readable memo belongs to the same account and local library: callers must
+persist an entry only after that record was successfully merged into the
+library. `discovery.priorMemo` and `priorChat` are replaced with that local state,
+so an unrelated inventory memo cannot skip a read. Binding changes return the
+retired memo separately, reset the old chat's due observations, and leave
+`old_chats` opaque for the caller. There is no old-chat cleanup.
+
+New records need a matching chat/message/document proof and actual successful
+classification. Cached proofs additionally need the same valid persisted memo
+identity and hash; a supplied hash alone cannot authorize merge or pruning.
+Unresolved reads retain prior memo entries for retry without treating them as
+currently present or valid. Invalid, newer and oversized successful reads are
+memoized and counted, but never merged or used for pruning. Unknown ownership,
+contradictory identities and transient reads keep discovery incomplete.
+
+Complete metadata is insufficient for purge: payload reads must also settle,
+newer-format records block it, and vanished-without-new-valid and the prior
+15-minute due observation retain their existing guards. Inconclusive steps
+preserve valid due observations. New merge notices retain normalized pre-merge
+snapshots and unknown local-state fields for Restore or Keep a copy; stamp-only
+changes update stored data without content notices.
+
+Publication compares the post-purge canonical hash with currently present
+valid memo/classification hashes. It requests a snapshot only when none equals
+it, except the initial empty library with no records. A failed listing produces
+`DiscoveryUnavailable`. The record's 10 MiB compressed and 32 MiB expanded caps
+refuse publication while retaining an oversized merged local library. Neither
+the edit-size cap nor a truncation is applied to merges.
+
+Pruning uses only the separate verified cover planner. Intended publication
+bytes are never witnesses. An acknowledged assigned record must be supplied
+under its actual current identity before it can witness pruning, including when
+the caller already persisted its memo. A changed presence/classification set or
+publication triggers the cover check; otherwise it is skipped. With unchanged
+candidates and an equal current memo record, there is no payload decode, remote
+parse, join, local write, publication or prune work. Local typed data is still
+validated and serialized to establish its current canonical identity.
+
+Callers apply `writeLibrary` before the returned memo/state, preserving their
+atomic-write/readback rules. They must separately revalidate routing and prune
+witnesses at execution time. The planner preserves status and `unsyncedSince`;
+only the caller's matching successful publication may clear the latter. It
+returns plans rather than transport acceptance or runtime qualification.
+
+`tests/run_playlists_step.py` runs only the new focused native suite. It covers
+unreadable local data, missing checkpoints, memo and cache identity, publication
+ACK boundaries, partial discovery versus safe cover, restore/purge races,
+notices, both publication caps with local data retained, and seeded three-device
+interleavings against the real canonical-join oracle. The runner enables
+`-Wall -Wextra`; an existing operations-unit missing-initializer warning is
+retained rather than changing that unrelated code.
+
 ## Remaining Phase A work
 
 These slices do not complete Phase A1 or Phase A. Still to be implemented:
 
 - Sharing and `ImportShare` remain deferred. `old_chats` stays opaque; no old-chat cleanup is implemented or authorized by these slices.
-- Remaining Phase A slices and client wiring: A3 complete sync-step planning, publish and prune execution (`purple_playlists_sync`), A4 share file codec and import planner (`purple_playlists_share`), A5 README overview, and client UI/storage/playback integration (such as applying `private_listening_p` or creating/syncing `playlists/` files). Sharing remains deferred. No old-chat cleanup is implemented.
+- Remaining Phase A slices and client wiring: A3 publish and prune execution and atomic local storage, A4 share file codec and import planner (`purple_playlists_share`), A5 README overview, and client UI/storage/playback integration (such as applying `private_listening_p` or creating/syncing `playlists/` files). Sharing remains deferred. No old-chat cleanup is implemented.
 
 ## Verification
 
