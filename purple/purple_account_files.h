@@ -25,6 +25,7 @@ struct AccountFiles {
 	QString history;
 	QString fingerprintFile;
 	AccountFingerprintStorage fingerprintStorage = AccountFingerprintStorage::DeviceState;
+	QString playlists;
 };
 
 struct DeviceAccountFiles {

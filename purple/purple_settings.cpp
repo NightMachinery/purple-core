@@ -1658,6 +1658,46 @@ void WarnUnknownLists(
 		u"\"5s\", \"10s\", \"15s\" or \"30s\""_q,
 		result.seekStepSeconds,
 		warnings);
+	result.privateListening = ReadBool(
+		table,
+		"private_listening_p",
+		u"playback"_q,
+		warnings
+	).value_or(true);
+	return result;
+}
+
+[[nodiscard]] Playlists ReadPlaylists(
+		const SettingsRootReader &root,
+		std::vector<QString> &warnings) {
+	auto result = Playlists();
+	const auto node = root.get("playlists");
+	if (!node) {
+		return result;
+	} else if (!node->as_table()) {
+		warnings.push_back(
+			u"'playlists' should be a table (%1)."_q.arg(At(*node)));
+		return result;
+	}
+	const auto &table = *node->as_table();
+	result.autoSync = ReadBool(
+		table,
+		"auto_sync_p",
+		u"playlists"_q,
+		warnings
+	).value_or(true);
+	result.menuItem = ReadBool(
+		table,
+		"menu_item_p",
+		u"playlists"_q,
+		warnings
+	).value_or(true);
+	result.keepDownloaded = ReadBool(
+		table,
+		"keep_downloaded_p",
+		u"playlists"_q,
+		warnings
+	).value_or(true);
 	return result;
 }
 
@@ -2097,7 +2137,7 @@ const std::vector<SettingsScopeTable> &SettingsScopeRegistry() {
 		{ u"playlists"_q, SettingScope::PerAccount, {
 			{ u"playlists"_q, u"menu_item_p"_q, SettingScope::AppWide },
 			{ u"playlists"_q, u"keep_downloaded_p"_q, SettingScope::AppWide },
-		}, true },
+		} },
 		{ u"music"_q, SettingScope::PerAccount, {}, true },
 	};
 	return result;
@@ -2824,6 +2864,7 @@ namespace {
 	result.settings.recording = ReadRecording(root, result.warnings);
 	result.settings.mediaReply = ReadMediaReply(root, result.warnings);
 	result.settings.devices = ReadDevices(root, result.warnings);
+	result.settings.playlists = ReadPlaylists(root, result.warnings);
 
 	// Hotkeys last, because this is the one check that needs the presets and
 	// [peek] at once. Two actions holding the same sequence make it ambiguous

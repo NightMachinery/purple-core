@@ -3,10 +3,13 @@
 `ResolveAccountFiles` returns relative public path descriptions for a validated
 account and the immutable startup root owner. Root files keep the legacy layout.
 Other accounts use `accounts/<environment>-<user-id>/`. Desktop History is
-`sync/history`; Android History is `sync-history`. Root send fingerprints belong
-to device `state.toml`; other accounts use their `send-state.toml`. Device state,
-`local.toml` and `accounts/root.toml` are never placed inside account directories.
-An invalid identity, unknown owner or invalid layout yields no account paths.
+`sync/history`; Android History is `sync-history`. Playlists directories sit
+beside `sync` as `playlists` for the startup owner and
+`accounts/<environment>-<user-id>/playlists` for other accounts on both layouts.
+Root send fingerprints belong to device `state.toml`; other accounts use their
+`send-state.toml`. Device state, `local.toml` and `accounts/root.toml` are
+never placed inside account directories. An invalid identity, unknown owner or
+invalid layout yields no account paths.
 
 `PlanAccountOwnerStartup` consumes supplied file-presence snapshots and synthetic
 or caller-provided TOML text through the existing codecs. It never reads files.

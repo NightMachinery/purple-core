@@ -1,6 +1,6 @@
-# Playlists core model, local operations, policy decisions, and diff notices (format 1)
+# Playlists core model, local operations, policy, diff, and account settings (format 1)
 
-This document specifies the first five A1 slices in `purple/purple_playlists.h`, `purple/purple_playlists.cpp`, `purple/purple_playlists_ops.h`, `purple/purple_playlists_ops.cpp`, `purple/purple_playlists_policy.h`, `purple/purple_playlists_policy.cpp`, `purple/purple_playlists_diff.h`, and `purple/purple_playlists_diff.cpp`, together with the opt-in JSON size-budget extension in `purple/purple_sync_json.h`.
+This document specifies the first six A1 slices in `purple/purple_playlists.h`, `purple/purple_playlists.cpp`, `purple/purple_playlists_ops.h`, `purple/purple_playlists_ops.cpp`, `purple/purple_playlists_policy.h`, `purple/purple_playlists_policy.cpp`, `purple/purple_playlists_diff.h`, `purple/purple_playlists_diff.cpp`, `purple/purple_account_files.h`, `purple/purple_account_files.cpp`, `purple/purple_settings.h`, and `purple/purple_settings.cpp`, together with the opt-in JSON size-budget extension in `purple/purple_sync_json.h`.
 
 ## Scope of these slices
 
@@ -10,7 +10,7 @@ The local operations slice builds on that model with deterministic playlist ID f
 
 The policy slice adds pure song qualification, shared metadata preparation, pinned-selection chat order sorting, and gated automatic-purge decisions over an already-merged library.
 
-These slices perform no file I/O, compression, network transport, clock reads, `AccountFiles` wiring, settings parsing, or UI integration.
+These slices perform no file I/O, compression, network transport, clock reads, or UI integration. The earlier playlists model, ops, policy, and diff units operate purely on in-memory libraries, while the account-path and settings slice extends `ResolveAccountFiles`, `ParseSettings`, `SettingsScopeRegistry()`, and `LayerSettings` with pure relative path descriptions and typed playlist/playback settings parsing.
 
 ## Shared JSON budget contract
 
@@ -72,12 +72,24 @@ A `PlaylistLibrary` holds `format` (exact integer `1`), `playlists` keyed by pla
 - **Content/display diffs vs stored registers:** Emits deterministic `PlaylistDiffEntry` records sorted lexicographically by playlist ID and numerically by document ID, tracking before/after `PlaylistDiffPresence` (`Absent`, `Visible`, `Deleted`, `Incomplete`, `Purged`), real title/deleted value changes, effective `PlaylistVisibleSongIds` display-order changes (including order-stamp or `since` changes that alter display order), added/removed active song IDs independent of playlist `deleted` state (deleting a playlist never marks contained songs removed), and changed source values (`primarySourceChanged`, `primaryUsernameChanged`, `fallbacksChanged`, `metaChanged`, `sinceChanged`) normalized with `PeerToken` self semantics. Relinking counts changes to `(peer, msg)` only; updating the username lookup hint is a separate value change. Pure register-stamp increases, `self` token roundtrips, orphan `order` IDs that leave display order unchanged, and absent-vs-tombstone song states do not trigger content changes or summary counts and are reported separately in `registerChanges`.
 - **Hidden-playlist notices:** Emits at most one `PlaylistNotice` per playlist ID only when the playlist was `Visible` in `before` (`title` and `deleted == false`, not purged) and `after` explicitly marks it `Purged` (`PurgedElsewhere` -> `KeepCopy`) or `deleted == true` even inside an otherwise incomplete record (`DeletedElsewhere` -> `Restore`), with `Purged` winning classification. Each notice preserves the complete normalized pre-merge `Playlist` snapshot (title, `deleted == false`, `order`, `songs`, original stamps, normalized primary and up to 3 fallbacks, and metadata) compatible with `CopyPlaylist`. No notice is emitted for renames, reorders, song edits, new playlists, prior-deleted purges (including automatic purges of `Recently deleted`), already-incomplete playlists, or simple absence/incompleteness without an explicit deleted or purged fact.
 
+## Account directory paths and typed settings
+
+`purple/purple_account_files.h` and `purple/purple_account_files.cpp` add `AccountFiles::playlists` at the end of `AccountFiles`:
+
+- **Relative directory path:** `ResolveAccountFiles` sets `playlists` to `"playlists"` for the startup root owner and `"accounts/<environment>-<user-id>/playlists"` for every other validated account across both `AccountFileLayout::Desktop` and `AccountFileLayout::Android`, placing it beside `syncDirectory`. Missing owner, invalid keys, and invalid layouts still return `std::nullopt`, and no directories are created on disk.
+
+`purple/purple_settings.h` and `purple/purple_settings.cpp` activate `[playlists]` and extend `[playback]`:
+
+- **`[playback].private_listening_p`:** `Playback::privateListening` defaults to `true`, is app-wide, and is parsed via `ReadBool` in `ReadPlayback`. Non-boolean values emit the standard boolean warning and fall back to `true` without disturbing existing `Playback` keys.
+- **`[playlists]` (`Settings::playlists` / `Playlists`):** `ReadPlaylists` calls `root.get("playlists")` (registering `"playlists"` in `ParseResult::readRoots`), warns if `[playlists]` is not a table, and reads `auto_sync_p`, `menu_item_p`, and `keep_downloaded_p` as strict booleans defaulting to `true`. Unknown keys and subtables under `[playlists]` are left silent and ignored, and no playlist sync switch is read from `settings.toml` (that switch stays reserved for `local.json`). `keep_downloaded_p` is the global default only; per-playlist On/Off/Inherit choices remain future client/local-state work.
+- **Scope registry and layering:** `SettingsScopeRegistry()` activates the `playlists` entry (`future = false`) while leaving `music` marked future. `playlists.auto_sync_p` and unknown scalar `[playlists]` keys stay `SettingScope::PerAccount`, whereas `playlists.menu_item_p`, `playlists.keep_downloaded_p`, and `playback.private_listening_p` stay `SettingScope::AppWide` (and unregistered `[playlists.*]` subtables stay `SettingScope::Unknown`). `LayerSettings` overlays `playlists.auto_sync_p` per account and records app-wide `[playlists]` and `[playback]` account overrides in `inactive` with `SettingsInactiveReason::AppWide`.
+
 ## Remaining Phase A work
 
 These slices do not complete Phase A1 or Phase A. Still to be implemented:
 
-- Remaining A1: `ImportShare`, local sync file (`local.json`) serialization, `AccountFiles::playlists`, and `[playlists]` / `[playback] private_listening_p` settings readers.
-- Later Phase A slices: A2 guarded gzip codec (`purple_playlists_codec`), A3 sync step and chat-move planner (`purple_playlists_sync`), A4 share file codec and import planner (`purple_playlists_share`), and A5 README overview.
+- Remaining A1: `ImportShare` and local sync file (`local.json`) serialization/state readers.
+- Later Phase A slices and client wiring: A2 guarded gzip codec (`purple_playlists_codec`), A3 sync step and chat-move planner (`purple_playlists_sync`), A4 share file codec and import planner (`purple_playlists_share`), A5 README overview, and client UI/storage/playback integration (such as applying `private_listening_p` or creating/syncing `playlists/` files).
 
 ## Verification
 
@@ -91,9 +103,6 @@ These slices do not complete Phase A1 or Phase A. Still to be implemented:
 
 `tests/test_playlists_diff.cpp` exercises identity and `self`-roundtrip/join no-ops, stamp-only vs true renames, `Absent`/`Visible`/`Deleted`/`Incomplete`/`Purged` transitions, active empty/concurrent deletion and active purge notices preserving normalized pre-merge `Playlist` snapshots (`CopyPlaylist` `KeepCopy` compatibility without source mutation), quiet prior-deleted purges and unpurged incompleteness, song relink/fallback/meta/`since` diffs, tombstone vs absence distinction, display-order changes across relink/re-add/order-stamp boundaries, deleted-playlist edits without notices, deterministic ID ordering, and side-tagged validation/immutability guarantees.
 
-Run only this slice with `python3 tests/run_playlists.py`. It uses Qt6Core from
-`pkg-config`, or a macOS framework selected with `--qt-prefix` (also `QT_PREFIX`).
-On a shared build machine, pass the compiler hold wrapper using
-`--compile-wrapper /path/to/wrapper`; each compile and link uses the wrapper,
-while the test executable runs after the compiler hold is released. Outputs go
-to `tests/build/playlists`, or the path selected by `--build-dir`.
+`tests/test_playlists_account.cpp` exercises `ResolveAccountFiles::playlists` across root and secondary accounts, production and test environments, Desktop and Android layouts, and invalid inputs; `[playback].private_listening_p` and `[playlists]` (`auto_sync_p`, `menu_item_p`, `keep_downloaded_p`) defaults, overrides, non-table/non-boolean warnings, equality, and absence of any `settings.toml` sync reader; active `playlists` vs future `music` scope-registry completeness (including a negative control marking `playlists` future); and `LayerSettings` per-account vs app-wide inheritance, `applied` / `inactive` source facts, missing/malformed/`accountGood` fallbacks, `followListMembers`, and two-account isolation.
+
+Run the earlier five playlist model suites with `python3 tests/run_playlists.py` (outputs in `tests/build/playlists`), and run the focused account-files and settings suite alone with `python3 tests/run_playlists_account.py` (outputs in `tests/build/account1`, compiling only the five transitive `purple_account_files` and `purple_settings` translation units). Both runners accept `QT_PREFIX` / `--qt-prefix`, `--build-dir`, `--cxx`, and `--compile-wrapper /path/to/wrapper` (wrapping compile and link steps while running the compiled test binary outside the compiler hold).

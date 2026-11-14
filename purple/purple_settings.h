@@ -760,7 +760,18 @@ struct Playback {
 	// seconds. One of 5, 10, 15 or 30; anything else warns and keeps 10. The
 	// clamping rule that uses it is SeekTarget() in purple_recording.h.
 	int seekStepSeconds = 10;
+
+	// Listening reports stay disabled until the person opts in.
+	bool privateListening = true;
 	friend bool operator==(const Playback &, const Playback &) = default;
+};
+
+// Sync enablement is device-local, outside these synced preferences.
+struct Playlists {
+	bool autoSync = true;
+	bool menuItem = true;
+	bool keepDownloaded = true;
+	friend bool operator==(const Playlists &, const Playlists &) = default;
 };
 
 // The `[recording]' table: voice and round video recording (the dock, the
@@ -1100,6 +1111,7 @@ struct Settings {
 
 	// [devices], in file order.
 	std::vector<DeviceLabel> devices;
+	Playlists playlists;
 
 	[[nodiscard]] const List *list(const QString &name) const;
 	[[nodiscard]] const Preset *preset(const QString &name) const;

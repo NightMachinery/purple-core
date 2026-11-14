@@ -72,6 +72,7 @@ std::optional<AccountFiles> ResolveAccountFiles(
 	result.fingerprintFile = root ? u"state.toml"_q : prefix + u"send-state.toml"_q;
 	result.fingerprintStorage = root ? AccountFingerprintStorage::DeviceState
 		: AccountFingerprintStorage::AccountSendState;
+	result.playlists = prefix + u"playlists"_q;
 	return result;
 }
 

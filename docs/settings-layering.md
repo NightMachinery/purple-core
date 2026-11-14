@@ -133,4 +133,6 @@ both real test programs must be qualified later. This source-only handoff does
 not measure parse cost, actual file fallback, watchers, client banners or native
 behavior. Frontend AccountFiles, migration/startup owners, UI, scope-bearing
 reviews, auto-send fingerprints, Relink, document-name guards, stores and
-transport remain pending. Playlist entries remain registry contracts only.
+transport remain pending. `[playlists]` (`ReadPlaylists`) and
+`[playback].private_listening_p` are now active settings readers layered by
+`LayerSettings`; `music` entries remain future registry contracts only.

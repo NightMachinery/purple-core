@@ -59,8 +59,8 @@ The current reader inventory is:
   through their corresponding real readers, all app-wide. Device labels are
   dynamic keys within the one devices table. Every Peek key, including delay
   and exit controls, remains app-wide; no per-account Peek state is introduced.
-- `playback`, through `ReadPlayback`, including `private_chat_queue_p` and
-  `seek_step`, app-wide.
+- `playback`, through `ReadPlayback`, including `private_chat_queue_p`,
+  `private_listening_p` and `seek_step`, app-wide.
 - `recording`, through `ReadRecording`, every key of the media recording
   design's Settings section, app-wide.
 - `screen_time` and its `budgets` array of tables, through `ReadScreenTime`
@@ -68,12 +68,13 @@ The current reader inventory is:
 - `sync`, through `ReadSync`, including `send_after_save_p`, file-local.
 - `last_seen`, through `ReadLastSeen`, per-account for `reasons_p`, `trade_p`
   and `trade_hold`, with the two app-wide duration exceptions above.
+- `playlists`, through `ReadPlaylists`, per-account for `auto_sync_p` and unknown
+  keys, with `menu_item_p` and `keep_downloaded_p` app-wide exceptions.
 
-Approved future `playlists` and `music` entries are registry contracts only.
-They add no reader or playlist behavior. Their default is per-account;
-`playlists.menu_item_p` and `keep_downloaded_p` are app-wide exceptions.
-`music.private_listening_p` remains per-account. Completeness explicitly
-distinguishes future entries from current actual reader roots.
+The approved future `music` entry remains a registry contract only. It adds no
+reader or music behavior. `music.private_listening_p` remains per-account.
+Completeness explicitly distinguishes the future `music` entry from active
+actual reader roots (including `playlists`).
 
 Unknown root tables/keys return Unknown and are retained. Unknown keys inside
 a registered table inherit its default, as the approved design specifies.
@@ -150,9 +151,9 @@ Next steps are real compiler/API and genuine case qualification, independent
 new-delta review, then root integration. The source-only core version split and
 `LayerSettings` now have their own candidate documented in settings-layering.md.
 Frontend version integration, scope-bearing diffs, client Reset/removal UI,
-startup owner recovery, migration, per-account stores, transport and playlists
-remain separate work. No frontend
-hook or device-state format changes in this unit.
+startup owner recovery, migration, per-account stores, transport and client
+playlist storage/UI remain separate work. No frontend hook or device-state
+format changes in this unit.
 
 ## Structured named-exception repair
 
