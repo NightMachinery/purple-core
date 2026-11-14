@@ -120,12 +120,22 @@ A `PlaylistLibrary` holds `format` (exact integer `1`), `playlists` keyed by pla
 
 `metadataComplete` covers metadata discovery only. Outstanding payload reads may still fail, and reused memo hashes do not verify cached bytes. This slice grants no publish, automatic-purge, or prune authority.
 
+## Verified record cover plans
+
+`PlanPlaylistRecordPrunes` in `purple/purple_playlists_cover.h` produces a pure plan from an independently resolved chat, fresh `ReconcilePlaylistInventory` output, and identity-bound payload proofs. The inventory must belong to the same normalized Self or Channel chat. Contradictory current identities reject the whole plan; unknown/conflicting inventory IDs and unrecognized metadata cannot become targets or witnesses. Incomplete discovery permits proofs between positively confirmed records, without granting authority over unseen records.
+
+Downloaded bytes require explicit current-step read success. Cached bytes require a memo canonical hash with the same chat/message/document identity. Published bytes require an acknowledged assigned identity that the caller adds to the current inventory. All three origins still pass through the real gzip decoder, strict format parser and canonical classifier; the cache hash is checked against the actual bytes. Missing, unproven, mismatched, conflicting, invalid, newer-format and oversized proofs are unusable. The caller supplies server facts; this pure function does not observe a server or execute deletions.
+
+A record covers another only through `PlaylistLibraryContains`, with a larger message ID breaking equal-canonical-content ties. The plan keeps maximal records and names a direct surviving witness, including its document identity and canonical hash, for each target. The largest message ID selects between multiple maximal witnesses deterministically. There is no payload work when neither the present set changed nor a successful publication requested a cover check. A caller must revalidate execution conditions before applying any plan.
+
+`tests/run_playlists_cover.py` builds the focused native suite. It checks identity, provenance, format, cache-hash and scheduling boundaries, direct surviving witnesses, partial/purged libraries, and 220 seeded three-device publish/merge/prune scenarios with listing misses and input permutations. The oracle compares actual canonical joins before and after pruning. These controls prove the pure algorithm, not transport mapping, real deletion or client integration.
+
 ## Remaining Phase A work
 
 These slices do not complete Phase A1 or Phase A. Still to be implemented:
 
 - Sharing and `ImportShare` remain deferred. `old_chats` stays opaque; no old-chat cleanup is implemented or authorized by these slices.
-- Remaining Phase A slices and client wiring: A3 sync-step planning, publish, pruning, and chat-move execution (`purple_playlists_sync`), A4 share file codec and import planner (`purple_playlists_share`), A5 README overview, and client UI/storage/playback integration (such as applying `private_listening_p` or creating/syncing `playlists/` files). Sharing remains deferred through A3 inventory reconciliation.
+- Remaining Phase A slices and client wiring: A3 complete sync-step planning, publish and prune execution (`purple_playlists_sync`), A4 share file codec and import planner (`purple_playlists_share`), A5 README overview, and client UI/storage/playback integration (such as applying `private_listening_p` or creating/syncing `playlists/` files). Sharing remains deferred. No old-chat cleanup is implemented.
 
 ## Verification
 
