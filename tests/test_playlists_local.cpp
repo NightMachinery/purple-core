@@ -150,9 +150,9 @@ void TestDefaultsEmptyObjectAndCorruptInputs() {
 			QByteArray("123"),
 			QByteArray("\"text\""),
 			QByteArray("{\"sync\":true,\"sync\":false}"),
-			QByteArray("{\"memo\":1.5}"),
-			QByteArray("{\"memo\":\"\\uD800\"}"),
-			QByteArray("{\"memo\":\"bad\xFF\"}"),
+			QByteArray("{\"future_memo\":1.5}"),
+			QByteArray("{\"future_memo\":\"\\uD800\"}"),
+			QByteArray("{\"future_memo\":\"bad\xFF\"}"),
 		}) {
 		const auto res = ParsePlaylistLocalState(bad);
 		CHECK(res.status == PlaylistLocalStatus::Invalid);
@@ -163,7 +163,6 @@ void TestDefaultsEmptyObjectAndCorruptInputs() {
 
 void TestSyncFalseAndUnknownPreservedSeparation() {
 	const QByteArray raw = R"({
-		"chat": {"cursor": 42, "negative": -9007199254740991, "zero": -0},
 		"due_seen": {
 			"pl-aaaaaaaaaaaaaaaa": {
 				"deletion_stamp": 1000,
@@ -171,10 +170,11 @@ void TestSyncFalseAndUnknownPreservedSeparation() {
 				"note": {"retry": 3}
 			}
 		},
-		"memo": [1, "x", null, true],
+		"future_chat": {"cursor": 42, "negative": -9007199254740991, "zero": -0},
+		"future_memo": [1, "x", null, true],
+		"future_status": "idle",
 		"old_chats": {"peers": ["u1"]},
 		"recent_use": {"pl-bbbbbbbbbbbbbbbb": 0},
-		"status": "idle",
 		"sync": false
 	})";
 	const auto parsed = ParsePlaylistLocalState(raw);
@@ -186,10 +186,10 @@ void TestSyncFalseAndUnknownPreservedSeparation() {
 	CHECK(!parsed.state.preserved.contains(u"due_seen"_q));
 	CHECK(!parsed.state.preserved.contains(u"recent_use"_q));
 	CHECK(!parsed.state.preserved.contains(u"hidden"_q));
-	CHECK(parsed.state.preserved.contains(u"chat"_q));
-	CHECK(parsed.state.preserved.contains(u"memo"_q));
+	CHECK(parsed.state.preserved.contains(u"future_chat"_q));
+	CHECK(parsed.state.preserved.contains(u"future_memo"_q));
+	CHECK(parsed.state.preserved.contains(u"future_status"_q));
 	CHECK(parsed.state.preserved.contains(u"old_chats"_q));
-	CHECK(parsed.state.preserved.contains(u"status"_q));
 
 	const auto dueId = u"pl-aaaaaaaaaaaaaaaa"_q;
 	CHECK(parsed.state.dueSeen.at(dueId).value
@@ -452,22 +452,36 @@ void TestValidationBoundariesAndErrors() {
 		CHECK(parsed.state == PlaylistLocalState{});
 	}
 
+	// Refuse recognized memo/chat/status fields carrying malformed or old arbitrary shapes.
+	for (const QByteArray bad : {
+			QByteArray(R"({"chat":{"cursor":42}})"),
+			QByteArray(R"({"memo":[1,"x",null,true]})"),
+			QByteArray(R"({"status":"idle"})"),
+			QByteArray(R"({"chat":"self","memo":{"1":{"classifier":1,"document_id":"2","state":"unknown"}}})"),
+			QByteArray(R"({"memo":{"1":{"classifier":1,"document_id":"2","state":"oversized"}}})"),
+			QByteArray(R"({"sync":false,"unsynced_since":0})"),
+		}) {
+		const auto parsed = ParsePlaylistLocalState(bad);
+		CHECK(parsed.status == PlaylistLocalStatus::Invalid);
+		CHECK(parsed.state == PlaylistLocalState{});
+	}
+
 	// C++ invalid preserved JSON values and selfUserId validation.
 	{
 		PlaylistLocalState badFloat = DefaultPlaylistLocalState();
-		badFloat.preserved.insert(u"memo"_q, 1.25);
+		badFloat.preserved.insert(u"future_memo"_q, 1.25);
 		CHECK(ValidatePlaylistLocalState(badFloat).error == PlaylistLocalError::InvalidPreservedJson);
 		const auto badWrite = SerializePlaylistLocalState(badFloat);
 		CHECK(!bool(badWrite) && badWrite.json.isEmpty());
 	}
 	{
 		PlaylistLocalState badInf = DefaultPlaylistLocalState();
-		badInf.preserved.insert(u"memo"_q, std::numeric_limits<double>::infinity());
+		badInf.preserved.insert(u"future_memo"_q, std::numeric_limits<double>::infinity());
 		CHECK(ValidatePlaylistLocalState(badInf).error == PlaylistLocalError::InvalidPreservedJson);
 	}
 	{
 		PlaylistLocalState badSurrogate = DefaultPlaylistLocalState();
-		badSurrogate.preserved.insert(u"memo"_q, QString(QChar(0xD800)));
+		badSurrogate.preserved.insert(u"future_memo"_q, QString(QChar(0xD800)));
 		CHECK(ValidatePlaylistLocalState(badSurrogate).error == PlaylistLocalError::InvalidPreservedJson);
 	}
 	{
@@ -479,14 +493,14 @@ void TestValidationBoundariesAndErrors() {
 			exact = QJsonArray{ exact };
 		}
 		PlaylistLocalState depthOk = DefaultPlaylistLocalState();
-		depthOk.preserved.insert(u"memo"_q, exact);
+		depthOk.preserved.insert(u"future_memo"_q, exact);
 		const auto wroteOk = SerializePlaylistLocalState(depthOk);
 		CHECK(bool(wroteOk));
 		CHECK(bool(CanonicalizeSyncJson(wroteOk.json, std::nullopt)));
 		CHECK(bool(ParsePlaylistLocalState(wroteOk.json)));
 
 		PlaylistLocalState depthTooDeep = DefaultPlaylistLocalState();
-		depthTooDeep.preserved.insert(u"memo"_q, QJsonArray{ exact });
+		depthTooDeep.preserved.insert(u"future_memo"_q, QJsonArray{ exact });
 		CHECK(ValidatePlaylistLocalState(depthTooDeep).error == PlaylistLocalError::InvalidPreservedJson);
 		CHECK(!bool(SerializePlaylistLocalState(depthTooDeep)));
 	}
@@ -581,7 +595,7 @@ void TestOversizedHiddenSnapshotAndCanonicalBudget() {
 			std::move(bigPlaylist),
 			QJsonObject{{ u"hint"_q, u"kept"_q }},
 		});
-	state.preserved.insert(u"memo"_q, QJsonObject{{ u"v"_q, 1 }});
+	state.preserved.insert(u"future_memo"_q, QJsonObject{{ u"v"_q, 1 }});
 
 	const auto serialized = SerializePlaylistLocalState(state, selfId);
 	CHECK(bool(serialized));
@@ -606,7 +620,7 @@ void TestOversizedHiddenSnapshotAndCanonicalBudget() {
 	CHECK(!parsed.state.sync);
 	CHECK(parsed.state.hidden.at(u"pl-aaaaaaaaaaaaaaaa"_q).playlist.songs->size()
 		== kSongCount);
-	CHECK(parsed.state.preserved == (QJsonObject{{ u"memo"_q, QJsonObject{{ u"v"_q, 1 }} }}));
+	CHECK(parsed.state.preserved == (QJsonObject{{ u"future_memo"_q, QJsonObject{{ u"v"_q, 1 }} }}));
 
 	const auto reserialized = SerializePlaylistLocalState(parsed.state, selfId);
 	CHECK(bool(reserialized));

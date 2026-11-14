@@ -42,6 +42,46 @@ enum class PlaylistLocalError {
 	InvalidPlaylist,
 	InvalidPreservedJson,
 	InvalidSelfUserId,
+	InvalidChat,
+	InvalidMemo,
+	InvalidStatus,
+	InvalidUnsyncedSince,
+};
+
+enum class PlaylistLocalMemoState {
+	Valid,
+	Invalid,
+	NewerFormat,
+	Oversized,
+};
+
+enum class PlaylistLocalSyncResult {
+	Idle,
+	Synced,
+	Offline,
+	Wait,
+	Problem,
+	Failed,
+	Oversized,
+	NewerFormat,
+};
+
+struct PlaylistLocalMemoEntry {
+	uint64_t documentId = 0;
+	PlaylistLocalMemoState state = PlaylistLocalMemoState::Invalid;
+	int32_t classifier = 0;
+	std::optional<QString> canonicalHash;
+	QJsonObject preserved;
+
+	[[nodiscard]] bool operator==(const PlaylistLocalMemoEntry &) const = default;
+};
+
+struct PlaylistLocalStepStatus {
+	PlaylistLocalSyncResult result = PlaylistLocalSyncResult::Idle;
+	std::optional<uint64_t> lastStepAtMs;
+	QJsonObject preserved;
+
+	[[nodiscard]] bool operator==(const PlaylistLocalStepStatus &) const = default;
 };
 
 struct PlaylistLocalDueSeenEntry {
@@ -62,6 +102,11 @@ struct PlaylistLocalHiddenEntry {
 struct PlaylistLocalState {
 	int format = kPlaylistFormatVersion;
 	bool sync = true;
+	std::optional<PeerToken> chat;
+	std::map<int32_t, PlaylistLocalMemoEntry> memo;
+	PlaylistLocalStepStatus status;
+	// Non-empty memo requires chat; codec never infers or clears status/unsyncedSince.
+	std::optional<uint64_t> unsyncedSince;
 	std::map<QString, PlaylistLocalDueSeenEntry> dueSeen;
 	std::map<QString, uint64_t> recentUse;
 	std::map<QString, PlaylistLocalHiddenEntry> hidden;
