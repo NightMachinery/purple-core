@@ -46,16 +46,30 @@ def main():
         compile_flags.append("-fPIC")
     compiler = shlex.split(args.compile_wrapper) + shlex.split(args.cxx)
     flags = ["-std=c++20", "-g", "-O0", "-I" + str(root)] + compile_flags
-    sources = ["purple/purple_peer_token.cpp", "purple/purple_sync_json.cpp",
-        "purple/purple_playlists.cpp", "tests/test_playlists.cpp"]
-    objects = []
+    sources = [
+        "purple/purple_peer_token.cpp",
+        "purple/purple_sync_json.cpp",
+        "purple/purple_playlists.cpp",
+        "purple/purple_playlists_ops.cpp",
+    ]
+    shared_objects = []
     for source in sources:
         target = build / (Path(source).stem + ".o")
         run(compiler + flags + ["-c", str(root / source), "-o", str(target)], 180)
-        objects.append(str(target))
-    executable = build / "test_playlists"
-    run(compiler + objects + link_flags + ["-o", str(executable)], 180)
-    run([str(executable)], 120)
+        shared_objects.append(str(target))
+    tests = [
+        ("test_playlists", "tests/test_playlists.cpp"),
+        ("test_playlists_ops", "tests/test_playlists_ops.cpp"),
+    ]
+    executables = []
+    for name, test_source in tests:
+        test_obj = build / (Path(test_source).stem + ".o")
+        run(compiler + flags + ["-c", str(root / test_source), "-o", str(test_obj)], 180)
+        executable = build / name
+        run(compiler + shared_objects + [str(test_obj)] + link_flags + ["-o", str(executable)], 180)
+        executables.append(executable)
+    for executable in executables:
+        run([str(executable)], 120)
 
 
 if __name__ == "__main__":
