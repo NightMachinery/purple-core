@@ -399,9 +399,10 @@ Both put the repository root on their include path, so
 
 ## Design contract
 
-- **No dependency beyond Qt Core, the vendored toml++, and the C++20 standard
-  library.** No Qt Gui, no Qt Widgets, no tdesktop, no Android. Anything that
-  needs a window, a network, or a platform belongs in the consuming app.
+- **No dependency beyond Qt Core, system zlib (`-lz`), the vendored toml++, and
+  the C++20 standard library.** No Qt Gui, no Qt Widgets, no tdesktop, no
+  Android. Anything that needs a window, a network, or a platform belongs in the
+  consuming app.
 - **Warn, don't fail.** `settings.toml` is hand-owned, so nearly everything
   recoverable is a warning attached to the parse result rather than an error
   that loses the file. A typo degrades to "keep the last good settings and show

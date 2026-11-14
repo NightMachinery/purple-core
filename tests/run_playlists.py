@@ -60,6 +60,13 @@ def main():
         target = build / (Path(source).stem + ".o")
         run(compiler + flags + ["-c", str(root / source), "-o", str(target)], 180)
         shared_objects.append(str(target))
+    codec_obj = build / "purple_playlists_codec.o"
+    run(
+        compiler
+        + flags
+        + ["-c", str(root / "purple/purple_playlists_codec.cpp"), "-o", str(codec_obj)],
+        180,
+    )
     tests = [
         ("test_playlists", "tests/test_playlists.cpp"),
         ("test_playlists_ops", "tests/test_playlists_ops.cpp"),
@@ -68,13 +75,25 @@ def main():
         ("test_playlists_diff", "tests/test_playlists_diff.cpp"),
         ("test_playlists_local", "tests/test_playlists_local.cpp"),
         ("test_playlists_bookkeeping", "tests/test_playlists_bookkeeping.cpp"),
+        ("test_playlists_codec", "tests/test_playlists_codec.cpp"),
     ]
     executables = []
     for name, test_source in tests:
         test_obj = build / (Path(test_source).stem + ".o")
         run(compiler + flags + ["-c", str(root / test_source), "-o", str(test_obj)], 180)
         executable = build / name
-        run(compiler + shared_objects + [str(test_obj)] + link_flags + ["-o", str(executable)], 180)
+        extra_objs = [str(codec_obj)] if name == "test_playlists_codec" else []
+        extra_libs = ["-lz"] if name == "test_playlists_codec" else []
+        run(
+            compiler
+            + shared_objects
+            + extra_objs
+            + [str(test_obj)]
+            + link_flags
+            + extra_libs
+            + ["-o", str(executable)],
+            180,
+        )
         executables.append(executable)
     for executable in executables:
         run([str(executable)], 120)
