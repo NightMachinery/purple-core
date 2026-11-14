@@ -86,6 +86,7 @@ Sources=(
     purple/purple_playlists_local.cpp
     purple/purple_playlists_codec.cpp
     purple/purple_playlists_sync.cpp
+    purple/purple_playlists_inventory.cpp
     purple/purple_sync_json.cpp
     purple/purple_sync_envelope.cpp
     purple/purple_sync_directory.cpp
@@ -134,7 +135,7 @@ if [ "$CompileStatus" != 0 ]; then
 fi
 
 Status=0
-for Test in test_media_reply test_config test_sync_flow test_sync_chat test_sync_chat_magic test_archive test_archive_codec test_archive_source test_sync_auto test_archive_storage test_archive_staging test_playback test_ogg_repair test_mp4_repair test_recording test_recording_fuzz test_playlists test_playlists_ops test_playlists_policy test_playlists_copy test_playlists_diff test_playlists_local test_playlists_bookkeeping test_playlists_codec test_playlists_account test_playlists_records; do
+for Test in test_media_reply test_config test_sync_flow test_sync_chat test_sync_chat_magic test_archive test_archive_codec test_archive_source test_sync_auto test_archive_storage test_archive_staging test_playback test_ogg_repair test_mp4_repair test_recording test_recording_fuzz test_playlists test_playlists_ops test_playlists_policy test_playlists_copy test_playlists_diff test_playlists_local test_playlists_bookkeeping test_playlists_codec test_playlists_account test_playlists_records test_playlists_inventory; do
     clang++ "${Flags[@]}" -o "$BuildPath/$Test" \
         "$RepoPath/tests/$Test.cpp" \
         "${Objects[@]}" \
