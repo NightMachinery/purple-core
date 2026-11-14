@@ -25,12 +25,19 @@ constexpr auto kMaximumSafeInteger = "9007199254740991";
 
 class Parser {
 public:
-	explicit Parser(const QByteArray &input) : _input(input) {
+	Parser(const QByteArray &input, std::optional<qsizetype> maximumBytes)
+	: _input(input)
+	, _maximumBytes(maximumBytes) {
 	}
 
 	[[nodiscard]] SyncJsonResult Parse() {
-		if (_input.size() > kMaximumBytes) {
-			return { {}, SyncJsonErrorKind::SizeLimit, kMaximumBytes };
+		if (_maximumBytes
+			&& (*_maximumBytes < 0 || _input.size() > *_maximumBytes)) {
+			return {
+				{},
+				SyncJsonErrorKind::SizeLimit,
+				std::max<qsizetype>(0, *_maximumBytes),
+			};
 		}
 		SkipSpace();
 		auto canonical = QByteArray();
@@ -427,6 +434,7 @@ private:
 	}
 
 	const QByteArray &_input;
+	std::optional<qsizetype> _maximumBytes;
 	qsizetype _position = 0;
 	SyncJsonErrorKind _error = SyncJsonErrorKind::None;
 	qsizetype _errorOffset = 0;
@@ -436,7 +444,13 @@ private:
 } // namespace
 
 SyncJsonResult CanonicalizeSyncJson(const QByteArray &json) {
-	return Parser(json).Parse();
+	return CanonicalizeSyncJson(json, qsizetype(kMaximumBytes));
+}
+
+SyncJsonResult CanonicalizeSyncJson(
+		const QByteArray &json,
+		std::optional<qsizetype> maximumBytes) {
+	return Parser(json, maximumBytes).Parse();
 }
 
 } // namespace Purple

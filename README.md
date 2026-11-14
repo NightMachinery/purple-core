@@ -594,3 +594,7 @@ The pure account path and startup ownership model is documented in
 [Account files and startup ownership](docs/account-files-owner-recovery.md).
 
 Voice and round continuation settings are documented in [voice continuation](docs/voice-continuation.md).
+
+## Playlists (first A1 foundation)
+
+The format 1 playlist library model, strict validation, canonical JSON serialization, opt-in uncapped JSON canonicalizer overload, and register-level join/contains primitives live in `purple/purple_playlists.{h,cpp}` and `purple/purple_sync_json.{h,cpp}` (see [playlists](docs/playlists.md)). Local operations, undo, codecs, sync planning, and sharing remain pending.

@@ -9,6 +9,8 @@ option) any later version.
 
 #include <QtCore/QByteArray>
 
+#include <optional>
+
 namespace Purple {
 
 enum class SyncJsonErrorKind {
@@ -34,5 +36,8 @@ struct SyncJsonResult {
 };
 
 [[nodiscard]] SyncJsonResult CanonicalizeSyncJson(const QByteArray &json);
+[[nodiscard]] SyncJsonResult CanonicalizeSyncJson(
+	const QByteArray &json,
+	std::optional<qsizetype> maximumBytes);
 
 } // namespace Purple
