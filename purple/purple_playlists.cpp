@@ -7,6 +7,7 @@ option) any later version.
 */
 #include "purple/purple_playlists.h"
 
+#include "purple/purple_playlists_detail.h"
 #include "purple/purple_sync_json.h"
 #include "purple/purple_types.h"
 
@@ -25,9 +26,9 @@ option) any later version.
 namespace Purple {
 namespace {
 
-constexpr auto kMaximumPeerId = uint64_t(std::numeric_limits<int64_t>::max());
+constexpr auto kMaximumPeerId = PlaylistsDetail::kMaximumPeerId;
 constexpr auto kPlaylistIdLength = qsizetype(19);
-constexpr auto kMaximumSafeInteger = uint64_t(9007199254740991ULL);
+constexpr auto kMaximumSafeInteger = PlaylistsDetail::kMaximumSafeInteger;
 
 [[nodiscard]] PlaylistLibraryValidationResult InvalidValidation(
 		PlaylistLibraryError error) {
@@ -92,7 +93,15 @@ constexpr auto kMaximumSafeInteger = uint64_t(9007199254740991ULL);
 		&& NormalizePeer(aPeer, selfUserId) == NormalizePeer(bPeer, selfUserId);
 }
 
-[[nodiscard]] std::optional<uint64_t> ReadBoundedInteger(
+} // namespace
+
+namespace PlaylistsDetail {
+
+bool HasValidUtf16CodePoints(const QString &value) {
+	return CountCodePoints(value, false).has_value();
+}
+
+std::optional<uint64_t> ReadBoundedInteger(
 		const QJsonValue &value,
 		uint64_t minValue,
 		uint64_t maxValue) {
@@ -113,7 +122,7 @@ constexpr auto kMaximumSafeInteger = uint64_t(9007199254740991ULL);
 	return integer;
 }
 
-[[nodiscard]] bool CheckAllowedKeys(
+bool CheckAllowedKeys(
 		const QJsonObject &object,
 		std::initializer_list<QString> allowed) {
 	for (auto it = object.begin(); it != object.end(); ++it) {
@@ -131,6 +140,70 @@ constexpr auto kMaximumSafeInteger = uint64_t(9007199254740991ULL);
 	}
 	return true;
 }
+
+void AppendUint64(QByteArray &out, uint64_t value) {
+	char buffer[24];
+	auto len = 0;
+	do {
+		buffer[len++] = char('0' + (value % 10));
+		value /= 10;
+	} while (value != 0);
+	while (len > 0) {
+		out.append(buffer[--len]);
+	}
+}
+
+void AppendJsonString(QByteArray &out, const QString &value) {
+	constexpr auto hex = "0123456789abcdef";
+	out.append('"');
+	for (auto i = qsizetype(0); i < value.size(); ++i) {
+		const auto code = value[i].unicode();
+		switch (code) {
+		case '"': out.append("\\\""); break;
+		case '\\': out.append("\\\\"); break;
+		case '\b': out.append("\\b"); break;
+		case '\f': out.append("\\f"); break;
+		case '\n': out.append("\\n"); break;
+		case '\r': out.append("\\r"); break;
+		case '\t': out.append("\\t"); break;
+		default:
+			if (code < 0x20) {
+				out.append("\\u00");
+				out.append(hex[code >> 4]);
+				out.append(hex[code & 15]);
+			} else if (code < 0x80) {
+				out.append(char(code));
+			} else if (code < 0x800) {
+				out.append(char(0xC0 | (code >> 6)));
+				out.append(char(0x80 | (code & 0x3F)));
+			} else if (code >= 0xD800 && code <= 0xDBFF && i + 1 < value.size()) {
+				const auto lo = value[++i].unicode();
+				const auto cp = uint32_t(0x10000u)
+					+ ((uint32_t(code) - 0xD800u) << 10)
+					+ (uint32_t(lo) - 0xDC00u);
+				out.append(char(0xF0 | (cp >> 18)));
+				out.append(char(0x80 | ((cp >> 12) & 0x3F)));
+				out.append(char(0x80 | ((cp >> 6) & 0x3F)));
+				out.append(char(0x80 | (cp & 0x3F)));
+			} else {
+				out.append(char(0xE0 | (code >> 12)));
+				out.append(char(0x80 | ((code >> 6) & 0x3F)));
+				out.append(char(0x80 | (code & 0x3F)));
+			}
+			break;
+		}
+	}
+	out.append('"');
+}
+
+} // namespace PlaylistsDetail
+
+namespace {
+
+using PlaylistsDetail::AppendJsonString;
+using PlaylistsDetail::AppendUint64;
+using PlaylistsDetail::CheckAllowedKeys;
+using PlaylistsDetail::ReadBoundedInteger;
 
 [[nodiscard]] PlaylistLibraryError ValidateSource(
 		const PlaylistSource &source,
@@ -189,118 +262,6 @@ constexpr auto kMaximumSafeInteger = uint64_t(9007199254740991ULL);
 		}
 	}
 	return PlaylistLibraryError::None;
-}
-
-[[nodiscard]] PlaylistLibraryError ValidatePlaylist(
-		const Playlist &playlist,
-		uint64_t selfUserId) {
-	if (!playlist.title
-		&& !playlist.deleted
-		&& !playlist.order
-		&& !playlist.songs) {
-		return PlaylistLibraryError::EmptyPlaylist;
-	}
-	if (playlist.title) {
-		if (!IsValidPlaylistTitle(playlist.title->value)) {
-			return PlaylistLibraryError::InvalidTitle;
-		}
-		if (!IsValidPlaylistStamp(playlist.title->stamp)) {
-			return PlaylistLibraryError::InvalidStamp;
-		}
-	}
-	if (playlist.deleted && !IsValidPlaylistStamp(playlist.deleted->stamp)) {
-		return PlaylistLibraryError::InvalidStamp;
-	}
-	if (playlist.order) {
-		if (!IsValidPlaylistStamp(playlist.order->stamp)) {
-			return PlaylistLibraryError::InvalidStamp;
-		}
-		auto seen = std::unordered_set<uint64_t>();
-		seen.reserve(playlist.order->value.size());
-		for (const auto docId : playlist.order->value) {
-			if (docId == 0) {
-				return PlaylistLibraryError::InvalidDocumentId;
-			}
-			if (!seen.insert(docId).second) {
-				return PlaylistLibraryError::InvalidOrder;
-			}
-		}
-	}
-	if (playlist.songs) {
-		for (const auto &[docId, reg] : *playlist.songs) {
-			if (docId == 0) {
-				return PlaylistLibraryError::InvalidDocumentId;
-			}
-			if (!IsValidPlaylistStamp(reg.stamp)) {
-				return PlaylistLibraryError::InvalidStamp;
-			}
-			if (reg.value.source) {
-				const auto err = ValidateSource(
-					*reg.value.source,
-					reg.stamp,
-					selfUserId);
-				if (err != PlaylistLibraryError::None) {
-					return err;
-				}
-			}
-		}
-	}
-	return PlaylistLibraryError::None;
-}
-
-void AppendUint64(QByteArray &out, uint64_t value) {
-	char buffer[24];
-	auto len = 0;
-	do {
-		buffer[len++] = char('0' + (value % 10));
-		value /= 10;
-	} while (value != 0);
-	while (len > 0) {
-		out.append(buffer[--len]);
-	}
-}
-
-void AppendJsonString(QByteArray &out, const QString &value) {
-	constexpr auto hex = "0123456789abcdef";
-	out.append('"');
-	for (auto i = qsizetype(0); i < value.size(); ++i) {
-		const auto code = value[i].unicode();
-		switch (code) {
-		case '"': out.append("\\\""); break;
-		case '\\': out.append("\\\\"); break;
-		case '\b': out.append("\\b"); break;
-		case '\f': out.append("\\f"); break;
-		case '\n': out.append("\\n"); break;
-		case '\r': out.append("\\r"); break;
-		case '\t': out.append("\\t"); break;
-		default:
-			if (code < 0x20) {
-				out.append("\\u00");
-				out.append(hex[code >> 4]);
-				out.append(hex[code & 15]);
-			} else if (code < 0x80) {
-				out.append(char(code));
-			} else if (code < 0x800) {
-				out.append(char(0xC0 | (code >> 6)));
-				out.append(char(0x80 | (code & 0x3F)));
-			} else if (code >= 0xD800 && code <= 0xDBFF && i + 1 < value.size()) {
-				const auto lo = value[++i].unicode();
-				const auto cp = uint32_t(0x10000u)
-					+ ((uint32_t(code) - 0xD800u) << 10)
-					+ (uint32_t(lo) - 0xDC00u);
-				out.append(char(0xF0 | (cp >> 18)));
-				out.append(char(0x80 | ((cp >> 12) & 0x3F)));
-				out.append(char(0x80 | ((cp >> 6) & 0x3F)));
-				out.append(char(0x80 | (cp & 0x3F)));
-			} else {
-				out.append(char(0xE0 | (code >> 12)));
-				out.append(char(0x80 | ((code >> 6) & 0x3F)));
-				out.append(char(0x80 | (code & 0x3F)));
-			}
-			break;
-		}
-	}
-	out.append('"');
 }
 
 void AppendOrderValue(QByteArray &out, const std::vector<uint64_t> &order) {
@@ -439,18 +400,6 @@ template <typename Reg, typename NormalizeFn, typename SerializeFn>
 		}
 	}
 	return reg;
-}
-
-[[nodiscard]] Playlist NormalizePlaylist(
-		Playlist playlist,
-		uint64_t selfUserId) {
-	if (playlist.songs) {
-		for (auto &entry : *playlist.songs) {
-			entry.second = NormalizeSongRegister(
-				std::move(entry.second), selfUserId);
-		}
-	}
-	return playlist;
 }
 
 [[nodiscard]] Playlist JoinPlaylists(
@@ -663,7 +612,80 @@ template <typename Reg, typename NormalizeFn, typename SerializeFn>
 	return std::nullopt;
 }
 
-[[nodiscard]] std::optional<PlaylistLibraryError> ParsePlaylistJson(
+} // namespace
+
+namespace PlaylistsDetail {
+
+PlaylistLibraryError ValidatePlaylist(
+		const Playlist &playlist,
+		uint64_t selfUserId) {
+	if (!playlist.title
+		&& !playlist.deleted
+		&& !playlist.order
+		&& !playlist.songs) {
+		return PlaylistLibraryError::EmptyPlaylist;
+	}
+	if (playlist.title) {
+		if (!IsValidPlaylistTitle(playlist.title->value)) {
+			return PlaylistLibraryError::InvalidTitle;
+		}
+		if (!IsValidPlaylistStamp(playlist.title->stamp)) {
+			return PlaylistLibraryError::InvalidStamp;
+		}
+	}
+	if (playlist.deleted && !IsValidPlaylistStamp(playlist.deleted->stamp)) {
+		return PlaylistLibraryError::InvalidStamp;
+	}
+	if (playlist.order) {
+		if (!IsValidPlaylistStamp(playlist.order->stamp)) {
+			return PlaylistLibraryError::InvalidStamp;
+		}
+		auto seen = std::unordered_set<uint64_t>();
+		seen.reserve(playlist.order->value.size());
+		for (const auto docId : playlist.order->value) {
+			if (docId == 0) {
+				return PlaylistLibraryError::InvalidDocumentId;
+			}
+			if (!seen.insert(docId).second) {
+				return PlaylistLibraryError::InvalidOrder;
+			}
+		}
+	}
+	if (playlist.songs) {
+		for (const auto &[docId, reg] : *playlist.songs) {
+			if (docId == 0) {
+				return PlaylistLibraryError::InvalidDocumentId;
+			}
+			if (!IsValidPlaylistStamp(reg.stamp)) {
+				return PlaylistLibraryError::InvalidStamp;
+			}
+			if (reg.value.source) {
+				const auto err = ValidateSource(
+					*reg.value.source,
+					reg.stamp,
+					selfUserId);
+				if (err != PlaylistLibraryError::None) {
+					return err;
+				}
+			}
+		}
+	}
+	return PlaylistLibraryError::None;
+}
+
+Playlist NormalizePlaylist(
+		Playlist playlist,
+		uint64_t selfUserId) {
+	if (playlist.songs) {
+		for (auto &entry : *playlist.songs) {
+			entry.second = NormalizeSongRegister(
+				std::move(entry.second), selfUserId);
+		}
+	}
+	return playlist;
+}
+
+std::optional<PlaylistLibraryError> ParsePlaylistJson(
 		const QJsonObject &obj,
 		uint64_t selfUserId,
 		Playlist &out) {
@@ -802,7 +824,73 @@ template <typename Reg, typename NormalizeFn, typename SerializeFn>
 	return std::nullopt;
 }
 
-} // namespace
+void AppendPlaylistJson(
+		QByteArray &out,
+		const Playlist &playlist,
+		uint64_t selfUserId) {
+	out.append('{');
+	auto firstField = true;
+	const auto sepField = [&]() {
+		if (!firstField) {
+			out.append(',');
+		}
+		firstField = false;
+	};
+	if (playlist.deleted) {
+		sepField();
+		out.append("\"deleted\":[");
+		out.append(playlist.deleted->value ? "true," : "false,");
+		AppendUint64(out, playlist.deleted->stamp);
+		out.append(']');
+	}
+	if (playlist.order) {
+		sepField();
+		out.append("\"order\":[");
+		AppendOrderValue(out, playlist.order->value);
+		out.append(',');
+		AppendUint64(out, playlist.order->stamp);
+		out.append(']');
+	}
+	if (playlist.songs) {
+		sepField();
+		out.append("\"songs\":{");
+		// RFC 8785 sorts object keys lexicographically ("10" < "2"), unlike std::map<uint64_t>.
+		auto ordered = std::vector<std::pair<QByteArray, const PlaylistSongRegister *>>();
+		ordered.reserve(playlist.songs->size());
+		for (const auto &[docId, reg] : *playlist.songs) {
+			auto keyBytes = QByteArray();
+			AppendUint64(keyBytes, docId);
+			ordered.emplace_back(std::move(keyBytes), &reg);
+		}
+		std::sort(ordered.begin(), ordered.end(), [](const auto &lhs, const auto &rhs) {
+			return lhs.first < rhs.first;
+		});
+		for (std::size_t i = 0; i < ordered.size(); ++i) {
+			if (i > 0) {
+				out.append(',');
+			}
+			out.append('"');
+			out.append(ordered[i].first);
+			out.append("\":[");
+			AppendSongValue(out, ordered[i].second->value, selfUserId);
+			out.append(',');
+			AppendUint64(out, ordered[i].second->stamp);
+			out.append(']');
+		}
+		out.append('}');
+	}
+	if (playlist.title) {
+		sepField();
+		out.append("\"title\":[");
+		AppendJsonString(out, playlist.title->value);
+		out.append(',');
+		AppendUint64(out, playlist.title->stamp);
+		out.append(']');
+	}
+	out.append('}');
+}
+
+} // namespace PlaylistsDetail
 
 bool IsPlaylistId(const QString &value) {
 	if (value.size() != kPlaylistIdLength || !value.startsWith(u"pl-"_q)) {
@@ -906,7 +994,7 @@ PlaylistLibraryValidationResult ValidatePlaylistLibrary(
 		if (!IsPlaylistId(plId)) {
 			return InvalidValidation(PlaylistLibraryError::InvalidId);
 		}
-		const auto err = ValidatePlaylist(playlist, selfUserId);
+		const auto err = PlaylistsDetail::ValidatePlaylist(playlist, selfUserId);
 		if (err != PlaylistLibraryError::None) {
 			return InvalidValidation(err);
 		}
@@ -940,7 +1028,7 @@ PlaylistLibraryParseResult ParsePlaylistLibrary(
 	if (!formatVal.isDouble()) {
 		return InvalidParse(PlaylistLibraryError::FieldType);
 	}
-	const auto formatNum = ReadBoundedInteger(
+	const auto formatNum = PlaylistsDetail::ReadBoundedInteger(
 		formatVal,
 		1,
 		kMaximumSafeInteger);
@@ -950,7 +1038,7 @@ PlaylistLibraryParseResult ParsePlaylistLibrary(
 	if (*formatNum > uint64_t(kPlaylistFormatVersion)) {
 		return { PlaylistLibraryStatus::NewerFormat, PlaylistLibraryError::None, {} };
 	}
-	if (!CheckAllowedKeys(root, { u"format"_q, u"playlists"_q, u"purged"_q })) {
+	if (!PlaylistsDetail::CheckAllowedKeys(root, { u"format"_q, u"playlists"_q, u"purged"_q })) {
 		return InvalidParse(PlaylistLibraryError::UnknownKey);
 	}
 	if (!root.contains(u"playlists"_q) || !root.contains(u"purged"_q)) {
@@ -987,7 +1075,7 @@ PlaylistLibraryParseResult ParsePlaylistLibrary(
 			return InvalidParse(PlaylistLibraryError::FieldType);
 		}
 		auto playlist = Playlist();
-		if (const auto err = ParsePlaylistJson(
+		if (const auto err = PlaylistsDetail::ParsePlaylistJson(
 				it.value().toObject(),
 				selfUserId,
 				playlist)) {
@@ -1013,67 +1101,9 @@ PlaylistLibraryWriteResult SerializePlaylistLibrary(
 			out.append(',');
 		}
 		firstPlaylist = false;
-		AppendJsonString(out, plId);
-		out.append(":{");
-		auto firstField = true;
-		const auto sepField = [&]() {
-			if (!firstField) {
-				out.append(',');
-			}
-			firstField = false;
-		};
-		if (playlist.deleted) {
-			sepField();
-			out.append("\"deleted\":[");
-			out.append(playlist.deleted->value ? "true," : "false,");
-			AppendUint64(out, playlist.deleted->stamp);
-			out.append(']');
-		}
-		if (playlist.order) {
-			sepField();
-			out.append("\"order\":[");
-			AppendOrderValue(out, playlist.order->value);
-			out.append(',');
-			AppendUint64(out, playlist.order->stamp);
-			out.append(']');
-		}
-		if (playlist.songs) {
-			sepField();
-			out.append("\"songs\":{");
-			// RFC 8785 sorts object keys lexicographically ("10" < "2"), unlike std::map<uint64_t>.
-			auto ordered = std::vector<std::pair<QByteArray, const PlaylistSongRegister *>>();
-			ordered.reserve(playlist.songs->size());
-			for (const auto &[docId, reg] : *playlist.songs) {
-				auto keyBytes = QByteArray();
-				AppendUint64(keyBytes, docId);
-				ordered.emplace_back(std::move(keyBytes), &reg);
-			}
-			std::sort(ordered.begin(), ordered.end(), [](const auto &lhs, const auto &rhs) {
-				return lhs.first < rhs.first;
-			});
-			for (std::size_t i = 0; i < ordered.size(); ++i) {
-				if (i > 0) {
-					out.append(',');
-				}
-				out.append('"');
-				out.append(ordered[i].first);
-				out.append("\":[");
-				AppendSongValue(out, ordered[i].second->value, selfUserId);
-				out.append(',');
-				AppendUint64(out, ordered[i].second->stamp);
-				out.append(']');
-			}
-			out.append('}');
-		}
-		if (playlist.title) {
-			sepField();
-			out.append("\"title\":[");
-			AppendJsonString(out, playlist.title->value);
-			out.append(',');
-			AppendUint64(out, playlist.title->stamp);
-			out.append(']');
-		}
-		out.append('}');
+		PlaylistsDetail::AppendJsonString(out, plId);
+		out.append(':');
+		PlaylistsDetail::AppendPlaylistJson(out, playlist, selfUserId);
 	}
 	out.append("},\"purged\":{");
 	auto firstPurged = true;
@@ -1082,7 +1112,7 @@ PlaylistLibraryWriteResult SerializePlaylistLibrary(
 			out.append(',');
 		}
 		firstPurged = false;
-		AppendJsonString(out, purgedId);
+		PlaylistsDetail::AppendJsonString(out, purgedId);
 		out.append(":1");
 	}
 	out.append("}}");
@@ -1113,7 +1143,7 @@ PlaylistLibraryJoinResult JoinPlaylistLibraries(
 		if (itB == b.playlists.end()) {
 			result.playlists.emplace(
 				plId,
-				NormalizePlaylist(playlistA, selfUserId));
+				PlaylistsDetail::NormalizePlaylist(playlistA, selfUserId));
 		} else {
 			result.playlists.emplace(
 				plId,
@@ -1126,7 +1156,7 @@ PlaylistLibraryJoinResult JoinPlaylistLibraries(
 		}
 		result.playlists.emplace(
 			plId,
-			NormalizePlaylist(playlistB, selfUserId));
+			PlaylistsDetail::NormalizePlaylist(playlistB, selfUserId));
 	}
 	return {
 		PlaylistLibraryStatus::Valid,
