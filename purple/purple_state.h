@@ -12,6 +12,7 @@ option) any later version.
 
 #include <QtCore/QByteArray>
 
+#include <map>
 #include <optional>
 #include <vector>
 
@@ -219,6 +220,14 @@ struct LastSeenTrade {
 		= default;
 };
 
+struct AccountPeek {
+	bool active = false;
+	int64 deadlineUnix = 0;
+	PeekEnd ended = PeekEnd::None;
+
+	friend bool operator==(const AccountPeek &, const AccountPeek &) = default;
+};
+
 struct State {
 	QString activePreset;
 	PresetSource activeSource = PresetSource::Manual;
@@ -290,6 +299,7 @@ struct State {
 	std::vector<LastSeenTrade> lastSeenTrades;
 
 	ResolvedCache resolvedCache;
+	std::map<QString, AccountPeek> accountPeeks;
 };
 
 // What a settings.toml is, as far as the auto-send rule cares: "<length>:<hex>"
@@ -329,6 +339,8 @@ struct State {
 // The comparison is what makes a peek that outlived the app expire on its own:
 // the deadline is in the past by the time anything reads it again.
 [[nodiscard]] bool PeekLive(const State &state, int64 nowUnix);
+[[nodiscard]] State AccountPeekState(const State &state, const QString &account);
+void SaveAccountPeek(State &state, const QString &account, const State &peek);
 
 // The longest a peek can be stretched to by extending it, measured from the
 // moment of the extension. An hour, which is the last detent: past that it is

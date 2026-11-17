@@ -487,6 +487,17 @@ version 3 desktop fork gets its right to link this in.
 
 `tomlplusplus/toml.hpp` is third-party and stays under its own MIT license.
 
+## Account-specific Peek state
+
+`State::accountPeeks` keeps separate active flags, deadlines and end reasons under
+stable account keys. `AccountPeekState` projects one account into the existing
+Peek policy helpers; `SaveAccountPeek` stores that result and clears the old
+shared flag. Missing entries are inactive. Invalid account keys or deadlines
+cannot turn a malformed entry into an unlimited Peek. The TOML codec preserves
+these entries through restart, separately from shared preset selection and
+settings. Desktop uses these entries; the legacy fields remain available for
+clients that have not adopted the account-scoped adapter.
+
 ## Global Peek controls
 
 `[peek] exit_hidden_chats_p` defaults to true. The optional integer

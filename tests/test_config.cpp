@@ -4773,6 +4773,46 @@ end_on_app_lock_mobile_p = true
 	CHECK(Purple::PeekEndFromName(u"app_lock"_q) == Purple::PeekEnd::AppLock);
 }
 
+void TestAccountPeeks() {
+	const auto first = u"0-101"_q;
+	const auto second = u"0-202"_q;
+	const auto testServer = u"1-101"_q;
+	auto state = Purple::State();
+	CHECK(Purple::StartPeek(state, 1000, 300));
+	CHECK(!Purple::PeekLive(Purple::AccountPeekState(state, first), 1000));
+	auto a = Purple::AccountPeekState(state, first);
+	CHECK(Purple::StartPeek(a, 1000, 120));
+	Purple::SaveAccountPeek(state, first, a);
+	CHECK(!state.peekActive);
+	CHECK(Purple::PeekLive(Purple::AccountPeekState(state, first), 1000));
+	CHECK(!Purple::PeekLive(Purple::AccountPeekState(state, second), 1000));
+	CHECK(!Purple::PeekLive(Purple::AccountPeekState(state, testServer), 1000));
+	auto b = Purple::AccountPeekState(state, second);
+	CHECK(Purple::StartPeek(b, 1010, 0));
+	Purple::SaveAccountPeek(state, second, b);
+	CHECK(Purple::ExtendPeek(a, 1020, 60, Purple::kPeekExtendCapSeconds));
+	Purple::SaveAccountPeek(state, first, a);
+	auto restored = Purple::ParseState(Purple::SerializeState(state), u"test"_q);
+	CHECK(restored.accountPeeks == state.accountPeeks);
+	CHECK(Purple::PeekLeftSeconds(Purple::AccountPeekState(restored, first), 1020) == 160);
+	CHECK(Purple::PeekUntilStopped(Purple::AccountPeekState(restored, second)));
+	Purple::StopPeek(a, Purple::PeekEnd::AppLock);
+	Purple::SaveAccountPeek(restored, first, a);
+	CHECK(!Purple::PeekLive(Purple::AccountPeekState(restored, first), 1020));
+	CHECK(Purple::PeekLive(Purple::AccountPeekState(restored, second), 999999));
+	CHECK(Purple::AccountPeekState(restored, first).peekEnded == Purple::PeekEnd::AppLock);
+	CHECK(Purple::AccountPeekState(restored, second).peekEnded == Purple::PeekEnd::None);
+	Purple::SaveAccountPeek(restored, u"invalid"_q, b);
+	CHECK(restored.accountPeeks.size() == 2);
+	auto expired = Purple::AccountPeekState(state, first);
+	CHECK(!Purple::PeekLive(expired, 1180));
+	CHECK(Purple::PeekLive(Purple::AccountPeekState(state, second), 1180));
+	const auto invalid = Purple::ParseState(u"[[account_peeks]]\naccount = \"0-101\"\n"
+		"active = true\ndeadline_unix = \"invalid\"\n"_q, u"test"_q);
+	CHECK(invalid.accountPeeks.empty());
+	CHECK(!Purple::PeekLive(Purple::AccountPeekState(invalid, first), 1000));
+}
+
 void TestPeekState() {
 	Begin("peek state");
 
@@ -16595,6 +16635,7 @@ int main() {
 	TestPeekReadyTimeout();
 	TestPeekLocks();
 	TestPeekState();
+	TestAccountPeeks();
 	TestNamedExplicitly();
 	TestPresetHotkeys();
 	TestOverrides();

@@ -6,6 +6,7 @@ Licensed under the GNU General Public License, version 2 or (at your
 option) any later version.
 */
 #include "purple/purple_state.h"
+#include "purple/purple_local_choice.h"
 
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QStringList>
@@ -544,11 +545,47 @@ State ParseState(const QString &text, const QString &path) {
 	if (const auto deadline = root.get("peek_deadline_unix")) {
 		result.peekDeadlineUnix = deadline->value_or(int64(0));
 	}
+	if (const auto entries = root["account_peeks"].as_array()) {
+		for (const auto &entry : *entries) {
+			const auto table = entry.as_table();
+			if (!table) { continue; }
+			const auto account = ReadString(*table, "account");
+			if (!ParseAccountKey(account)) { continue; }
+			const auto deadline = (*table)["deadline_unix"].value<int64>();
+			if (!deadline || *deadline < 0) { continue; }
+			result.accountPeeks[account] = {
+				ReadBool(*table, "active", false),
+				*deadline,
+				PeekEndFromName(ReadString(*table, "ended_by")),
+			};
+		}
+	}
 	result.resolvedCache = ReadResolvedCache(root);
 	if (result.activePreset.isEmpty()) {
 		result.activePreset = NormalPreset();
 	}
 	return result;
+}
+
+State AccountPeekState(const State &state, const QString &account) {
+	auto result = State();
+	const auto i = state.accountPeeks.find(account);
+	if (i != state.accountPeeks.end()) {
+		result.peekActive = i->second.active;
+		result.peekDeadlineUnix = i->second.deadlineUnix;
+		result.peekEnded = i->second.ended;
+	}
+	return result;
+}
+
+void SaveAccountPeek(State &state, const QString &account, const State &peek) {
+	if (!ParseAccountKey(account)) { return; }
+	state.accountPeeks[account] = {
+		peek.peekActive, peek.peekDeadlineUnix, peek.peekEnded,
+	};
+	state.peekActive = false;
+	state.peekDeadlineUnix = 0;
+	state.peekEnded = PeekEnd::None;
 }
 
 bool PeekLive(const State &state, int64 nowUnix) {
@@ -942,6 +979,13 @@ QString SerializeState(const State &state) {
 		.arg(Quoted(state.lastSentFingerprint));
 	result += u"last_imported_fingerprint = %1\n"_q
 		.arg(Quoted(state.lastImportedFingerprint));
+	for (const auto &[account, peek] : state.accountPeeks) {
+		result += u"\n[[account_peeks]]\naccount = %1\nactive = %2\n"
+			"deadline_unix = %3\nended_by = %4\n"_q
+			.arg(Quoted(account), Boolean(peek.active))
+			.arg(peek.deadlineUnix)
+			.arg(Quoted(PeekEndName(peek.ended)));
+	}
 	result += SerializeOverrides(state.overrides);
 	result += SerializeLastSeenTrades(state.lastSeenTrades);
 
