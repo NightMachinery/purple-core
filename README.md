@@ -604,3 +604,10 @@ bounded gzip codecs, and pure sync-step planning. A step reconciles current
 records with its account/chat memo, merges new snapshots, applies guarded
 purges, and plans publication and verified-cover pruning. Clients still own
 storage, transport, UI and playback. Sharing is deferred.
+
+## Playlist downloads
+
+The shared [download policy](docs/playlist-downloads.md) keeps per-client file
+inventories separate, limits active jobs to two, and fences canceled callbacks.
+Run `tests/run.sh` to exercise it with the other core fixtures; set
+`PURPLE_CORE_TEST_BUILD` to keep generated test files outside the checkout.
