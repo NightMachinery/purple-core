@@ -459,7 +459,7 @@ void TestTwoPassSingleAllocationAndPass2Guards() {
 	{
 		const QByteArray tiny = "tiny payload";
 		TrackingOutputFactory encHugeFactory;
-		const PlaylistCodecCaps hugeCaps{ int64_t(1) << 50, int64_t(QByteArray::maxSize()) };
+		const PlaylistCodecCaps hugeCaps{ int64_t(1) << 50, int64_t(PlaylistsCodecDetail::ByteArraySizeLimit()) };
 		const auto encHuge = PlaylistsCodecDetail::EncodePlaylistBytesWithFactory(
 			tiny,
 			hugeCaps,
@@ -1004,9 +1004,9 @@ void TestInvalidLargeCapsImmutabilityAndRepeatedReuse() {
 		{ static_cast<int64_t>(std::numeric_limits<uint64_t>::max()), 1024 },
 		{ 1024, static_cast<int64_t>(uint64_t(1) << 63) },
 	};
-	if constexpr (QByteArray::maxSize() < std::numeric_limits<int64_t>::max()) {
-		badCaps.push_back({ int64_t(QByteArray::maxSize()) + 1, 1024 });
-		badCaps.push_back({ 1024, int64_t(QByteArray::maxSize()) + 1 });
+	if constexpr (PlaylistsCodecDetail::ByteArraySizeLimit() < std::numeric_limits<int64_t>::max()) {
+		badCaps.push_back({ int64_t(PlaylistsCodecDetail::ByteArraySizeLimit()) + 1, 1024 });
+		badCaps.push_back({ 1024, int64_t(PlaylistsCodecDetail::ByteArraySizeLimit()) + 1 });
 		badCaps.push_back({ std::numeric_limits<int64_t>::max(), 1024 });
 		badCaps.push_back({ 1024, std::numeric_limits<int64_t>::max() });
 	}
@@ -1029,7 +1029,7 @@ void TestInvalidLargeCapsImmutabilityAndRepeatedReuse() {
 	// Arbitrarily large representable caps succeed on small input without overflow or giant reserve.
 	for (const auto &hugeCaps : {
 			PlaylistCodecCaps{ int64_t(1) << 33, int64_t(1) << 40 },
-			PlaylistCodecCaps{ int64_t(1) << 50, int64_t(QByteArray::maxSize()) },
+			PlaylistCodecCaps{ int64_t(1) << 50, int64_t(PlaylistsCodecDetail::ByteArraySizeLimit()) },
 		}) {
 		const auto okEnc = EncodePlaylistBytes(plain, hugeCaps);
 		CHECK(bool(okEnc) && okEnc.bytes == gzip);

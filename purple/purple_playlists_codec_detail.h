@@ -88,10 +88,18 @@ struct QByteArrayOutputFactory {
 	}
 };
 
+template <typename Bytes = QByteArray>
+[[nodiscard]] constexpr qsizetype ByteArraySizeLimit() noexcept {
+	if constexpr (requires { Bytes::maxSize(); }) {
+		return Bytes::maxSize();
+	} else {
+		// Older Qt needs allocation headroom for its header and trailing NUL.
+		return std::numeric_limits<qsizetype>::max() / 2;
+	}
+}
+
 [[nodiscard]] inline bool ValidateCap(int64_t cap) noexcept {
-	return cap >= 0
-		&& cap <= int64_t(std::numeric_limits<qsizetype>::max())
-		&& cap <= int64_t(QByteArray::maxSize());
+	return cap >= 0 && cap <= int64_t(ByteArraySizeLimit());
 }
 
 [[nodiscard]] inline bool ValidateCaps(const PlaylistCodecCaps &caps) noexcept {
