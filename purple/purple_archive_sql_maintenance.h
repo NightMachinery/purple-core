@@ -11,7 +11,7 @@ option) any later version.
 
 namespace Purple {
 
-enum class ArchivePurgePhase { Versions, Messages, Jobs, Leases, Finish };
+enum class ArchivePurgePhase { Versions, Messages, Jobs, Leases, Finish, Observations };
 
 struct ArchiveSqlPurge {
 	AccountKey account;

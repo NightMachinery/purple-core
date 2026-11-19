@@ -73,7 +73,7 @@ bool IsPurge(const ArchiveSqlPurge &purge, const ArchiveSqlSecurity &security) {
 	return purge.storeId == security.storeId && IsArchiveToken(purge.operationId)
 		&& (purge.kind == ArchivePurgeKind::Trashbin || purge.kind == ArchivePurgeKind::EditHistory)
 		&& IsScope(purge.chat, purge.migrationAliases) && purge.revision > 0
-		&& int(purge.phase) >= 0 && int(purge.phase) <= int(ArchivePurgePhase::Finish)
+		&& int(purge.phase) >= 0 && int(purge.phase) <= int(ArchivePurgePhase::Observations)
 		&& (purge.cursor.isEmpty() || IsArchiveHash(purge.cursor)
 			|| (purge.cursor.size() == 129 && purge.cursor[64] == '/'
 				&& IsArchiveHash(purge.cursor.left(64)) && IsArchiveHash(purge.cursor.mid(65))))
@@ -130,6 +130,7 @@ struct PageQuery {
 	QString id;
 	QString predicate;
 	Values values;
+	QString envelope = u"envelope"_q;
 };
 
 PageQuery Query(const ArchiveSqlPurge &purge, const ArchiveSqlSecurity &security) {
@@ -152,10 +153,18 @@ PageQuery Query(const ArchiveSqlPurge &purge, const ArchiveSqlSecurity &security
 		result.table = u"jobs"_q; result.id = u"job_id"_q; result.predicate = u"state=0"_q; break;
 	case ArchivePurgePhase::Leases:
 		result.table = u"leases"_q; result.id = u"lease_id"_q; result.predicate = u"revoked=0"_q; break;
+	case ArchivePurgePhase::Observations:
+		result.table = u"observations o JOIN messages m ON m.message_key=o.message_key"_q;
+		result.id = u"o.message_key||'/'||o.observation_id"_q;
+		result.envelope = u"m.envelope"_q;
+		result.predicate = purge.kind == ArchivePurgeKind::Trashbin ? u"m.deleted=1"_q : u"1=1"_q;
+		break;
 	case ArchivePurgePhase::Finish: return {};
 	}
 	if (purge.chat) {
-		result.predicate += u" AND chat_token IN (?"_q;
+		result.predicate += purge.phase == ArchivePurgePhase::Observations
+			? u" AND m.chat_token IN (?"_q
+			: u" AND chat_token IN (?"_q;
 		result.values.push_back(ArchiveSqlChatId(*purge.chat, purge.account, security));
 		for (const auto &alias : purge.migrationAliases) {
 			result.predicate += u",?"_q;
@@ -322,6 +331,37 @@ void FinishProgram(ArchiveSqlProgram &program) {
 
 }
 
+ArchiveSqlStatement ArchiveSqlLegacyMaintenanceGuard(
+		const ArchiveState &header,
+		const QString &operationId,
+		const QByteArray &envelope,
+		const ArchiveSqlSecurity &security) {
+	if (operationId.isEmpty() && envelope.isEmpty()) {
+		return { u"SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM maintenance)"_q,
+			{}, ArchiveSqlExpectation::OneRow };
+	}
+	if (!IsArchiveHash(operationId) || envelope.isEmpty()) {
+		return {};
+	}
+	const auto opened = OpenArchiveEnvelope(
+		{ header.account, security.storeId, ArchiveRecordKind::Maintenance, operationId.toUtf8() },
+		security.keyId, envelope, security.crypto);
+	const auto purge = opened ? DecodeArchiveSqlPurge(opened.bytes) : std::nullopt;
+	if (!purge || !IsPurge(*purge, security) || purge->account != header.account
+		|| purge->revision != header.revision || purge->accountGeneration != header.accountGeneration
+		|| Operation(*purge, security) != operationId) {
+		return {};
+	}
+	const auto scope = ScopeToken(*purge, security);
+	if (scope.isEmpty()) {
+		return {};
+	}
+	return { u"SELECT 1 FROM maintenance WHERE singleton=1 AND operation_id=? "
+		"AND kind=? AND scope_token=? AND phase=? AND cursor=? AND envelope=?"_q,
+		{ operationId, int64(purge->kind), scope, int64(purge->phase), purge->cursor, envelope },
+		ArchiveSqlExpectation::OneRow };
+}
+
 ArchiveSqlMaintenancePlan BeginArchiveSqlPurge(const ArchiveState &header,
 		const ArchivePurgeRequest &request, const std::vector<ArchiveChatGeneration> &chatEpochs,
 		const QString &operationId, const ArchiveSqlSecurity &security) {
@@ -417,7 +457,7 @@ std::optional<ArchiveSqlPurge> DecodeArchiveSqlPurge(const QByteArray &plaintext
 	if (!accountValue.isString() || !store.isString() || !operation.isString() || !kind.isDouble()
 		|| !aliases.isArray() || aliases.toArray().size() > 31 || !revision.isString() || !generation.isString() || !phase.isDouble() || !cursor.isString() || !object.isEmpty()) { return {}; }
 	const auto account = ParseAccountKey(accountValue.toString());
-	if (!account || kind.toInteger(-1) < 0 || kind.toInteger() > 1 || phase.toInteger(-1) < 0 || phase.toInteger() > 4) { return {}; }
+	if (!account || kind.toInteger(-1) < 0 || kind.toInteger() > 1 || phase.toInteger(-1) < 0 || phase.toInteger() > int(ArchivePurgePhase::Observations)) { return {}; }
 	auto valid = false;
 	const auto rev = revision.toString().toULongLong(&valid);
 	if (!valid || QString::number(rev) != revision.toString()) { return {}; }
@@ -453,7 +493,7 @@ ArchiveSqlStatement ArchiveSqlPurgePage(const ArchiveSqlPurge &purge, int limit,
 		const auto query = Query(purge, security);
 		auto values = query.values;
 		values.insert(values.end(), { purge.cursor, int64(limit) });
-		auto statement = ArchiveSqlStatement{ u"SELECT "_q + query.id + u",envelope FROM "_q + query.table
+		auto statement = ArchiveSqlStatement{ u"SELECT "_q + query.id + ',' + query.envelope + u" FROM "_q + query.table
 			+ u" WHERE "_q + query.predicate + u" AND ("_q + query.id + u")>? ORDER BY "_q + query.id + u" LIMIT ?"_q,
 			std::move(values), ArchiveSqlExpectation::Rows };
 		statement.rows.maximum = limit;
@@ -492,7 +532,11 @@ static ArchiveSqlMaintenancePlan ContinueArchiveSqlPurgePage(const ArchiveSqlPur
 				result.program.statements.push_back({ u"SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM "_q + query.table
 					+ u" WHERE "_q + query.predicate + u" AND ("_q + query.id + u")>?)"_q,
 					std::move(values), ArchiveSqlExpectation::OneRow });
-				result.next.phase = ArchivePurgePhase(int(purge.phase) + 1);
+				result.next.phase = purge.phase == ArchivePurgePhase::Leases
+					? ArchivePurgePhase::Observations
+					: purge.phase == ArchivePurgePhase::Observations
+					? ArchivePurgePhase::Finish
+					: ArchivePurgePhase(int(purge.phase) + 1);
 				result.next.cursor.clear();
 			} else {
 				values.insert(values.end(), { purge.cursor, rows.back().stored.id, int64(rows.size()) });
@@ -506,12 +550,25 @@ static ArchiveSqlMaintenancePlan ContinueArchiveSqlPurgePage(const ArchiveSqlPur
 				const auto &stored = input.stored;
 				if (stored.id <= previous || !stored.row.preserved.isEmpty() || input.copies.size() > kArchiveSqlPageLimit) { return {}; }
 				previous = stored.id;
-				if (!MatchesFrame(purge.account, stored.id, stored.row, input.frame, security)) { return {}; }
+				const auto observation = purge.phase == ArchivePurgePhase::Observations;
+				const auto parentId = observation ? stored.id.left(64) : stored.id;
+				if (!MatchesFrame(purge.account, parentId, stored.row, input.frame, security)) { return {}; }
 				auto exactValues = query.values;
 				exactValues.insert(exactValues.end(), { stored.id, input.frame });
 				result.program.statements.push_back({ u"SELECT 1 FROM "_q + query.table + u" WHERE "_q + query.predicate
-					+ u" AND ("_q + query.id + u")=? AND envelope=?"_q, std::move(exactValues), ArchiveSqlExpectation::OneRow });
-				if (purge.phase == ArchivePurgePhase::Messages) {
+					+ u" AND ("_q + query.id + u")=? AND "_q + query.envelope + u"=?"_q,
+					std::move(exactValues), ArchiveSqlExpectation::OneRow });
+				if (observation) {
+					const auto &id = stored.id;
+					if (id.size() != 129 || id[64] != '/' || !IsArchiveHash(parentId) || !IsArchiveHash(id.mid(65))
+						|| ArchiveRowKind(stored.row) != ArchiveRecordKind::Message) { return {}; }
+					const auto &message = std::get<ArchiveMessage>(stored.row.value);
+					if (message.key.account != purge.account || ArchiveSqlMessageId(message.key, security) != parentId
+						|| !ScopedChat(purge, message.key.chat)
+						|| (purge.kind == ArchivePurgeKind::Trashbin && !message.deleted)) { return {}; }
+					writes.statements.push_back({ u"DELETE FROM observations WHERE message_key=? AND observation_id=?"_q,
+						{ parentId, id.mid(65) }, ArchiveSqlExpectation::OneChange });
+				} else if (purge.phase == ArchivePurgePhase::Messages) {
 					if (ArchiveRowKind(stored.row) != ArchiveRecordKind::Message) { return {}; }
 					auto message = std::get<ArchiveMessage>(stored.row.value);
 					if (message.key.account != purge.account || !message.versions.empty() || !message.receipts.empty()

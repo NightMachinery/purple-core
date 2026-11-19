@@ -12,7 +12,7 @@ option) any later version.
 
 namespace Purple {
 
-inline constexpr auto kArchiveSqlSchemaVersion = 2;
+inline constexpr auto kArchiveSqlSchemaVersion = 3;
 inline constexpr auto kArchiveSqlPageLimit = 128;
 inline constexpr auto kArchiveSqlSliceRowLimit = 256;
 inline constexpr auto kArchiveSqlStatementLimit = 2048;
@@ -137,6 +137,16 @@ struct ArchiveSqlCapturePlan {
 [[nodiscard]] ArchiveSqlStatement ArchiveSqlReadSchema();
 [[nodiscard]] ArchiveSqlStatus CheckArchiveSqlSchema(int64 version, const QString &recordedFingerprint,
 	const std::vector<QString> &definitions);
+struct ArchiveSqlObservationUpgradePlan {
+	std::vector<ArchiveSqlStatement> preflight;
+	ArchiveSqlProgram program;
+	[[nodiscard]] explicit operator bool() const { return bool(program); }
+};
+
+[[nodiscard]] ArchiveSqlObservationUpgradePlan PlanArchiveSqlObservationUpgrade(
+	const AccountKey &account, const QByteArray &headerEnvelope,
+	const ArchiveSqlSecurity &security, const QString &maintenanceId = {},
+	const QByteArray &maintenanceEnvelope = {});
 [[nodiscard]] QString ArchiveSqlSchemaGuard();
 [[nodiscard]] ArchiveSqlProgram InitializeArchiveSql(const ArchiveState &empty,
 	const ArchiveSqlSecurity &security);
@@ -150,6 +160,24 @@ struct ArchiveSqlCapturePlan {
 	const QString &eventId, const ArchiveSqlSecurity &security);
 [[nodiscard]] ArchiveSqlStatement ArchiveSqlReadRecord(const AccountKey &account,
 	ArchiveRecordKind kind, const QString &id, const ArchiveSqlSecurity &security);
+struct ArchiveSqlObservationWrite {
+	QString id;
+	ArchiveSqlProgram program;
+	[[nodiscard]] explicit operator bool() const { return !id.isEmpty() && bool(program); }
+};
+
+[[nodiscard]] ArchiveSqlObservationWrite PlanArchiveSqlUnorderedObservation(
+	const ArchiveState &state, const ArchiveEvent &event, const ArchiveSqlSecurity &security);
+[[nodiscard]] ArchiveSqlStatement ArchiveSqlListUnorderedObservations(
+	const ArchiveMessageKey &key, const QString &before, const ArchiveSqlSecurity &security);
+[[nodiscard]] ArchiveSqlStatement ArchiveSqlReadUnorderedObservation(
+	const ArchiveMessageKey &key, const QString &token, const ArchiveSqlSecurity &security);
+[[nodiscard]] ArchiveSqlStatement ArchiveSqlReadUnorderedObservationChunks(
+	const ArchiveMessageKey &key, const QString &token, int64 bytes, const ArchiveSqlSecurity &security);
+[[nodiscard]] std::optional<ArchiveVersionSnapshot> RestoreArchiveSqlUnorderedObservation(
+	const ArchiveMessageKey &key, const QString &token, const QString &order, int64 size,
+	const QByteArray &header, const std::vector<QByteArray> &chunks, const ArchiveSqlSecurity &security);
+
 [[nodiscard]] ArchiveSqlStatement ArchiveSqlReadChatEpoch(const AccountKey &account,
 	const ArchiveChatKey &chat, const ArchiveSqlSecurity &security);
 [[nodiscard]] ArchiveSqlStatement ArchiveSqlVersionJobs(const ArchiveMessageKey &key,

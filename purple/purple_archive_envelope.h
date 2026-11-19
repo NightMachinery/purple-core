@@ -35,6 +35,8 @@ enum class ArchiveRecordKind {
 	Maintenance = 12,
 	StagingPiece = 13,
 	StagingProgress = 14,
+	UnorderedObservation = 15,
+	UnorderedObservationChunk = 16,
 };
 
 struct ArchiveEnvelopeContext {

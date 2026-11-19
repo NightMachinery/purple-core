@@ -11,6 +11,10 @@ option) any later version.
 
 namespace Purple {
 
+[[nodiscard]] ArchiveSqlStatement ArchiveSqlLegacyMaintenanceGuard(
+	const ArchiveState &header, const QString &operationId,
+	const QByteArray &envelope, const ArchiveSqlSecurity &security);
+
 template <typename Callback>
 auto CheckArchiveSqlDerivations(const ArchiveSqlSecurity &security, Callback callback) {
 	auto failed = !security.hmacSha256;

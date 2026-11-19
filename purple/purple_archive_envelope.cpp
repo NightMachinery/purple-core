@@ -96,7 +96,7 @@ bool IsArchiveEnvelopeContext(const ArchiveEnvelopeContext &context) {
 		&& KeyId(context.storeId) && !context.rowId.isEmpty()
 		&& context.rowId.size() <= 4096
 		&& int(context.kind) >= int(ArchiveRecordKind::Account)
-		&& int(context.kind) <= int(ArchiveRecordKind::StagingProgress);
+		&& int(context.kind) <= int(ArchiveRecordKind::UnorderedObservationChunk);
 }
 
 ArchiveEnvelopeResult SealArchiveEnvelope(const ArchiveEnvelopeContext &context,

@@ -246,7 +246,11 @@ std::vector<QString> ArchiveSqlConnectionSetup() {
 	return { u"PRAGMA foreign_keys=ON"_q, u"PRAGMA journal_mode=WAL"_q, u"PRAGMA synchronous=FULL"_q };
 }
 
-std::vector<QString> ArchiveSqlSchema() {
+namespace {
+
+constexpr auto kArchiveSqlPreviousSchemaVersion = 2;
+
+std::vector<QString> PreviousArchiveSqlSchema() {
 	return {
 		u"CREATE TABLE archive_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),schema_version INTEGER NOT NULL,"
 		"account_token TEXT NOT NULL,store_id TEXT NOT NULL,revision TEXT NOT NULL,generation TEXT NOT NULL,"
@@ -296,6 +300,29 @@ std::vector<QString> ArchiveSqlSchema() {
 	};
 }
 
+std::vector<QString> ArchiveSqlObservationSchema() {
+	return {
+		u"CREATE TABLE observations(message_key TEXT NOT NULL,observation_id TEXT NOT NULL,"
+		"order_key TEXT NOT NULL,chat_token TEXT NOT NULL,bytes INTEGER NOT NULL,envelope BLOB NOT NULL,"
+		"PRIMARY KEY(message_key,observation_id),"
+		"FOREIGN KEY(message_key) REFERENCES messages(message_key) ON DELETE CASCADE)"_q,
+		u"CREATE TABLE observation_chunks(message_key TEXT NOT NULL,observation_id TEXT NOT NULL,"
+		"chunk_index INTEGER NOT NULL,envelope BLOB NOT NULL,PRIMARY KEY(message_key,observation_id,chunk_index),"
+		"FOREIGN KEY(message_key,observation_id) REFERENCES observations(message_key,observation_id) ON DELETE CASCADE)"_q,
+		u"CREATE INDEX observation_order ON observations(message_key,order_key DESC,observation_id DESC)"_q,
+		u"CREATE INDEX observation_chat ON observations(chat_token,message_key,observation_id)"_q,
+	};
+}
+
+}
+
+std::vector<QString> ArchiveSqlSchema() {
+	auto schema = PreviousArchiveSqlSchema();
+	const auto observations = ArchiveSqlObservationSchema();
+	schema.insert(schema.end(), observations.begin(), observations.end());
+	return schema;
+}
+
 ArchiveSqlStatus CheckArchiveSqlVersion(int64 version) {
 	return version == kArchiveSqlSchemaVersion ? ArchiveSqlStatus::Ready
 		: version > kArchiveSqlSchemaVersion ? ArchiveSqlStatus::ReadOnly
@@ -333,6 +360,68 @@ ArchiveSqlStatus CheckArchiveSqlSchema(int64 version, const QString &recordedFin
 	return recordedFingerprint == expected && definitions.size() == ArchiveSqlSchema().size()
 		&& ArchiveSqlSchemaFingerprint(definitions) == expected
 		? ArchiveSqlStatus::Ready : ArchiveSqlStatus::SchemaMismatch;
+}
+
+ArchiveSqlObservationUpgradePlan PlanArchiveSqlObservationUpgrade(
+		const AccountKey &account,
+		const QByteArray &headerEnvelope,
+		const ArchiveSqlSecurity &security,
+		const QString &maintenanceId,
+		const QByteArray &maintenanceEnvelope) {
+	const auto opened = OpenArchiveEnvelope(
+		{ account, security.storeId, ArchiveRecordKind::Account, QByteArray("account") },
+		security.keyId, headerEnvelope, security.crypto);
+	if (!opened) {
+		return {};
+	}
+	const auto decoded = DecodeArchiveRow(opened.bytes);
+	const auto header = decoded.row
+		? std::get_if<ArchiveState>(&decoded.row->value)
+		: nullptr;
+	if (decoded.status != ArchiveCodecStatus::Valid || !header
+		|| !decoded.row->preserved.isEmpty() || decoded.row->body
+		|| header->account != account || RowCount(*header) != 1
+		|| !IsArchiveState(*header)) {
+		return {};
+	}
+	return CheckArchiveSqlDerivations(security, [&](const ArchiveSqlSecurity &checked)
+	-> ArchiveSqlObservationUpgradePlan {
+		const auto previous = PreviousArchiveSqlSchema();
+		const auto previousFingerprint = ArchiveSqlSchemaFingerprint(previous);
+		const auto maintenance = ArchiveSqlLegacyMaintenanceGuard(
+			*header, maintenanceId, maintenanceEnvelope, checked);
+		if (maintenance.sql.isEmpty()) {
+			return {};
+		}
+		auto builder = Builder(account, checked);
+		auto preflight = std::vector<ArchiveSqlStatement>();
+		preflight.push_back({ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=? AND schema_fingerprint=? "
+			"AND account_token=? AND store_id=? AND revision=? AND generation=? AND maintenance_id=? AND envelope=?"_q,
+			{ int64(kArchiveSqlPreviousSchemaVersion), previousFingerprint,
+				builder.token(ArchiveIndexKind::Account, "account"), checked.storeId,
+				QString::number(header->revision), QString::number(header->accountGeneration), maintenanceId, headerEnvelope },
+			ArchiveSqlExpectation::OneRow });
+		preflight.push_back(maintenance);
+		preflight.push_back({ u"SELECT 1 WHERE (SELECT COUNT(*) FROM sqlite_schema WHERE sql IS NOT NULL "
+			"AND name NOT GLOB 'sqlite_*')=?"_q,
+			{ int64(previous.size()) }, ArchiveSqlExpectation::OneRow });
+		for (const auto &definition : previous) {
+			preflight.push_back({ u"SELECT 1 FROM sqlite_schema WHERE sql=?"_q,
+				{ definition }, ArchiveSqlExpectation::OneRow });
+		}
+		builder.add({ u"BEGIN IMMEDIATE"_q });
+		for (const auto &guard : preflight) {
+			builder.add(guard);
+		}
+		for (const auto &definition : ArchiveSqlObservationSchema()) {
+			builder.add({ definition });
+		}
+		builder.add({ u"UPDATE archive_meta SET schema_version=?,schema_fingerprint=? WHERE singleton=1"_q,
+			{ int64(kArchiveSqlSchemaVersion), ArchiveSqlExpectedSchemaFingerprint() },
+			ArchiveSqlExpectation::OneChange });
+		builder.add({ u"COMMIT"_q });
+		return { std::move(preflight), builder.finish() };
+	});
 }
 
 QString ArchiveSqlSchemaGuard() {
@@ -524,6 +613,208 @@ ArchiveSqlStatement ArchiveSqlReadRecord(const AccountKey &account, ArchiveRecor
 		result.rows.maximum = 1;
 		return result;
 	});
+}
+
+namespace {
+
+QString ObservationToken(const ArchiveVersionSnapshot &snapshot, const ArchiveSqlSecurity &security) {
+	const auto &version = snapshot.version;
+	const auto message = ArchiveSqlMessageId(snapshot.key, security);
+	const auto content = ArchiveContentHash(version.content);
+	if (message.isEmpty() || content.isEmpty()) {
+		return {};
+	}
+	auto identity = QByteArray("unordered-observation/v1/") + message.toUtf8() + '/' + content.toUtf8();
+	identity += '/' + QByteArray::number(int(version.completeness));
+	identity += '/' + QByteArray::number(version.observation.serverTime);
+	identity += '/' + QByteArray::number(version.observation.context.value(u"editDate"_q).toInteger());
+	if (version.source) {
+		identity += '/' + QByteArray::number(int(version.source->kind)) + '/'
+			+ QCryptographicHash::hash(version.source->bytes, QCryptographicHash::Sha256).toHex();
+	}
+	return ArchiveSqlToken(snapshot.key.account, ArchiveIndexKind::Event, identity, security);
+}
+
+ArchiveEnvelopeContext ObservationContext(const ArchiveMessageKey &key, const QString &message,
+		const QString &token, const ArchiveSqlSecurity &security) {
+	return { key.account, security.storeId, ArchiveRecordKind::UnorderedObservation,
+		(message + '/' + token).toUtf8() };
+}
+
+ArchiveEnvelopeContext ObservationChunkContext(const ArchiveMessageKey &key, const QString &message,
+		const QString &token, int64 bytes, int64 index, const ArchiveSqlSecurity &security) {
+	return { key.account, security.storeId, ArchiveRecordKind::UnorderedObservationChunk,
+		(message + '/' + token + '/' + QString::number(bytes) + '/' + QString::number(index)).toUtf8() };
+}
+
+} // namespace
+
+ArchiveSqlObservationWrite PlanArchiveSqlUnorderedObservation(const ArchiveState &state,
+		const ArchiveEvent &event, const ArchiveSqlSecurity &security) {
+	return CheckArchiveSqlDerivations(security, [&](const ArchiveSqlSecurity &security)
+	-> ArchiveSqlObservationWrite {
+		const auto owner = FindArchiveMessage(state, event.key);
+		if (!IsArchiveState(state) || !owner || owner->deleted || owner->payloadPurged || owner->versions.empty()
+			|| state.account != event.key.account || state.revision == std::numeric_limits<uint64_t>::max()
+			|| event.generation != ArchiveGenerationFor(state, event.key.chat)
+			|| event.key.collection != ArchiveCollection::Received
+			|| event.origin != ArchiveOrigin::Baseline || !event.content || !event.order
+			|| !event.targetVersion.isEmpty() || !event.targetRevision.isEmpty() || !event.expectedContentHash.isEmpty()
+			|| event.lifecycleEpoch || !event.lifecycleMediaIdentity.isEmpty()
+			|| !event.observation.payloadFormat.startsWith(u"telegram-message-tl:"_q)
+			|| event.observation.context.contains(u"desktopLifecycle"_q)
+			|| event.observation.context.value(u"desktopLifecycleFallback"_q).toBool()
+			|| event.observation.context.value(u"desktopLivePreimage"_q).toBool()
+			|| event.observation.context.value(u"desktopSendMetadata"_q).toBool()
+			|| SameArchiveContent(owner->versions.back().content, *event.content)) {
+			return {};
+		}
+		auto version = ArchiveVersion();
+		version.id = event.id;
+		version.revision = event.missing.revision.isEmpty() ? event.id : event.missing.revision;
+		version.order = event.order;
+		version.origin = event.origin;
+		version.firstObservedAt = event.observation.observedAt;
+		version.content = *event.content;
+		version.missing = event.missing;
+		version.missing.revision = version.revision;
+		version.completeness = event.completeness;
+		version.observation = event.observation;
+		version.source = event.source;
+		for (const auto &descriptor : version.content.media) {
+			version.media.push_back({ descriptor.identity });
+		}
+		const auto snapshot = ArchiveVersionSnapshot{ event.key, std::move(version) };
+		const auto bytes = EncodeArchiveVersionSnapshot(snapshot);
+		const auto token = ObservationToken(snapshot, security);
+		const auto message = ArchiveSqlMessageId(event.key, security);
+		const auto chat = ArchiveSqlChatId(event.key.chat, event.key.account, security);
+		const auto head = ChildToken(ArchiveSqlChildId(event.key, ArchiveIndexKind::Version, owner->versions.back().id, security));
+		if (!bytes || bytes->isEmpty() || token.isEmpty() || message.isEmpty() || chat.isEmpty() || head.isEmpty()) {
+			return {};
+		}
+		const auto header = SealArchiveEnvelope(ObservationContext(event.key, message, token, security),
+			security.keyId, QCryptographicHash::hash(*bytes, QCryptographicHash::Sha256), security.crypto);
+		if (!header) {
+			return { {}, { ArchiveSqlStatus::EncodingFailed } };
+		}
+		auto out = Builder(state.account, security);
+		out.add({ u"BEGIN IMMEDIATE"_q });
+		out.add({ u"SELECT 1 FROM archive_meta WHERE singleton=1 AND schema_version=? AND schema_fingerprint=? AND account_token=? "
+			"AND store_id=? AND revision=? AND generation=? AND maintenance_id=''"_q,
+			{ int64(kArchiveSqlSchemaVersion), ArchiveSqlExpectedSchemaFingerprint(), out.token(ArchiveIndexKind::Account, "account"),
+				security.storeId, QString::number(state.revision), QString::number(state.accountGeneration) }, ArchiveSqlExpectation::OneRow });
+		out.add({ u"SELECT 1 WHERE COALESCE((SELECT generation FROM purge_epochs WHERE chat_token=?),'0')=?"_q,
+			{ chat, QString::number(event.generation.chat) }, ArchiveSqlExpectation::OneRow });
+		out.add({ u"SELECT 1 FROM messages WHERE message_key=? AND chat_token=? AND causal_order=? "
+			"AND head_version=? AND deleted=0 AND purged=0"_q,
+			{ message, chat, ArchiveSqlOrder(owner->order), head }, ArchiveSqlExpectation::OneRow });
+		const auto size = int64(bytes->size());
+		out.add({ u"INSERT INTO observations(message_key,observation_id,order_key,chat_token,bytes,envelope) VALUES(?,?,?,?,?,?)"_q,
+			{ message, token, ArchiveSqlOrder(event.order), chat, size, header.bytes }, ArchiveSqlExpectation::OneChange });
+		const auto count = (size + kArchiveMediaChunkBytes - 1) / kArchiveMediaChunkBytes;
+		for (auto i = int64(0); i != count; ++i) {
+			const auto chunk = SealArchiveEnvelope(ObservationChunkContext(event.key, message, token, size, i, security),
+				security.keyId, bytes->mid(i * kArchiveMediaChunkBytes, kArchiveMediaChunkBytes), security.crypto);
+			if (!chunk) {
+				return { {}, { ArchiveSqlStatus::EncodingFailed } };
+			}
+			out.add({ u"INSERT INTO observation_chunks(message_key,observation_id,chunk_index,envelope) VALUES(?,?,?,?)"_q,
+				{ message, token, i, chunk.bytes }, ArchiveSqlExpectation::OneChange });
+		}
+		auto next = Header(state);
+		++next.revision;
+		out.add({ u"UPDATE archive_meta SET revision=?,envelope=? WHERE singleton=1 AND revision=? AND maintenance_id=''"_q,
+			{ QString::number(next.revision), out.seal(u"account"_q, next), QString::number(state.revision) }, ArchiveSqlExpectation::OneChange });
+		out.add({ u"COMMIT"_q });
+		return { token, out.finish() };
+	});
+}
+
+ArchiveSqlStatement ArchiveSqlListUnorderedObservations(const ArchiveMessageKey &key,
+		const QString &before, const ArchiveSqlSecurity &security) {
+	const auto message = ArchiveSqlMessageId(key, security);
+	if (message.isEmpty()) {
+		return {};
+	}
+	auto result = ArchiveSqlStatement{ u"SELECT order_key,observation_id FROM observations WHERE message_key=?"_q,
+		{ message }, ArchiveSqlExpectation::Rows };
+	if (!before.isEmpty()) {
+		auto valid = false;
+		const auto order = before.left(20).toULongLong(&valid);
+		const auto token = before.mid(21);
+		if (before.size() != 85 || !valid || ArchiveSqlOrder(order) != before.left(20)
+			|| before[20] != '/' || !IsArchiveHash(token)) {
+			return {};
+		}
+		result.sql += u" AND (order_key,observation_id)<(?,?)"_q;
+		result.binds.insert(result.binds.end(), { before.left(20), token });
+	}
+	result.sql += u" ORDER BY order_key DESC,observation_id DESC LIMIT 2"_q;
+	result.rows.maximum = 2;
+	return result;
+}
+
+ArchiveSqlStatement ArchiveSqlReadUnorderedObservation(const ArchiveMessageKey &key,
+		const QString &token, const ArchiveSqlSecurity &security) {
+	const auto message = ArchiveSqlMessageId(key, security);
+	if (message.isEmpty() || !IsArchiveHash(token)) {
+		return {};
+	}
+	auto result = ArchiveSqlStatement{ u"SELECT order_key,bytes,envelope FROM observations WHERE message_key=? "
+		"AND observation_id=? AND EXISTS(SELECT 1 FROM archive_meta WHERE maintenance_id='')"_q,
+		{ message, token }, ArchiveSqlExpectation::Rows };
+	result.rows.maximum = 1;
+	return result;
+}
+
+ArchiveSqlStatement ArchiveSqlReadUnorderedObservationChunks(const ArchiveMessageKey &key,
+		const QString &token, int64 bytes, const ArchiveSqlSecurity &security) {
+	const auto message = ArchiveSqlMessageId(key, security);
+	if (message.isEmpty() || !IsArchiveHash(token) || bytes <= 0 || bytes > kArchiveSqlBodyByteLimit) {
+		return {};
+	}
+	const auto count = (bytes + kArchiveMediaChunkBytes - 1) / kArchiveMediaChunkBytes;
+	auto result = ArchiveSqlStatement{ u"SELECT chunk_index,envelope FROM observation_chunks WHERE message_key=? "
+		"AND observation_id=? AND EXISTS(SELECT 1 FROM archive_meta WHERE maintenance_id='') ORDER BY chunk_index LIMIT ?"_q,
+		{ message, token, count + 1 }, ArchiveSqlExpectation::Rows };
+	result.rows = { count, count };
+	return result;
+}
+
+std::optional<ArchiveVersionSnapshot> RestoreArchiveSqlUnorderedObservation(const ArchiveMessageKey &key,
+		const QString &token, const QString &order, int64 size, const QByteArray &header,
+		const std::vector<QByteArray> &chunks, const ArchiveSqlSecurity &security) {
+	const auto message = ArchiveSqlMessageId(key, security);
+	if (message.isEmpty() || !IsArchiveHash(token) || size <= 0 || size > kArchiveSqlBodyByteLimit
+		|| chunks.size() != size_t((size + kArchiveMediaChunkBytes - 1) / kArchiveMediaChunkBytes)) {
+		return {};
+	}
+	const auto expected = OpenArchiveEnvelope(ObservationContext(key, message, token, security),
+		security.keyId, header, security.crypto);
+	if (!expected || expected.bytes.size() != 32) {
+		return {};
+	}
+	auto bytes = QByteArray();
+	for (auto i = size_t(0); i != chunks.size(); ++i) {
+		const auto chunk = OpenArchiveEnvelope(ObservationChunkContext(key, message, token, size, i, security),
+			security.keyId, chunks[i], security.crypto);
+		const auto expectedSize = ArchiveMediaChunkSize(size, i);
+		if (!chunk || !expectedSize || chunk.bytes.size() != *expectedSize) {
+			return {};
+		}
+		bytes += chunk.bytes;
+	}
+	if (QCryptographicHash::hash(bytes, QCryptographicHash::Sha256) != expected.bytes) {
+		return {};
+	}
+	const auto decoded = DecodeArchiveVersionSnapshot(bytes);
+	const auto &snapshot = decoded.snapshot;
+	if (!snapshot || snapshot->key != key || snapshot->version.origin != ArchiveOrigin::Baseline
+		|| ArchiveSqlOrder(snapshot->version.order) != order || ObservationToken(*snapshot, security) != token) {
+		return {};
+	}
+	return snapshot;
 }
 
 ArchiveSqlStatement ArchiveSqlReadChatEpoch(const AccountKey &account, const ArchiveChatKey &chat,
