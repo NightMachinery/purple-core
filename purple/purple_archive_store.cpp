@@ -75,6 +75,19 @@ ArchiveMissingSlots EventMissingSlots(const ArchiveEvent &event) {
 	return result;
 }
 
+bool IsExactMediaBaselineRepeat(const ArchiveVersion &head, const ArchiveEvent &event) {
+	if (event.origin != ArchiveOrigin::Baseline
+		|| head.completeness != ArchiveCompleteness::Complete
+		|| event.completeness != ArchiveCompleteness::Complete
+		|| head.source || event.source || !event.content
+		|| event.content->media.empty() || *event.content != head.content) {
+		return false;
+	}
+	auto observed = event.observation;
+	observed.observedAt = head.observation.observedAt;
+	return observed == head.observation;
+}
+
 QString EventFingerprint(const ArchiveEvent &event) {
 	auto aliases = QJsonArray();
 	for (const auto &alias : event.migrationAliases) {
@@ -571,8 +584,10 @@ ArchiveTransaction PlanArchiveEvent(const ArchiveState &state, const ArchiveEven
 				event.origin == ArchiveOrigin::AuthoritativeEdit));
 		} else if (SameArchiveContent(message->versions.back().content, *event.content)) {
 			auto &head = message->versions.back();
+			const auto repeat = IsExactMediaBaselineRepeat(head, event);
 			head.observation = event.observation;
-			if (event.origin == ArchiveOrigin::AuthoritativeEdit || event.order > message->order) {
+			if (!repeat && (event.origin == ArchiveOrigin::AuthoritativeEdit
+				|| event.order > message->order)) {
 				head.revision = event.id;
 				head.missing = EventMissingSlots(event);
 				if (head.completeness == ArchiveCompleteness::Complete

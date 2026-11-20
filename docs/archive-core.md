@@ -152,7 +152,10 @@ in the same second require distinct ids/orders.
   edits advance the order, causal revision and receipt without manufacturing a
   body version. A same-body baseline at a newer causal order also advances the
   revision conservatively, without asserting an edit. Either clears an earlier
-  source unless a source for the new causal revision is supplied.
+  source unless a source for the new causal revision is supplied. A complete
+  media baseline with identical captured data and no attached source preserves
+  the existing revision and staging. Its arrival time, order and receipt still
+  advance.
 - An event-id replay with the same semantic fingerprint is `NoChange` even
   if local observation time or transport metadata changed. Reusing its id for
   different semantic input is `Conflict`. Stale unique events are `Stale`;

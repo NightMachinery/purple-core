@@ -1121,6 +1121,45 @@ void TestCausalSourceAndHydrationBinding() {
 	CHECK(!ArchiveSourceMatches(Message(state).versions.back()));
 }
 
+void TestRepeatedMediaBaselineKeepsStagedJob() {
+	Section = "identical complete media observations preserve staging and event order";
+	auto state = Empty();
+	auto event = Event(state, u"media-baseline"_q, 1);
+	const auto identity = u"document:101"_q;
+	event.content->media.push_back({identity, u"document"_q});
+	CHECK(Apply(state, PlanArchiveEvent(state, event)));
+	const auto job = ArchiveMediaJob{u"media-job"_q, event.key, event.id,
+		identity, event.generation, 3};
+	CHECK(Apply(state, PlanArchiveMediaStage(state, job)));
+	const auto first = event.id;
+	event.id = u"media-repeat"_q;
+	event.order = 2;
+	++event.observation.observedAt;
+	const auto repeat = PlanArchiveEvent(state, event);
+	CHECK(repeat.releaseStagedJobs.empty());
+	CHECK(Apply(state, repeat));
+	CHECK(Message(state).versions.size() == 1);
+	CHECK(Message(state).versions[0].revision == first);
+	CHECK(Message(state).versions[0].observation.observedAt == event.observation.observedAt);
+	CHECK(Message(state).order == event.order);
+	CHECK(Message(state).receipts.back().id == event.id);
+	CHECK(PlanArchiveEvent(state, event).status == ArchivePlanStatus::NoChange);
+	CHECK(state.jobs[0].state == ArchiveJobState::Staged);
+	auto changed = event;
+	changed.id = u"media-refresh-with-metadata"_q;
+	changed.order = 3;
+	changed.observation.transport.insert(u"formatVersion"_q, 2);
+	const auto refresh = PlanArchiveEvent(state, changed);
+	CHECK(refresh.releaseStagedJobs == std::vector<QString>{job.id});
+	CHECK(refresh && Message(refresh.next).versions[0].revision == changed.id);
+	event.id = u"media-authoritative-edit"_q;
+	event.order = 3;
+	event.origin = ArchiveOrigin::AuthoritativeEdit;
+	CHECK(Apply(state, PlanArchiveEvent(state, event)));
+	CHECK(Message(state).versions[0].revision == event.id);
+	CHECK(state.jobs[0].state == ArchiveJobState::Cancelled);
+}
+
 void TestOpaqueContentIsRetained() {
 	Section = "opaque content retention";
 	auto state = Empty();
@@ -1237,5 +1276,6 @@ int main() {
 	TestChangedRefreshRetainsCapturedBodies();
 	TestSharedCaptureAndPurgeReferenceRepair();
 	TestCausalSourceAndHydrationBinding();
+	TestRepeatedMediaBaselineKeepsStagedJob();
 	return Finish();
 }
