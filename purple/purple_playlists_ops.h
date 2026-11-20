@@ -70,7 +70,7 @@ struct PlaylistUndoRecord {
 	bool hasOrderWrite = false;
 	std::optional<PlaylistOrderRegister> priorOrder;
 	std::map<uint64_t, std::optional<PlaylistSongRegister>> priorSongs;
-	std::optional<Playlist> expectedCopiedPlaylist;
+	std::optional<Playlist> expectedRegisters;
 
 	[[nodiscard]] bool hasUndo() const {
 		return kind != PlaylistUndoKind::None;

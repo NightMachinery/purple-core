@@ -514,6 +514,60 @@ void TestConcurrentUndoMerges() {
 	CHECK(!undoDelete.library.playlists.at(id).deleted->value);
 }
 
+void TestUndoConflictsWithNewerRegisterWrites() {
+	const auto created = CreatePlaylist({}, u"Conflicts"_q, MakeEntropy(0x5a), 100);
+	const auto id = created.playlistId;
+	const auto added = AddPlaylistSongs(created.library, id, {
+		MakeSongInput(1, SelfPeer(), 1),
+		MakeSongInput(2, SelfPeer(), 2),
+		MakeSongInput(3, SelfPeer(), 3),
+	}, 110);
+	CHECK(added);
+	const auto expectConflict = [&](
+			const PlaylistLibrary &latest,
+			const PlaylistUndoRecord &undo) {
+		const auto result = UndoPlaylistOperation(latest, undo, 170);
+		CHECK(result.error == PlaylistEditError::UndoConflict);
+		CHECK(!result.changed && result.library == latest);
+	};
+
+	const auto reordered = ReorderPlaylistSongs(added.library, id, { 2, 1, 3 }, 120);
+	const auto reorderedAgain = ReorderPlaylistSongs(reordered.library, id, { 3, 2, 1 }, 125);
+	CHECK(reordered && reorderedAgain);
+	expectConflict(reorderedAgain.library, reordered.undo);
+
+	auto equalStampOrder = reordered.library;
+	equalStampOrder.playlists.at(id).order->value = { 3, 1, 2 };
+	expectConflict(equalStampOrder, reordered.undo);
+	auto sameOrderNewerStamp = reordered.library;
+	++sameOrderNewerStamp.playlists.at(id).order->stamp;
+	expectConflict(sameOrderNewerStamp, reordered.undo);
+
+	const auto renamed = RenamePlaylist(added.library, id, u"First rename"_q, 120);
+	const auto renamedAgain = RenamePlaylist(renamed.library, id, u"Newer rename"_q, 125);
+	CHECK(renamed && renamedAgain);
+	expectConflict(renamedAgain.library, renamed.undo);
+
+	const auto deleted = DeletePlaylist(added.library, id, 120);
+	const auto restored = RestorePlaylist(deleted.library, id, 125);
+	CHECK(deleted && restored);
+	expectConflict(restored.library, deleted.undo);
+
+	const auto batch = AddPlaylistSongs(added.library, id, {
+		MakeSongInput(4, SelfPeer(), 4),
+		MakeSongInput(5, SelfPeer(), 5),
+	}, 120);
+	const auto removed = RemovePlaylistSongs(batch.library, id, { 4 }, 125);
+	CHECK(batch && removed);
+	expectConflict(removed.library, batch.undo);
+
+	const auto undone = UndoPlaylistOperation(reordered.library, reordered.undo, 130);
+	CHECK(undone);
+	const auto orderAfterUndo = ReorderPlaylistSongs(undone.library, id, { 1, 3, 2 }, 140);
+	CHECK(orderAfterUndo);
+	expectConflict(orderAfterUndo.library, undone.undo);
+}
+
 void TestPartialOrderUndoAndStaleReorder() {
 	const auto created = CreatePlaylist({}, u"Ordering"_q, MakeEntropy(0x46), 100);
 	const auto id = created.playlistId;
@@ -788,6 +842,7 @@ int main() {
 	TestLifecycleAndRefusals();
 	TestAddRelinkRemoveReorderAndUndo();
 	TestConcurrentUndoMerges();
+	TestUndoConflictsWithNewerRegisterWrites();
 	TestPartialOrderUndoAndStaleReorder();
 	TestStampMonotonicityAndSaturation();
 	TestDisplayOrderingAndGroupTwo();

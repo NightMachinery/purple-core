@@ -201,6 +201,26 @@ namespace {
 	return std::nullopt;
 }
 
+[[nodiscard]] Playlist RegistersWrittenByEdit(
+		const Playlist &playlist,
+		const PlaylistUndoRecord &undo) {
+	auto result = Playlist{
+		.title = undo.hasTitleWrite ? playlist.title : std::nullopt,
+		.deleted = undo.hasDeletedWrite ? playlist.deleted : std::nullopt,
+		.order = undo.hasOrderWrite ? playlist.order : std::nullopt,
+	};
+	if (!undo.priorSongs.empty() && playlist.songs) {
+		result.songs.emplace();
+		for (const auto &prior : undo.priorSongs) {
+			if (const auto current = playlist.songs->find(prior.first);
+				current != playlist.songs->end()) {
+				result.songs->insert(*current);
+			}
+		}
+	}
+	return result;
+}
+
 [[nodiscard]] PlaylistEditResult FinalizeEdit(
 		const PlaylistLibrary &original,
 		PlaylistLibrary candidate,
@@ -220,6 +240,11 @@ namespace {
 		if (!oldBytes || nextBytes.canonical.size() >= oldBytes.canonical.size()) {
 			return Refuse(original, PlaylistEditError::LibraryFull, playlistId);
 		}
+	}
+	if (undo.kind == PlaylistUndoKind::RegisterWrites) {
+		undo.expectedRegisters = NormalizePlaylistPeers(
+			RegistersWrittenByEdit(candidate.playlists.at(playlistId), undo),
+			selfUserId);
 	}
 	return {
 		PlaylistEditError::None,
@@ -446,7 +471,7 @@ PlaylistEditResult CopyPlaylist(
 	auto undo = PlaylistUndoRecord();
 	undo.kind = PlaylistUndoKind::Copy;
 	undo.playlistId = *id;
-	undo.expectedCopiedPlaylist = std::move(created);
+	undo.expectedRegisters = std::move(created);
 	return FinalizeEdit(
 		library,
 		std::move(next),
@@ -850,9 +875,9 @@ PlaylistEditResult UndoPlaylistOperation(
 		return FinalizeEdit(library, std::move(next), undo.playlistId, {}, selfUserId);
 	}
 	if (undo.kind == PlaylistUndoKind::Copy) {
-		if (!undo.expectedCopiedPlaylist
+		if (!undo.expectedRegisters
 			|| NormalizePlaylistPeers(current, selfUserId)
-				!= NormalizePlaylistPeers(*undo.expectedCopiedPlaylist, selfUserId)) {
+				!= NormalizePlaylistPeers(*undo.expectedRegisters, selfUserId)) {
 			return Refuse(library, PlaylistEditError::UndoConflict, undo.playlistId);
 		}
 		auto next = library;
@@ -872,6 +897,11 @@ PlaylistEditResult UndoPlaylistOperation(
 	// Refuse undoing non-delete edits onto a playlist deleted concurrently or on another device.
 	if (!undo.hasDeletedWrite && current.deleted->value) {
 		return Refuse(library, PlaylistEditError::PlaylistDeleted, undo.playlistId);
+	}
+	if (!undo.expectedRegisters
+		|| NormalizePlaylistPeers(RegistersWrittenByEdit(current, undo), selfUserId)
+			!= *undo.expectedRegisters) {
+		return Refuse(library, PlaylistEditError::UndoConflict, undo.playlistId);
 	}
 	const auto stamp = AllocateStamps(current, nowMs, 1);
 	if (!stamp) {
