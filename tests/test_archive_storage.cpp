@@ -269,9 +269,9 @@ void RowsAndPlans() {
 	CHECK(!InitializeArchiveSql(state, noMac));
 	CHECK(ArchiveSqlReadPage(ArchiveRecordKind::Message, 129).sql.isEmpty());
 	CHECK(CheckArchiveSqlVersion(0) == ArchiveSqlStatus::Invalid);
-	CHECK(CheckArchiveSqlVersion(1) == ArchiveSqlStatus::SchemaMismatch);
-	CHECK(CheckArchiveSqlVersion(2) == ArchiveSqlStatus::Ready);
-	CHECK(CheckArchiveSqlVersion(3) == ArchiveSqlStatus::ReadOnly);
+	CHECK(CheckArchiveSqlVersion(kArchiveSqlSchemaVersion - 1) == ArchiveSqlStatus::SchemaMismatch);
+	CHECK(CheckArchiveSqlVersion(kArchiveSqlSchemaVersion) == ArchiveSqlStatus::Ready);
+	CHECK(CheckArchiveSqlVersion(kArchiveSqlSchemaVersion + 1) == ArchiveSqlStatus::ReadOnly);
 	CHECK(CheckArchiveSqlVersion(int64(1) + (int64(1) << 32)) == ArchiveSqlStatus::ReadOnly);
 	auto event = Event(state, u"first"_q, 1);
 	event.content->preserved[u"futureBody"_q] = u"keep"_q;
@@ -792,14 +792,14 @@ void ReviewLifecycleFences() {
 	CHECK(PlanArchiveMediaCompletion(changed, u"copy-v1"_q, MediaSuccess()).mediaRefusal == ArchiveMediaRefusal::VersionMissing);
 	const auto fingerprint = ArchiveSqlExpectedSchemaFingerprint();
 	const auto schema = ArchiveSqlSchema();
-	CHECK(CheckArchiveSqlSchema(2, fingerprint, schema) == ArchiveSqlStatus::Ready);
+	CHECK(CheckArchiveSqlSchema(kArchiveSqlSchemaVersion, fingerprint, schema) == ArchiveSqlStatus::Ready);
 	CHECK(CheckArchiveSqlSchema(1, fingerprint, schema) == ArchiveSqlStatus::SchemaMismatch);
-	CHECK(CheckArchiveSqlSchema(2, u"wrong"_q, schema) == ArchiveSqlStatus::SchemaMismatch);
+	CHECK(CheckArchiveSqlSchema(kArchiveSqlSchemaVersion, u"wrong"_q, schema) == ArchiveSqlStatus::SchemaMismatch);
 	auto drift = schema;
 	drift[0] += u" "_q;
-	CHECK(CheckArchiveSqlSchema(2, fingerprint, drift) == ArchiveSqlStatus::Ready);
+	CHECK(CheckArchiveSqlSchema(kArchiveSqlSchemaVersion, fingerprint, drift) == ArchiveSqlStatus::Ready);
 	drift[0].replace(u"schema_fingerprint TEXT"_q, u"draft_drift TEXT"_q);
-	CHECK(CheckArchiveSqlSchema(2, fingerprint, drift) == ArchiveSqlStatus::SchemaMismatch);
+	CHECK(CheckArchiveSqlSchema(kArchiveSqlSchemaVersion, fingerprint, drift) == ArchiveSqlStatus::SchemaMismatch);
 }
 
 int main() {
